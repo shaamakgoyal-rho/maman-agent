@@ -19,11 +19,15 @@ import type { Sql } from "postgres";
 import { createAuthenticator, requirePrincipal, type Authenticator } from "./auth.js";
 import { authorize } from "./authorization.js";
 import { adminAudit, adminOverview } from "./admin.js";
+import { registerConnectorRoutes } from "./connectors.js";
+import type { TokenTransport } from "@maman/connector-auth";
 
 export type ServerDeps = {
   env: ServerEnv;
   sql?: Sql | undefined;
   authenticator?: Authenticator;
+  /** Injectable OAuth token transport (tests supply a mock provider). */
+  connectorTransport?: TokenTransport;
 };
 
 declare module "fastify" {
@@ -192,6 +196,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
     if (!deps.sql) return [];
     return adminAudit(deps.sql, principal.organization_id, 100);
+  });
+
+  registerConnectorRoutes(app, {
+    env,
+    sql: deps.sql,
+    ...(deps.connectorTransport ? { transport: deps.connectorTransport } : {}),
   });
 
   // There is deliberately NO endpoint returning another member's raw events,

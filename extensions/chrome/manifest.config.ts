@@ -10,10 +10,10 @@ import { defineManifest } from "@crxjs/vite-plugin";
  */
 export const manifestDefinition = {
   manifest_version: 3,
-  name: "Maman Observer",
+  name: "Maman Browser Relay",
   version: "0.1.0",
   description:
-    "Semantic observation for sites you allow. No keystrokes, no field values, no screenshots.",
+    "Accessory to the Maman desktop app: page understanding on sites you enable. No keystrokes, no field values, no screenshots.",
   minimum_chrome_version: "116",
   permissions: ["storage", "nativeMessaging", "scripting", "activeTab"],
   optional_host_permissions: ["https://*/*"],
@@ -23,7 +23,7 @@ export const manifestDefinition = {
   },
   action: {
     default_popup: "src/popup/index.html",
-    default_title: "Maman Observer",
+    default_title: "Maman Browser Relay",
   },
   icons: {
     "128": "icons/icon-128.png",

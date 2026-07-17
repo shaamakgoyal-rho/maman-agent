@@ -326,3 +326,148 @@ export async function getLatestPolicyVersion(sql: Sql, ctx: TenantContext) {
     return rows[0] ?? null;
   });
 }
+
+// ---------- connector accounts (envelope-encrypted tokens) ----------
+
+export type NewConnectorAccount = typeof schema.connector_accounts.$inferInsert;
+
+/** Public connector view — NEVER includes ciphertext or data keys. */
+export type ConnectorStatusView = {
+  id: string;
+  provider: string;
+  display_label: string;
+  scopes: string[];
+  status: "connected" | "degraded" | "revoked";
+  expires_at: string | null;
+  last_verified_at: string | null;
+};
+
+function toStatusView(row: typeof schema.connector_accounts.$inferSelect): ConnectorStatusView {
+  return {
+    id: row.id,
+    provider: row.provider,
+    display_label: row.display_label,
+    scopes: row.scopes,
+    status: row.status,
+    expires_at: row.expires_at,
+    last_verified_at: row.last_verified_at,
+  };
+}
+
+export async function upsertConnectorAccount(
+  sql: Sql,
+  ctx: TenantContext,
+  account: NewConnectorAccount,
+): Promise<ConnectorStatusView> {
+  return withTenant(sql, ctx, async (tx) => {
+    const [row] = await tx<Array<typeof schema.connector_accounts.$inferSelect>>`
+      INSERT INTO connector_accounts (
+        id, organization_id, owner_user_id, provider, external_account_id_hash,
+        display_label, scopes, status, encrypted_token_ciphertext, encrypted_data_key,
+        token_key_version, expires_at, last_verified_at, created_at, updated_at
+      ) VALUES (
+        ${account.id}, ${ctx.organizationId}, ${account.owner_user_id ?? null},
+        ${account.provider}, ${account.external_account_id_hash}, ${account.display_label},
+        ${account.scopes as string[]}, ${account.status},
+        ${account.encrypted_token_ciphertext as Buffer}, ${account.encrypted_data_key as Buffer},
+        ${account.token_key_version}, ${account.expires_at ?? null},
+        ${account.last_verified_at ?? null}, now(), now()
+      )
+      ON CONFLICT (organization_id, provider, external_account_id_hash)
+      DO UPDATE SET
+        display_label = EXCLUDED.display_label,
+        scopes = EXCLUDED.scopes,
+        status = EXCLUDED.status,
+        encrypted_token_ciphertext = EXCLUDED.encrypted_token_ciphertext,
+        encrypted_data_key = EXCLUDED.encrypted_data_key,
+        token_key_version = EXCLUDED.token_key_version,
+        expires_at = EXCLUDED.expires_at,
+        last_verified_at = EXCLUDED.last_verified_at,
+        updated_at = now()
+      RETURNING *
+    `;
+    return toStatusView(row!);
+  });
+}
+
+export async function listConnectorAccounts(
+  sql: Sql,
+  ctx: TenantContext,
+): Promise<ConnectorStatusView[]> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.connector_accounts)
+      .where(eq(schema.connector_accounts.organization_id, ctx.organizationId));
+    return rows.map(toStatusView);
+  });
+}
+
+/** Loads the encrypted token material for server-side use ONLY (worker/API). */
+export async function getConnectorSecret(
+  sql: Sql,
+  ctx: TenantContext,
+  provider: string,
+): Promise<{
+  ciphertext: Buffer;
+  encrypted_data_key: Buffer;
+  key_version: number;
+  status: string;
+} | null> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<
+      Array<{
+        encrypted_token_ciphertext: Buffer;
+        encrypted_data_key: Buffer;
+        token_key_version: number;
+        status: string;
+      }>
+    >`
+      SELECT encrypted_token_ciphertext, encrypted_data_key, token_key_version, status
+      FROM connector_accounts
+      WHERE organization_id = ${ctx.organizationId} AND provider = ${provider}
+      ORDER BY updated_at DESC LIMIT 1
+    `;
+    if (rows.length === 0) return null;
+    return {
+      ciphertext: rows[0]!.encrypted_token_ciphertext,
+      encrypted_data_key: rows[0]!.encrypted_data_key,
+      key_version: rows[0]!.token_key_version,
+      status: rows[0]!.status,
+    };
+  });
+}
+
+/**
+ * Disconnects a connector and PAUSES dependent agents in one transaction:
+ * any active/supervised agent whose current version references a capability of
+ * this provider is moved to 'paused'. Returns the paused agent count.
+ */
+export async function disconnectConnector(
+  sql: Sql,
+  ctx: TenantContext,
+  provider: string,
+): Promise<{ disconnected: boolean; paused_agents: number }> {
+  return withTenant(sql, ctx, async (tx) => {
+    const revoked = await tx`
+      UPDATE connector_accounts SET status = 'revoked', updated_at = now()
+      WHERE organization_id = ${ctx.organizationId} AND provider = ${provider}
+      RETURNING id
+    `;
+    if (revoked.length === 0) return { disconnected: false, paused_agents: 0 };
+
+    // Pause dependent agents: those whose spec JSON references the provider.
+    const paused = await tx`
+      UPDATE agents SET state = 'paused', updated_at = now()
+      WHERE organization_id = ${ctx.organizationId}
+        AND state IN ('active', 'supervised')
+        AND id IN (
+          SELECT av.agent_id FROM agent_versions av
+          WHERE av.organization_id = ${ctx.organizationId}
+            AND av.spec::text LIKE ${"%" + provider + ".%"}
+        )
+      RETURNING id
+    `;
+    return { disconnected: true, paused_agents: paused.length };
+  });
+}

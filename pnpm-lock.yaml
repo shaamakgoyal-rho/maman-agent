@@ -35,6 +35,9 @@ importers:
       '@maman/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@maman/connector-auth':
+        specifier: workspace:*
+        version: link:../../packages/connector-auth
       '@maman/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

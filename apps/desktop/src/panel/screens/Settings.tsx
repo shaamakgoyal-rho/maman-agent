@@ -8,6 +8,29 @@ export function Settings() {
   const { settings, update } = useSettings();
   const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+
+  const connect = async (provider: string) => {
+    setConnectError(null);
+    try {
+      // The desktop asks the API for an authorization URL, then opens it in the
+      // SYSTEM browser (never an embedded webview). Tokens never return here.
+      const res = await fetch(`http://localhost:4000/v1/connectors/${provider}/authorize`, {
+        method: "POST",
+        headers: { "x-dev-role": "member" },
+      });
+      if (!res.ok) throw new Error(`connector broker unavailable (${res.status})`);
+      const body = (await res.json()) as { authorization_url?: string };
+      if (body.authorization_url) {
+        // Opens in the system browser — never an embedded login webview.
+        window.open(body.authorization_url, "_blank", "noopener");
+      }
+    } catch (e) {
+      setConnectError(
+        e instanceof Error ? e.message : "Could not start connection. Is the API running?",
+      );
+    }
+  };
 
   const beginPairing = async () => {
     setPairingError(null);
@@ -104,11 +127,11 @@ export function Settings() {
       </Card>
 
       <Card>
-        <SectionTitle>Browser extension</SectionTitle>
+        <SectionTitle>Maman Browser Relay</SectionTitle>
         <Muted>
-          Pair the Maman Observer Chrome extension for semantic browser observation on sites you
-          allow. Install it, then generate a one-time token (valid five minutes) and paste it into
-          the extension popup.
+          The Browser Relay is an accessory to the desktop app: it adds page-level understanding on
+          sites you enable, one at a time. Maman works fully without it. Install it, then generate a
+          one-time token (valid five minutes) and paste it into the Relay popup.
         </Muted>
         <div className="mt-2 space-y-2">
           <Button variant="secondary" onClick={() => void beginPairing()}>
@@ -126,8 +149,34 @@ export function Settings() {
       <Card>
         <SectionTitle>Connectors</SectionTitle>
         <Muted>
-          Salesforce, Google Sheets, Gmail drafts, and Calendar drafts connect here once the
-          connector milestone lands. Everything works in demo mode until then.
+          Connect a tool to let Maman use its API — the safest, most reliable way to run a step.
+          Authentication opens in your system browser; tokens are stored encrypted on the server and
+          never touch this app. First use is always read-only or shadow mode.
+        </Muted>
+        <ul className="mt-2 space-y-1.5">
+          {[
+            ["Salesforce", "salesforce"],
+            ["Google Sheets", "google_sheets"],
+            ["Gmail (drafts only)", "gmail"],
+            ["Google Calendar", "google_calendar"],
+            ["Slack", "slack"],
+            ["HubSpot", "hubspot"],
+          ].map(([label, provider]) => (
+            <li key={provider} className="flex items-center justify-between text-sm">
+              <span>{label}</span>
+              <Button
+                variant="secondary"
+                onClick={() => void connect(provider!)}
+                ariaLabel={`Connect ${label}`}
+              >
+                Connect
+              </Button>
+            </li>
+          ))}
+        </ul>
+        {connectError && <p className="mt-2 text-xs text-danger">{connectError}</p>}
+        <Muted>
+          Demo mode uses in-process fixtures — real OAuth activates when credentials are set.
         </Muted>
       </Card>
 
