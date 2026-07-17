@@ -1,0 +1,53 @@
+{
+  "name": "maman-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Maman — a desktop pet that notices repetitive work and builds safe helpers for you.",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "demo": "bash scripts/demo.sh",
+    "demo:reset": "bash scripts/demo-reset.sh",
+    "infra:up": "docker compose up -d --wait",
+    "infra:down": "docker compose down",
+    "db:migrate": "pnpm --filter @maman/db migrate",
+    "db:rollback": "pnpm --filter @maman/db rollback",
+    "db:seed": "pnpm --filter @maman/db seed",
+    "db:reset-demo": "pnpm --filter @maman/db reset-demo",
+    "lint": "turbo run lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:unit": "turbo run test:unit",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "turbo run test:e2e",
+    "test:security": "turbo run test:security",
+    "test:accessibility": "turbo run test:accessibility",
+    "test:coverage": "turbo run test:coverage",
+    "test:rust": "bash scripts/test-rust.sh",
+    "test:swift": "bash scripts/test-swift.sh",
+    "build": "turbo run build",
+    "build:desktop": "pnpm --filter @maman/desktop tauri build",
+    "build:extension": "pnpm --filter @maman/chrome-extension build",
+    "openapi:generate": "pnpm --filter @maman/api openapi:generate",
+    "openapi:check": "pnpm --filter @maman/api openapi:check",
+    "schemas:generate": "pnpm --filter @maman/contracts schemas:generate",
+    "schemas:check": "pnpm --filter @maman/contracts schemas:check",
+    "audit:dependencies": "pnpm audit --audit-level high",
+    "audit:licenses": "bash scripts/audit-licenses.sh",
+    "audit:secrets": "bash scripts/audit-secrets.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2"
+  }
+}

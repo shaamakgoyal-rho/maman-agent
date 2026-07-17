@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# environment — never commit real secrets
+.env
+.env.*.local
+.env.local
+
+# build outputs
+dist/
+build/
+.next/
+out/
+.turbo/
+target/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+
+# tauri / rust
+apps/desktop/src-tauri/gen/
+
+# swift
+.build/
+DerivedData/
+
+# local data
+*.sqlite
+*.sqlite-journal
+*.db
+
+# os / editor
+.DS_Store
+*.pem
+*.p12
+*.mobileprovision
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# logs
+*.log
+pnpm-debug.log*

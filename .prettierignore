@@ -1,0 +1,14 @@
+node_modules
+dist
+build
+.next
+.turbo
+coverage
+target
+pnpm-lock.yaml
+docs/api/openapi.json
+packages/contracts/schemas
+apps/desktop/src-tauri/gen
+playwright-report
+test-results
+.build

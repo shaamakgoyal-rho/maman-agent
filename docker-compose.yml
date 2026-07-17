@@ -1,0 +1,92 @@
+name: maman-agent
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: maman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-maman_local_dev}
+      POSTGRES_DB: maman
+    ports:
+      - "5432:5432"
+    volumes:
+      - maman_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maman -d maman"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: maman
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-maman_local_dev}
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 20s
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8233:8080"
+
+  # MinIO is used only for generated exports and test fixtures.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: maman
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-maman_local_dev}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - maman_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  maman_postgres_data:
+  maman_minio_data:

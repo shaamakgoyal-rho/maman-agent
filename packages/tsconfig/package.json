@@ -1,0 +1,14 @@
+{
+  "name": "@maman/tsconfig",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "base.json",
+    "react.json"
+  ],
+  "scripts": {
+    "lint": "true",
+    "typecheck": "true",
+    "test": "true"
+  }
+}
