@@ -1,0 +1,38 @@
+{
+  "name": "@maman/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "migrate": "tsx scripts/migrate.ts up",
+    "rollback": "tsx scripts/migrate.ts down",
+    "seed": "tsx scripts/seed.ts",
+    "reset-demo": "tsx scripts/reset-demo.ts"
+  },
+  "dependencies": {
+    "@maman/config": "workspace:*",
+    "@maman/contracts": "workspace:*",
+    "drizzle-orm": "^0.38.3",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@maman/tsconfig": "workspace:*",
+    "@testcontainers/postgresql": "^10.16.0",
+    "@types/node": "^24",
+    "@vitest/coverage-v8": "^2.1.8",
+    "dotenv": "^16.4.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

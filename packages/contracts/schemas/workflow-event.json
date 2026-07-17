@@ -1,0 +1,177 @@
+{
+  "$ref": "#/definitions/WorkflowEvent",
+  "definitions": {
+    "WorkflowEvent": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "device_id": {
+          "$ref": "#/definitions/WorkflowEvent/properties/event_id"
+        },
+        "user_id": {
+          "$ref": "#/definitions/WorkflowEvent/properties/event_id"
+        },
+        "organization_id": {
+          "$ref": "#/definitions/WorkflowEvent/properties/event_id"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "monotonic_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "macos_ax",
+            "chrome",
+            "salesforce",
+            "google",
+            "demo"
+          ]
+        },
+        "app": {
+          "type": "object",
+          "properties": {
+            "bundle_id": {
+              "type": "string"
+            },
+            "domain": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "display_name"
+          ],
+          "additionalProperties": false
+        },
+        "event_type": {
+          "type": "string",
+          "enum": [
+            "app_activated",
+            "window_focused",
+            "element_focused",
+            "element_activated",
+            "value_committed",
+            "navigation",
+            "record_opened",
+            "record_updated",
+            "table_read",
+            "table_exported",
+            "copy_semantic",
+            "paste_semantic",
+            "boundary_redacted",
+            "idle_started",
+            "idle_ended"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "role": {
+              "type": "string"
+            },
+            "semantic_type": {
+              "type": "string"
+            },
+            "stable_id_hash": {
+              "type": "string"
+            },
+            "label_hash": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "page_type": {
+              "type": "string"
+            },
+            "object_type": {
+              "type": "string"
+            },
+            "record_id_hash": {
+              "type": "string"
+            },
+            "field_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "item_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        },
+        "redaction": {
+          "type": "object",
+          "properties": {
+            "applied": {
+              "type": "boolean"
+            },
+            "reasons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "applied",
+            "reasons"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "device_id",
+        "user_id",
+        "organization_id",
+        "occurred_at",
+        "monotonic_ms",
+        "source",
+        "app",
+        "event_type",
+        "target",
+        "context",
+        "sensitivity",
+        "redaction"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

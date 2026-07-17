@@ -1,0 +1,72 @@
+{
+  "$ref": "#/definitions/WorkflowEpisode",
+  "definitions": {
+    "WorkflowEpisode": {
+      "type": "object",
+      "properties": {
+        "episode_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "ended_at": {
+          "$ref": "#/definitions/WorkflowEpisode/properties/started_at"
+        },
+        "active_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorkflowEpisode/properties/episode_id"
+          }
+        },
+        "canonical_tokens": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "apps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outcome_token": {
+          "type": "string"
+        },
+        "sensitivity_max": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        },
+        "excluded_from_learning": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "episode_id",
+        "started_at",
+        "ended_at",
+        "active_duration_ms",
+        "event_ids",
+        "canonical_tokens",
+        "apps",
+        "sensitivity_max",
+        "excluded_from_learning"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

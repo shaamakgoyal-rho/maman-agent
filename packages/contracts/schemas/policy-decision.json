@@ -1,0 +1,80 @@
+{
+  "$ref": "#/definitions/PolicyDecision",
+  "definitions": {
+    "PolicyDecision": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "require_approval",
+            "deny"
+          ]
+        },
+        "policy_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rule_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "rule_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "max_records": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_cost_usd": {
+              "type": "number",
+              "minimum": 0
+            },
+            "expires_at": {
+              "$ref": "#/definitions/PolicyDecision/properties/evaluated_at",
+              "description": "ISO 8601 UTC timestamp"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "decision",
+        "policy_version_id",
+        "evaluated_at",
+        "reasons",
+        "limits"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

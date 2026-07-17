@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS approvals;
+DROP TABLE IF EXISTS run_steps;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS agent_versions;
+DROP TABLE IF EXISTS agents;
+DROP FUNCTION IF EXISTS forbid_mutation();

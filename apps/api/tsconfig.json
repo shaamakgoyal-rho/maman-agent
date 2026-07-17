@@ -1,0 +1,4 @@
+{
+  "extends": "@maman/tsconfig/base.json",
+  "include": ["src", "test", "scripts"]
+}

@@ -1,0 +1,83 @@
+{
+  "$ref": "#/definitions/AuditEvent",
+  "definitions": {
+    "AuditEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "organization_id": {
+          "$ref": "#/definitions/AuditEvent/properties/id"
+        },
+        "actor_type": {
+          "type": "string",
+          "enum": [
+            "user",
+            "device",
+            "service",
+            "system"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "success",
+            "denied",
+            "failure"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "organization_id",
+        "actor_type",
+        "actor_id",
+        "action",
+        "resource_type",
+        "outcome",
+        "metadata",
+        "occurred_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

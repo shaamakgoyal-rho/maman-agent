@@ -1,0 +1,112 @@
+{
+  "$ref": "#/definitions/PatternFeatureEvent",
+  "definitions": {
+    "PatternFeatureEvent": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "monotonic_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "macos_ax",
+            "chrome",
+            "salesforce",
+            "google",
+            "demo"
+          ]
+        },
+        "app_category": {
+          "type": "string",
+          "enum": [
+            "crm",
+            "spreadsheet",
+            "email",
+            "calendar",
+            "research",
+            "browser",
+            "other"
+          ]
+        },
+        "event_type": {
+          "type": "string",
+          "enum": [
+            "app_activated",
+            "window_focused",
+            "element_focused",
+            "element_activated",
+            "value_committed",
+            "navigation",
+            "record_opened",
+            "record_updated",
+            "table_read",
+            "table_exported",
+            "copy_semantic",
+            "paste_semantic",
+            "boundary_redacted",
+            "idle_started",
+            "idle_ended"
+          ]
+        },
+        "target_role": {
+          "type": "string"
+        },
+        "semantic_type": {
+          "type": "string"
+        },
+        "object_type": {
+          "type": "string"
+        },
+        "item_count_bucket": {
+          "type": "string",
+          "enum": [
+            "1",
+            "2_10",
+            "11_50",
+            "51_200",
+            "201_plus"
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        },
+        "excluded_from_learning": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "monotonic_ms",
+        "source",
+        "app_category",
+        "event_type",
+        "sensitivity",
+        "excluded_from_learning"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

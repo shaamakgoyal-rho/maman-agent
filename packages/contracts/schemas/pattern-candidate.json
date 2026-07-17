@@ -1,0 +1,105 @@
+{
+  "$ref": "#/definitions/PatternCandidate",
+  "definitions": {
+    "PatternCandidate": {
+      "type": "object",
+      "properties": {
+        "pattern_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "owner_user_id": {
+          "$ref": "#/definitions/PatternCandidate/properties/pattern_id"
+        },
+        "first_seen_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp"
+        },
+        "last_seen_at": {
+          "$ref": "#/definitions/PatternCandidate/properties/first_seen_at"
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "distinct_day_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "median_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p90_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "canonical_sequence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "episode_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PatternCandidate/properties/pattern_id"
+          }
+        },
+        "similarity_mean": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "repeatability_score": {
+          "$ref": "#/definitions/PatternCandidate/properties/similarity_mean"
+        },
+        "feasibility_score": {
+          "$ref": "#/definitions/PatternCandidate/properties/similarity_mean"
+        },
+        "risk_score": {
+          "$ref": "#/definitions/PatternCandidate/properties/similarity_mean"
+        },
+        "projected_minutes_saved_weekly": {
+          "type": "number",
+          "minimum": 0
+        },
+        "opportunity_score": {
+          "$ref": "#/definitions/PatternCandidate/properties/similarity_mean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "candidate",
+            "eligible",
+            "suggested",
+            "dismissed",
+            "converted"
+          ]
+        }
+      },
+      "required": [
+        "pattern_id",
+        "owner_user_id",
+        "first_seen_at",
+        "last_seen_at",
+        "occurrence_count",
+        "distinct_day_count",
+        "median_duration_ms",
+        "p90_duration_ms",
+        "canonical_sequence",
+        "episode_ids",
+        "similarity_mean",
+        "repeatability_score",
+        "feasibility_score",
+        "risk_score",
+        "projected_minutes_saved_weekly",
+        "opportunity_score",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,39 @@
+{
+  "name": "@maman/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "build": "tsup src/main.ts --format esm --target node24 --out-dir dist --clean",
+    "openapi:generate": "tsx scripts/generate-openapi.ts",
+    "openapi:check": "tsx scripts/generate-openapi.ts --check"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^9.4.0",
+    "@maman/config": "workspace:*",
+    "@maman/contracts": "workspace:*",
+    "@maman/db": "workspace:*",
+    "fastify": "^5.2.0",
+    "fastify-type-provider-zod": "^4.0.2",
+    "pino": "^9.5.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@maman/tsconfig": "workspace:*",
+    "@testcontainers/postgresql": "^10.16.0",
+    "@types/node": "^24",
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "$ref": "#/definitions/PatternSyncSummary",
+  "definitions": {
+    "PatternSyncSummary": {
+      "type": "object",
+      "properties": {
+        "local_pattern_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "generalized_intent": {
+          "type": "string"
+        },
+        "app_categories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "crm",
+              "spreadsheet",
+              "email",
+              "calendar",
+              "research",
+              "browser",
+              "other"
+            ]
+          }
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "distinct_day_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "median_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "similarity_mean": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "projected_minutes_saved_weekly": {
+          "type": "number",
+          "minimum": 0
+        },
+        "opportunity_score": {
+          "$ref": "#/definitions/PatternSyncSummary/properties/similarity_mean"
+        },
+        "risk_score": {
+          "$ref": "#/definitions/PatternSyncSummary/properties/similarity_mean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "candidate",
+            "eligible",
+            "suggested",
+            "dismissed",
+            "converted"
+          ]
+        }
+      },
+      "required": [
+        "local_pattern_id",
+        "generalized_intent",
+        "app_categories",
+        "occurrence_count",
+        "distinct_day_count",
+        "median_duration_ms",
+        "similarity_mean",
+        "projected_minutes_saved_weekly",
+        "opportunity_score",
+        "risk_score",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
