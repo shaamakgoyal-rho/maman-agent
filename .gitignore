@@ -43,3 +43,4 @@ DerivedData/
 # logs
 *.log
 pnpm-debug.log*
+.gstack/

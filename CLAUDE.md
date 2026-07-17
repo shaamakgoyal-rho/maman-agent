@@ -35,6 +35,22 @@ Package boundaries (lint-enforced — packages must not import from apps):
 - `packages/model-provider` — Anthropic + deterministic demo implementations
 - `packages/config` — product identity, design tokens, env validation
 
+## Pet rendering (Seedy-parity addendum — binding)
+
+- Production pet renderer is the pixel-art `SpritesheetPetRenderer`
+  (`apps/desktop/src/pet/SpriteMaman.tsx`), spriteVersionNumber 2.
+- Atlas: `apps/desktop/src/pet/assets/maman-atlas.webp` — 1536×2288, 8×11 grid of
+  192×208 cells, lossless WebP, generated ONLY by
+  `apps/desktop/scripts/generate-spritesheet.ts` (original artwork; never import,
+  trace, or recolor any external mascot's spritesheet).
+- Animation rows/timings are locked in `apps/desktop/src/pet/atlas.ts`. No CSS
+  keyframes for sprite animation — the deterministic `FrameScheduler` owns timing.
+- Idle plays at 6× slow timing; transients play 3 cycles then slow idle; state
+  changes cancel timers; reduced motion shows a single frame.
+- 16-direction gaze (rows 9–10, 22.5° quantization, 18px dead zone) activates only
+  on hover/interaction — never continuous cursor tracking.
+- Dev inspection: `lab.html` (Pet Lab) with the full demo sequence.
+
 ## Conventions
 
 - Node >= 24, pnpm workspaces, Turborepo. Internal packages export TypeScript source

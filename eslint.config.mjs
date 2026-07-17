@@ -62,4 +62,17 @@ export default tseslint.config(
       "no-console": "off",
     },
   },
+  {
+    // Node scripts use Node globals.
+    files: ["scripts/**", "**/scripts/**", "**/*.mjs"],
+    languageOptions: {
+      globals: {
+        Buffer: "readonly",
+        process: "readonly",
+        console: "readonly",
+        __dirname: "readonly",
+        URL: "readonly",
+      },
+    },
+  },
 );

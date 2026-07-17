@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* Locked v1 design tokens (packages/config/src/tokens.ts is the source of truth). */
+@theme {
+  --color-bg: #faf8f4;
+  --color-panel: #ffffff;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-success: #0f9f8f;
+  --color-warning: #d97706;
+  --color-danger: #dc5a5a;
+  --color-ink: #20242a;
+  --color-muted: #667085;
+  --color-line: #e7e2da;
+  --color-focus: #7c83ff;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
+
+  --radius-panel: 12px;
+}
+
+html {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-bg);
+}
+
+/* Quiet, restrained surfaces: 12px corners, 1px borders, soft shadows. */
+.card {
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-panel);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* Pixel-art pet sprite: nearest-neighbor, never smoothed or blurred. */
+.maman-sprite {
+  width: 96px;
+  height: 104px;
+  background-repeat: no-repeat;
+  background-size: 800% 1100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  transform-origin: bottom center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

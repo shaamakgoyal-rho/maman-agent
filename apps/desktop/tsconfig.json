@@ -1,0 +1,4 @@
+{
+  "extends": "@maman/tsconfig/react.json",
+  "include": ["src", "test", "vite.config.ts"]
+}

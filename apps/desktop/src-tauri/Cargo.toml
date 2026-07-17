@@ -1,0 +1,25 @@
+[package]
+name = "maman-desktop"
+version = "0.1.0"
+description = "Maman — a desktop pet that notices repetitive work and builds safe helpers for you."
+edition = "2021"
+license = "UNLICENSED"
+
+[lib]
+name = "maman_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+strip = true
