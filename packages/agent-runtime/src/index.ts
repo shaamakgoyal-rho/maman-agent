@@ -38,3 +38,15 @@ export {
   type ShadowComparison,
   type PromotionReadiness,
 } from "./shadow.js";
+export {
+  demoAdapterRegistry,
+  DemoSalesforceWorld,
+  diffSha256,
+  TransientAdapterError,
+  PermanentAdapterError,
+  type CapabilityAdapter,
+  type CapabilityContext,
+  type ProposedDiff,
+  type AdapterFaults,
+} from "./adapters.js";
+export { executeStep, resolveStepInputs, type StepExecution, type RunState } from "./run-engine.js";

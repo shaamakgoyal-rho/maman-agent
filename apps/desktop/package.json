@@ -35,7 +35,8 @@
     "@maman/agent-runtime": "workspace:*",
     "@maman/policy-engine": "workspace:*",
     "@maman/model-provider": "workspace:*",
-    "@maman/capability-catalog": "workspace:*"
+    "@maman/capability-catalog": "workspace:*",
+    "@maman/roi-engine": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",

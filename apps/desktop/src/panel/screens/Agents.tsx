@@ -1,6 +1,31 @@
 import { useEffect, useState } from "react";
+import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
+import { useRuns } from "../../lib/runs.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
+
+/** Minimal candidate for the reconciliation recipe (keys off intent). */
+function candidateFor(agent: AgentRecord): PatternCandidate {
+  return {
+    pattern_id: agent.versions[0]!.spec.source_pattern_id,
+    owner_user_id: agent.versions[0]!.spec.owner_user_id,
+    first_seen_at: agent.created_at,
+    last_seen_at: agent.created_at,
+    occurrence_count: 6,
+    distinct_day_count: 3,
+    median_duration_ms: 660_000,
+    p90_duration_ms: 780_000,
+    canonical_sequence: [],
+    episode_ids: [],
+    similarity_mean: 0.9,
+    repeatability_score: 0.9,
+    feasibility_score: 0.8,
+    risk_score: 0.3,
+    projected_minutes_saved_weekly: 70,
+    opportunity_score: 0.72,
+    status: "eligible",
+  };
+}
 
 /** Agents: state, plain-language plan, immutable versions, budgets, controls. */
 
@@ -117,9 +142,6 @@ export function Agents() {
               >
                 {isOpen ? "Hide plan" : "Inspect plan"}
               </Button>
-              <Button variant="secondary" disabled>
-                Run shadow (next milestone)
-              </Button>
               <Button
                 variant="ghost"
                 onClick={() => {
@@ -134,9 +156,115 @@ export function Agents() {
                 Archive
               </Button>
             </div>
+
+            <RunPanel agent={agent} />
           </Card>
         );
       })}
     </div>
   );
 }
+
+function RunPanel({ agent }: { agent: AgentRecord }) {
+  const runs = useRuns();
+  const diff = runs.diff;
+
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      {runs.phase === "idle" && (
+        <div className="flex gap-2">
+          <Button onClick={() => void runs.startShadow(candidateFor(agent))}>Run shadow</Button>
+          <Button
+            variant="secondary"
+            onClick={() => void runs.startSupervised(candidateFor(agent))}
+          >
+            Run supervised
+          </Button>
+        </div>
+      )}
+
+      {["running_read", "preparing_diff", "applying_write", "verifying"].includes(runs.phase) && (
+        <Muted>
+          {runs.phase === "running_read" && "Reading source data…"}
+          {runs.phase === "preparing_diff" && "Preparing a proposed diff…"}
+          {runs.phase === "applying_write" && "Applying the approved change…"}
+          {runs.phase === "verifying" && "Verifying with an independent read…"}
+        </Muted>
+      )}
+
+      {diff &&
+        (runs.phase === "waiting_approval" ||
+          runs.phase === "completed" ||
+          runs.phase === "completed_with_warnings") && (
+          <div className="mt-1">
+            <p className="text-xs font-medium text-ink">
+              Proposed diff — {diff.summary.confident_matches} confident,{" "}
+              {diff.summary.ambiguous_skipped} ambiguous skipped, {diff.summary.missing} missing
+            </p>
+            <ul className="mt-1 space-y-0.5 text-xs text-muted">
+              {diff.changes.map((c, i) => (
+                <li key={i}>
+                  <span className="font-medium">{c.account_name}</span> · {c.field}:{" "}
+                  <span className="line-through">{c.old_value}</span> → {c.new_value}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+      {runs.phase === "waiting_approval" && runs.pending && diff && (
+        <div className="mt-2 card border-warning/40 bg-warning/5 p-2">
+          <p className="text-xs font-medium">Approval required before any write</p>
+          <p className="text-[11px] text-muted break-all">
+            diff hash {runs.pending.diff_sha256.slice(0, 16)}… · {diff.summary.change_count} changes
+            across {diff.summary.accounts_affected} accounts · destination Salesforce
+          </p>
+          <div className="mt-2 flex gap-2">
+            <Button onClick={() => void runs.approve()}>Approve &amp; write once</Button>
+            <Button variant="secondary" onClick={() => void runs.reject()}>
+              Reject
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {runs.receiptSummary && (
+        <div className="mt-2 card p-2">
+          <p className="text-xs font-medium text-ink">{runs.receiptSummary}</p>
+          {runs.receipt && (
+            <p className="text-[11px] text-muted">
+              ROI {runs.receipt.roi.savings_provenance} · verification{" "}
+              {runs.receipt.steps.some((s) => s.verification === "independent_read_passed")
+                ? "passed"
+                : runs.mode === "shadow"
+                  ? "n/a (shadow)"
+                  : "—"}
+            </p>
+          )}
+          <Button variant="ghost" onClick={() => runs.reset()}>
+            Done
+          </Button>
+        </div>
+      )}
+
+      {runs.phase === "cancelled" && (
+        <div className="mt-2">
+          <Muted>Run cancelled — nothing was written.</Muted>
+          <Button variant="ghost" onClick={() => runs.reset()}>
+            Done
+          </Button>
+        </div>
+      )}
+      {runs.phase === "failed" && (
+        <div className="mt-2">
+          <p className="text-xs text-danger">Run stopped safely: {runs.error}</p>
+          <Button variant="ghost" onClick={() => runs.reset()}>
+            Done
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+void uuidv7;

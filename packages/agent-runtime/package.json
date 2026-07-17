@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./workflow": "./src/workflow.ts"
   },
   "scripts": {
     "lint": "eslint .",
@@ -16,12 +17,18 @@
   "dependencies": {
     "@maman/capability-catalog": "workspace:*",
     "@maman/contracts": "workspace:*",
+    "@maman/demo-fixtures": "workspace:*",
     "@maman/model-provider": "workspace:*",
     "@maman/policy-engine": "workspace:*",
+    "@temporalio/workflow": "^1.11.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",
+    "@temporalio/activity": "^1.11.5",
+    "@temporalio/client": "^1.11.5",
+    "@temporalio/testing": "^1.11.5",
+    "@temporalio/worker": "^1.11.5",
     "@vitest/coverage-v8": "^2.1.8",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -33,7 +33,7 @@ function mkStep(overrides: Partial<AgentStep> = {}): AgentStep {
   };
 }
 
-function mkSpec(steps: AgentStep[], overrides: Partial<AgentSpec> = {}): AgentSpec {
+function mkSpec(steps: AgentStep[], _overrides: Partial<AgentSpec> = {}): AgentSpec {
   return {
     schema_version: 1,
     agent_id: uuidv7(),
