@@ -4,6 +4,10 @@
 //! Commands validate their inputs, and window-sensitive commands check the
 //! calling window's label (the pet window may never reach privileged surfaces).
 
+pub mod observer;
+pub mod redaction;
+pub mod store;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -12,12 +16,114 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, PhysicalPosition, Runtime, WebviewWindow};
+use tauri::{AppHandle, Manager, PhysicalPosition, Runtime, WebviewWindow, Window};
+use tokio::sync::Mutex;
+
+use store::{KeychainKeyProvider, LocalStore, TimelineEntry};
 
 const EDGE_SNAP_PX: i32 = 16;
 const EDGE_SNAP_THRESHOLD_PX: i32 = 40;
 const SETTINGS_FILE: &str = "settings.json";
 const POSITIONS_FILE: &str = "pet-positions.json";
+const KEYCHAIN_SERVICE: &str = "com.maman.desktop.keys";
+const KEYCHAIN_ACCOUNT: &str = "local-store-key";
+
+/// Managed state: the encrypted local store (initialized on first use).
+pub struct StoreState(pub Mutex<Option<LocalStore>>);
+
+/// Lazily initializes and returns the store guard. Callers keep the guard for
+/// the duration of their operation (the mutex serializes store access).
+async fn store_guard<'a, R: Runtime>(
+    app: &AppHandle<R>,
+    state: &'a StoreState,
+) -> Result<tokio::sync::MutexGuard<'a, Option<LocalStore>>, String> {
+    let mut guard = state.0.lock().await;
+    if guard.is_none() {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("data dir unavailable: {e}"))?;
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let provider = KeychainKeyProvider {
+            service: KEYCHAIN_SERVICE.to_string(),
+            account: KEYCHAIN_ACCOUNT.to_string(),
+        };
+        let store = LocalStore::open(&dir.join("maman-local.sqlite"), &provider, "local-user")
+            .await
+            .map_err(|e| format!("store open failed: {e}"))?;
+        *guard = Some(store);
+    }
+    Ok(guard)
+}
+
+/// Settings snapshot the gating logic needs (parsed from the settings JSON).
+#[derive(Default)]
+struct GateSettings {
+    observation_paused: bool,
+    private_apps: Vec<String>,
+    allowlist_domains: Vec<String>,
+}
+
+fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
+    let Ok(path) = config_path(app, SETTINGS_FILE) else {
+        return GateSettings { observation_paused: true, ..Default::default() };
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return GateSettings { observation_paused: true, ..Default::default() };
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return GateSettings { observation_paused: true, ..Default::default() };
+    };
+    GateSettings {
+        observation_paused: json
+            .get("observation_paused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        private_apps: json
+            .get("private_apps")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        allowlist_domains: json
+            .get("allowlist_domains")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Central ingest gate (spec §10): decides whether an event may be persisted.
+/// Returns Ok(None) to persist, Ok(Some(reason)) to drop/boundary, Err on abuse.
+fn gate_event(settings: &GateSettings, event: &serde_json::Value) -> Result<Option<String>, String> {
+    if settings.observation_paused {
+        return Ok(Some("observation_paused".into()));
+    }
+    let display = event
+        .pointer("/app/display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = event.pointer("/app/domain").and_then(|v| v.as_str());
+    let identity = format!("{display} {}", domain.unwrap_or(""));
+    if redaction::is_hard_denied(&identity) {
+        return Ok(Some("hard_denied".into()));
+    }
+    if redaction::is_user_denied(&identity, &settings.private_apps) {
+        return Ok(Some("user_private".into()));
+    }
+    // Allowlist: browser events require an allowlisted domain. Demo source is
+    // exempt only when it carries an allowlisted or generic fixture domain.
+    if let Some(d) = domain {
+        let allowed = settings
+            .allowlist_domains
+            .iter()
+            .any(|a| d == a || d.ends_with(&format!(".{a}")) || a.ends_with(d) || d.contains(a));
+        let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        if !allowed && source == "chrome" {
+            return Ok(Some("not_allowlisted".into()));
+        }
+    }
+    Ok(None)
+}
 
 fn config_path<R: Runtime>(app: &AppHandle<R>, file: &str) -> Result<PathBuf, String> {
     let dir = app
@@ -207,6 +313,213 @@ fn quit_app<R: Runtime>(app: AppHandle<R>) {
     app.exit(0);
 }
 
+// ---------- local encrypted event store commands ----------
+// Privileged store commands are PANEL-ONLY: the pet window is rejected by
+// window-label check (trust boundary; see capabilities/*.json for the rest).
+
+fn require_panel<R: Runtime>(window: &Window<R>) -> Result<(), String> {
+    if window.label() != "panel" {
+        return Err("store commands are panel-only".into());
+    }
+    Ok(())
+}
+
+/// Ingests a batch of WorkflowEvents through the full gate → redact → encrypt
+/// pipeline. Returns per-batch counts. Used by the demo observer today and the
+/// real observer bridge at M4.
+#[derive(Serialize)]
+pub struct IngestResult {
+    pub stored: u32,
+    pub dropped_paused: u32,
+    pub dropped_denied: u32,
+    pub dropped_not_allowlisted: u32,
+    pub boundary_events: u32,
+    pub rejected_forbidden: u32,
+}
+
+#[tauri::command]
+async fn events_ingest<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    events_json: String,
+) -> Result<IngestResult, String> {
+    require_panel(&window)?;
+    if events_json.len() > 8 * 1024 * 1024 {
+        return Err("batch too large".into());
+    }
+    let events: Vec<serde_json::Value> =
+        serde_json::from_str(&events_json).map_err(|e| format!("invalid batch JSON: {e}"))?;
+    let settings = load_gate_settings(&app);
+    let guard = store_guard(&app, &state).await?;
+    let store = guard.as_ref().expect("initialized");
+
+    let mut result = IngestResult {
+        stored: 0,
+        dropped_paused: 0,
+        dropped_denied: 0,
+        dropped_not_allowlisted: 0,
+        boundary_events: 0,
+        rejected_forbidden: 0,
+    };
+
+    let mut denied_boundary_emitted = false;
+    for event in &events {
+        match gate_event(&settings, event)? {
+            None => match store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await {
+                Ok(_) => result.stored += 1,
+                Err(store::StoreError::ForbiddenField(_)) => result.rejected_forbidden += 1,
+                Err(e) => return Err(e.to_string()),
+            },
+            Some(reason) => match reason.as_str() {
+                "observation_paused" => result.dropped_paused += 1,
+                "not_allowlisted" => result.dropped_not_allowlisted += 1,
+                _ => {
+                    result.dropped_denied += 1;
+                    // Denied context: at most ONE boundary_redacted event, with
+                    // no application identity.
+                    if !denied_boundary_emitted {
+                        denied_boundary_emitted = true;
+                        let boundary = serde_json::json!({
+                            "schema_version": 1,
+                            "event_id": event.get("event_id").cloned().unwrap_or_default(),
+                            "device_id": event.get("device_id").cloned().unwrap_or_default(),
+                            "user_id": event.get("user_id").cloned().unwrap_or_default(),
+                            "organization_id": event.get("organization_id").cloned().unwrap_or_default(),
+                            "occurred_at": event.get("occurred_at").cloned().unwrap_or_default(),
+                            "monotonic_ms": event.get("monotonic_ms").cloned().unwrap_or_default(),
+                            "source": event.get("source").cloned().unwrap_or_default(),
+                            "app": { "display_name": "Private" },
+                            "event_type": "boundary_redacted",
+                            "target": {},
+                            "context": {},
+                            "sensitivity": "restricted",
+                            "redaction": { "applied": true, "reasons": [reason] }
+                        });
+                        if store
+                            .insert_event(&boundary, store::EVENT_RETENTION_DAYS_DEFAULT)
+                            .await
+                            .is_ok()
+                        {
+                            result.boundary_events += 1;
+                        }
+                    }
+                }
+            },
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn events_timeline<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<TimelineEntry>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .timeline(limit.clamp(1, 500), offset.max(0))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn events_delete<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    event_id: String,
+) -> Result<bool, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .delete_event(&event_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn events_delete_all<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+) -> Result<u64, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .delete_all_events()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn events_delete_app<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    display_name: String,
+) -> Result<u64, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .delete_app_history(&display_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn events_set_excluded<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    event_id: String,
+    excluded: bool,
+) -> Result<bool, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .set_excluded_from_learning(&event_id, excluded)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Explicit “Delete this device's data”: removes the database and Keychain key.
+#[tauri::command]
+async fn device_data_wipe<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    confirm: String,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    if confirm != "delete-device-data" {
+        return Err("confirmation phrase mismatch".into());
+    }
+    let mut guard = state.0.lock().await;
+    if let Some(store) = guard.take() {
+        store.close().await;
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = fs::remove_file(dir.join("maman-local.sqlite"));
+    }
+    store::delete_keychain_key(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+    Ok(())
+}
+
 // ---------- entry ----------
 
 pub fn run() {
@@ -214,12 +527,20 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(StoreState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             settings_load,
             settings_save,
             toggle_panel,
             hide_panel,
-            quit_app
+            quit_app,
+            events_ingest,
+            events_timeline,
+            events_delete,
+            events_delete_all,
+            events_delete_app,
+            events_set_excluded,
+            device_data_wipe
         ])
         .setup(|app| {
             restore_pet_position(&app.handle().clone());
@@ -267,6 +588,71 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Maman");
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::{gate_event, GateSettings};
+    use serde_json::json;
+
+    fn settings() -> GateSettings {
+        GateSettings {
+            observation_paused: false,
+            private_apps: vec!["figma".into()],
+            allowlist_domains: vec!["salesforce.com".into(), "docs.google.com".into()],
+        }
+    }
+
+    fn event(display: &str, domain: Option<&str>, source: &str) -> serde_json::Value {
+        json!({
+            "source": source,
+            "app": { "display_name": display, "domain": domain },
+            "event_type": "record_opened"
+        })
+    }
+
+    #[test]
+    fn paused_observation_drops_everything() {
+        let mut s = settings();
+        s.observation_paused = true;
+        let verdict = gate_event(&s, &event("Salesforce", Some("salesforce.com"), "chrome")).unwrap();
+        assert_eq!(verdict, Some("observation_paused".into()));
+    }
+
+    #[test]
+    fn hard_denied_contexts_become_boundaries() {
+        let verdict = gate_event(&settings(), &event("1Password 8", None, "macos_ax")).unwrap();
+        assert_eq!(verdict, Some("hard_denied".into()));
+        let verdict = gate_event(&settings(), &event("Chrome", Some("www.chase.com"), "chrome")).unwrap();
+        assert_eq!(verdict, Some("hard_denied".into()));
+    }
+
+    #[test]
+    fn user_private_apps_become_boundaries() {
+        let verdict = gate_event(&settings(), &event("Figma", None, "macos_ax")).unwrap();
+        assert_eq!(verdict, Some("user_private".into()));
+    }
+
+    #[test]
+    fn non_allowlisted_browser_domains_are_dropped() {
+        let verdict =
+            gate_event(&settings(), &event("Chrome", Some("random-site.example"), "chrome")).unwrap();
+        assert_eq!(verdict, Some("not_allowlisted".into()));
+    }
+
+    #[test]
+    fn allowlisted_events_pass() {
+        assert_eq!(
+            gate_event(&settings(), &event("Salesforce", Some("acme.my.salesforce.com"), "chrome"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            gate_event(&settings(), &event("Google Sheets", Some("docs.google.com"), "chrome"))
+                .unwrap(),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

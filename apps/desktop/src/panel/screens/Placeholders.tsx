@@ -1,6 +1,6 @@
 import { EmptyState } from "../ui.js";
 
-/** Real data flows arrive with their milestones (M3 activity, M5 suggestions, M6/M7 agents). */
+/** Real data flows arrive with their milestones (M5 suggestions, M6/M7 agents). */
 
 export function Suggestions() {
   return (
@@ -32,15 +32,6 @@ export function Agents() {
     <EmptyState
       title="No agents yet"
       body="When you accept a suggestion, its draft agent lives here with plain-language steps, versions, permissions, budgets, run history, and verified ROI. Drafts never activate silently."
-    />
-  );
-}
-
-export function Activity() {
-  return (
-    <EmptyState
-      title="Nothing recorded yet"
-      body="Once observation is on, 'What Maman saw' shows a human-readable local timeline here — and you can delete any event, episode, app history, or everything."
     />
   );
 }
