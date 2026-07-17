@@ -430,6 +430,47 @@ async fn events_timeline<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// Pattern-engine projection (spec: the webview may receive this projection
+/// but never bulk decrypted WorkflowEvent payloads).
+#[tauri::command]
+async fn events_pattern_features<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .pattern_features(limit.clamp(1, 10_000))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Suggestion-state persistence (statuses, snoozes, suppressions, budget).
+#[tauri::command]
+fn suggestions_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    let path = config_path(&app, "suggestions.json")?;
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+
+#[tauri::command]
+fn suggestions_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&json).map_err(|e| format!("invalid JSON: {e}"))?;
+    if json.len() > 256 * 1024 {
+        return Err("payload too large".into());
+    }
+    let path = config_path(&app, "suggestions.json")?;
+    fs::write(&path, json).map_err(|e| format!("write failed: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn events_delete<R: Runtime>(
     app: AppHandle<R>,
@@ -720,6 +761,9 @@ pub fn run() {
             quit_app,
             events_ingest,
             events_timeline,
+            events_pattern_features,
+            suggestions_load,
+            suggestions_save,
             events_delete,
             events_delete_all,
             events_delete_app,

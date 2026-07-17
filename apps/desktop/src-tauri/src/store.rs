@@ -404,6 +404,74 @@ impl LocalStore {
         Ok(entries)
     }
 
+    /// PatternFeatureEvent projection for the pattern engine (spec §9):
+    /// excludes bundle ids, domains, record hashes, field names, labels, and
+    /// encrypted payloads. This is the ONLY bulk read the webview may perform.
+    pub async fn pattern_features(&self, limit: i64) -> Result<Vec<serde_json::Value>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT event_id, occurred_at, source, app_category, event_type, sensitivity,
+                    encrypted_payload, excluded_from_learning, quarantined
+             FROM workflow_events
+             ORDER BY occurred_at ASC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut features = Vec::with_capacity(rows.len());
+        for row in rows {
+            let quarantined: i64 = row.get("quarantined");
+            if quarantined != 0 {
+                continue;
+            }
+            let event_id: String = row.get("event_id");
+            let blob: Vec<u8> = row.get("encrypted_payload");
+            let aad = self.aad("workflow_events", &event_id, 1);
+            let Some(payload) = self
+                .decrypt(&blob, &aad)
+                .ok()
+                .and_then(|pt| serde_json::from_slice::<serde_json::Value>(&pt).ok())
+            else {
+                continue;
+            };
+            let item_count = payload.pointer("/context/item_count").and_then(|v| v.as_i64());
+            let bucket = item_count.map(|n| match n {
+                i64::MIN..=1 => "1",
+                2..=10 => "2_10",
+                11..=50 => "11_50",
+                51..=200 => "51_200",
+                _ => "201_plus",
+            });
+            let mut feature = serde_json::json!({
+                "event_id": event_id,
+                "occurred_at": row.get::<String, _>("occurred_at"),
+                "monotonic_ms": payload.get("monotonic_ms").and_then(|v| v.as_i64()).unwrap_or(0),
+                "source": row.get::<String, _>("source"),
+                "app_category": row.get::<String, _>("app_category"),
+                "event_type": row.get::<String, _>("event_type"),
+                "sensitivity": row.get::<String, _>("sensitivity"),
+                "excluded_from_learning": row.get::<i64, _>("excluded_from_learning") != 0,
+            });
+            if let Some(role) = payload.pointer("/target/role").and_then(|v| v.as_str()) {
+                feature["target_role"] = serde_json::json!(role);
+            }
+            if let Some(sem) = payload.pointer("/target/semantic_type").and_then(|v| v.as_str()) {
+                feature["semantic_type"] = serde_json::json!(sem);
+            }
+            if let Some(obj) = payload.pointer("/context/object_type").and_then(|v| v.as_str()) {
+                feature["object_type"] = serde_json::json!(obj);
+            }
+            if let Some(d) = payload.get("duration_ms").and_then(|v| v.as_i64()) {
+                feature["duration_ms"] = serde_json::json!(d);
+            }
+            if let Some(b) = bucket {
+                feature["item_count_bucket"] = serde_json::json!(b);
+            }
+            features.push(feature);
+        }
+        Ok(features)
+    }
+
     pub async fn count_events(&self) -> Result<i64, StoreError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM workflow_events")
             .fetch_one(&self.pool)

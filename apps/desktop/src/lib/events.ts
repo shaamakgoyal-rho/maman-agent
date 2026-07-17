@@ -33,6 +33,12 @@ export type IngestResult = {
 // ---- web preview fallback (in-memory) ----
 
 const memory: TimelineEntry[] = [];
+const memoryRaw: WorkflowEvent[] = [];
+
+/** Raw events for the web-preview pattern projection (Tauri path uses Rust). */
+export function getMemoryRawEvents(): WorkflowEvent[] {
+  return memoryRaw;
+}
 
 function toEntry(e: WorkflowEvent): TimelineEntry {
   return {
@@ -74,6 +80,7 @@ export async function ingestEvents(
     };
   }
   memory.unshift(...events.map(toEntry));
+  memoryRaw.push(...events);
   return {
     stored: events.length,
     dropped_paused: 0,

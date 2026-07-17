@@ -7,7 +7,8 @@ import { Home } from "./screens/Home.js";
 import { Privacy } from "./screens/Privacy.js";
 import { Settings } from "./screens/Settings.js";
 import { Activity } from "./screens/Activity.js";
-import { Agents, Suggestions } from "./screens/Placeholders.js";
+import { Suggestions } from "./screens/Suggestions.js";
+import { Agents } from "./screens/Placeholders.js";
 
 const TABS = ["Home", "Suggestions", "Agents", "Activity", "Privacy", "Settings"] as const;
 type Tab = (typeof TABS)[number];
