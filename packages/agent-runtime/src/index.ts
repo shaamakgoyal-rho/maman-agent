@@ -21,3 +21,20 @@ export {
   type CompileRequest,
   type CompileResult,
 } from "./compiler.js";
+export {
+  evaluateMeshTransition,
+  meshToAgentState,
+  type MeshState,
+  type MeshTransitionRequest,
+  type MeshTransitionResult,
+} from "./mesh-lifecycle.js";
+export {
+  compareShadowRun,
+  promotionReadiness,
+  proposedChangeSchema,
+  DEFAULT_REQUIRED_COMPARISONS,
+  SUCCESS_AGREEMENT_THRESHOLD,
+  type ProposedChange,
+  type ShadowComparison,
+  type PromotionReadiness,
+} from "./shadow.js";

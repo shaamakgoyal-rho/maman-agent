@@ -8,3 +8,4 @@ export * from "./run.js";
 export * from "./auth.js";
 export * from "./audit.js";
 export * from "./observer-protocol.js";
+export * from "./receipt.js";

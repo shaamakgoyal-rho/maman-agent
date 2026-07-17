@@ -449,6 +449,15 @@ async fn events_pattern_features<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// Whether the Browser Relay has completed pairing (a shared secret exists).
+/// Exposes ONLY a boolean — never key material.
+#[tauri::command]
+fn browser_relay_paired() -> bool {
+    keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
+        .and_then(|e| e.get_password())
+        .is_ok()
+}
+
 /// Local agent persistence (drafts + immutable versions; demo/local mode).
 #[tauri::command]
 fn agents_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
@@ -788,6 +797,7 @@ pub fn run() {
             suggestions_save,
             agents_load,
             agents_save,
+            browser_relay_paired,
             events_delete,
             events_delete_all,
             events_delete_app,

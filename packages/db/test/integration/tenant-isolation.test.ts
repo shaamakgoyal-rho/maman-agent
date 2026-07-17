@@ -179,6 +179,13 @@ describe("cross-tenant denial at the database (RLS), even with raw SQL", () => {
     "roi_measurements",
     "audit_events",
     "audit_chain_heads",
+    "capability_availability",
+    "workflow_object_refs",
+    "execution_routes",
+    "shadow_comparisons",
+    "execution_receipts",
+    "permission_audit_events",
+    "connector_scopes",
   ]) {
     it(`${table}: unfiltered SELECT under org B returns zero org A rows`, async () => {
       const rows = await rawProbe(table);

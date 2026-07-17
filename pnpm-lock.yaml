@@ -275,6 +275,25 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
 
+  packages/capability-router:
+    dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@maman/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0))
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
+
   packages/config:
     dependencies:
       zod:
@@ -284,6 +303,28 @@ importers:
       '@maman/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
+
+  packages/connector-auth:
+    dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@maman/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/node':
+        specifier: ^24
+        version: 24.13.3
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0))
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -460,6 +501,31 @@ importers:
         version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
 
   packages/tsconfig: {}
+
+  packages/workflow-graph:
+    dependencies:
+      '@maman/capability-catalog':
+        specifier: workspace:*
+        version: link:../capability-catalog
+      '@maman/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@maman/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0))
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
 
 packages:
 

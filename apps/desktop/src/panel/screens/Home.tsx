@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { reconciliationFixture } from "@maman/demo-fixtures";
+import { capabilitySnapshot, type CapabilityLine } from "../../lib/capabilities.js";
 import { useSettings, pauseUntil } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
 import { PET_STATE_DESCRIPTIONS } from "../../pet/renderer.js";
@@ -12,6 +13,11 @@ export function Home({ petState }: { petState: PetStateName }) {
   const paused = settings.observation_paused;
   const [demoResult, setDemoResult] = useState<IngestResult | null>(null);
   const [demoBusy, setDemoBusy] = useState(false);
+  const [capabilities, setCapabilities] = useState<CapabilityLine[]>([]);
+
+  useEffect(() => {
+    void capabilitySnapshot(settings).then(setCapabilities);
+  }, [settings]);
 
   const runDemoWorkflow = async () => {
     setDemoBusy(true);
@@ -73,6 +79,18 @@ export function Home({ petState }: { petState: PetStateName }) {
             </>
           )}
         </div>
+      </Card>
+
+      <Card>
+        <SectionTitle>Maman can currently use</SectionTitle>
+        <ul className="space-y-1.5">
+          {capabilities.map((line) => (
+            <li key={line.label} className="flex items-start justify-between gap-2 text-sm">
+              <span className="shrink-0 font-medium">{line.label}</span>
+              <span className="text-right text-xs text-muted">{line.detail}</span>
+            </li>
+          ))}
+        </ul>
       </Card>
 
       <Card>
