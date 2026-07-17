@@ -31,7 +31,11 @@
     "xstate": "^5.19.1",
     "zod": "^3.24.1",
     "zustand": "^5.0.2",
-    "@maman/pattern-engine": "workspace:*"
+    "@maman/pattern-engine": "workspace:*",
+    "@maman/agent-runtime": "workspace:*",
+    "@maman/policy-engine": "workspace:*",
+    "@maman/model-provider": "workspace:*",
+    "@maman/capability-catalog": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",

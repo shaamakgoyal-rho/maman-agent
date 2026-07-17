@@ -84,6 +84,12 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@maman/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
+      '@maman/capability-catalog':
+        specifier: workspace:*
+        version: link:../../packages/capability-catalog
       '@maman/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -93,9 +99,15 @@ importers:
       '@maman/demo-fixtures':
         specifier: workspace:*
         version: link:../../packages/demo-fixtures
+      '@maman/model-provider':
+        specifier: workspace:*
+        version: link:../../packages/model-provider
       '@maman/pattern-engine':
         specifier: workspace:*
         version: link:../../packages/pattern-engine
+      '@maman/policy-engine':
+        specifier: workspace:*
+        version: link:../../packages/policy-engine
       '@radix-ui/react-checkbox':
         specifier: ^1.1.3
         version: 1.3.7(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -206,6 +218,37 @@ importers:
       vite:
         specifier: ^6.0.7
         version: 6.4.3(@types/node@24.13.3)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.1)(yaml@2.9.0)
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
+
+  packages/agent-runtime:
+    dependencies:
+      '@maman/capability-catalog':
+        specifier: workspace:*
+        version: link:../capability-catalog
+      '@maman/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@maman/model-provider':
+        specifier: workspace:*
+        version: link:../model-provider
+      '@maman/policy-engine':
+        specifier: workspace:*
+        version: link:../policy-engine
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@maman/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0))
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
@@ -378,6 +421,31 @@ importers:
       '@maman/demo-fixtures':
         specifier: workspace:*
         version: link:../demo-fixtures
+      '@maman/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0))
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)(lightningcss@1.32.0)
+
+  packages/policy-engine:
+    dependencies:
+      '@maman/capability-catalog':
+        specifier: workspace:*
+        version: link:../capability-catalog
+      '@maman/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
       '@maman/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig

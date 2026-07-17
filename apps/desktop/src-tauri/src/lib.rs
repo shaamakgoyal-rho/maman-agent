@@ -449,6 +449,28 @@ async fn events_pattern_features<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// Local agent persistence (drafts + immutable versions; demo/local mode).
+#[tauri::command]
+fn agents_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    let path = config_path(&app, "agents.json")?;
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+
+#[tauri::command]
+fn agents_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&json).map_err(|e| format!("invalid JSON: {e}"))?;
+    if json.len() > 4 * 1024 * 1024 {
+        return Err("payload too large".into());
+    }
+    let path = config_path(&app, "agents.json")?;
+    fs::write(&path, json).map_err(|e| format!("write failed: {e}"))?;
+    Ok(())
+}
+
 /// Suggestion-state persistence (statuses, snoozes, suppressions, budget).
 #[tauri::command]
 fn suggestions_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
@@ -764,6 +786,8 @@ pub fn run() {
             events_pattern_features,
             suggestions_load,
             suggestions_save,
+            agents_load,
+            agents_save,
             events_delete,
             events_delete_all,
             events_delete_app,

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { emitAppEvent } from "../../lib/bridge.js";
+import { useAgents } from "../../lib/agents.js";
 import { useRecommendations, type RecommendationWithState } from "../../lib/recommendations.js";
 import type { SnoozeOption } from "../../lib/suggestion-policy.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
@@ -152,8 +153,14 @@ function SuggestionCard({
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button
             onClick={async () => {
-              await act(item.signature, { type: "accepted" });
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+              const created = await useAgents
+                .getState()
+                .createDraft(item.candidate, "reconcile_account_list", rec.summary);
+              await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
+              if (created.ok) {
+                await act(item.signature, { type: "accepted" });
+              }
             }}
           >
             Create agent
@@ -202,8 +209,8 @@ function SuggestionCard({
       )}
       {item.entry.status === "accepted" && (
         <p className="mt-3 text-xs text-success">
-          Accepted — the draft agent compiler arrives with the next milestone. Nothing runs or
-          changes until you approve a plan.
+          Draft agent created — inspect its full plan in the Agents tab. Nothing runs or changes
+          until you approve it there.
         </p>
       )}
     </Card>

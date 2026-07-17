@@ -1,4 +1,4 @@
-import type { PatternFeatureEvent, Recommendation } from "@maman/contracts";
+import type { PatternCandidate, PatternFeatureEvent, Recommendation } from "@maman/contracts";
 import { patternSignature, runPatternEngine, toPatternFeature } from "@maman/pattern-engine";
 import { create } from "zustand";
 import { z } from "zod";
@@ -63,6 +63,7 @@ export async function fetchPatternFeatures(): Promise<PatternFeatureEvent[]> {
 
 export type RecommendationWithState = {
   recommendation: Recommendation;
+  candidate: PatternCandidate;
   signature: string;
   entry: SuggestionEntry;
 };
@@ -133,7 +134,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
         (c: { pattern_id: string }) => c.pattern_id === recommendation.pattern_id,
       );
       const signature = patternSignature(candidate?.canonical_sequence ?? []);
-      if (seen.has(signature)) continue;
+      if (seen.has(signature) || !candidate) continue;
       seen.add(signature);
       const entry: SuggestionEntry =
         state.entries[signature] ??
@@ -144,7 +145,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           dismissed_at: null,
           false_positive: false,
         } satisfies SuggestionEntry);
-      items.push({ recommendation, signature, entry });
+      items.push({ recommendation, candidate, signature, entry });
     }
     // Keep dismissed/accepted history entries visible in their filters even
     // when the engine no longer produces them (data deleted, cooldown, …).
