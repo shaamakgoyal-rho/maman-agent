@@ -15,7 +15,7 @@ Evidence must be exact (commands run, test counts). No marketing language.
 | M7 Durable runs + demo capabilities      | complete | Temporal agentRunWorkflow (@maman/agent-runtime/workflow): signals (approve/reject/cancel), queries (status/pending-approval/cost/steps), approval bound to step+diff-hash, safe-retry reads (1s/5s/30s ×3) vs single-attempt writes, 24h approval timeout → safe cancel, shadow never writes; apps/worker activities against demo adapters + @maman/roi-engine receipts — 4/4 Temporal time-skipping integration tests (shadow=0 writes, supervised approve→write-once→verify, reject→cancel, expiry→cancel) + 4 activity unit tests; demo capability adapters (deterministic, fault injection: transient-retry/permanent-no-retry/rate-limit, idempotency ledger) with the exact §24 dataset (10 rows→7 confident/2 ambiguous/1 missing/4 changes across 3 accounts); pure run-engine 68 tests incl. diff-hash approval binding + idempotent single write; @maman/roi-engine (12 tests, measured/inferred/estimated provenance, cohort suppression ≥5, never infers a rate); desktop shadow+supervised run flow with blocking approval diff and receipt ("Updated 4 records. Saved approximately 10 minutes. Execution cost: $0.08. ROI measured · verification passed") verified end-to-end in preview |
 | M8 Real connectors                       | complete | connector-auth (OAuth PKCE, envelope vault, 14 tests) wired into API Connector Broker routes: GET /v1/connectors (providers incl. Salesforce/Sheets/Gmail-drafts/Calendar/Slack/HubSpot), authorize (S256 PKCE + signed state, system-browser URL), callback (state verified, code exchanged via injectable transport, token envelope-encrypted server-side), disconnect, test. DB repos upsert/list/getSecret/disconnectConnector. 7 Testcontainers tests prove: providers listed with no gmail.send scope, authorize returns PKCE URL, full lifecycle stores an encrypted token whose plaintext NEVER appears in any client response or the ciphertext column, health without token exposure, tampered state rejected (400), and disconnect revokes + pauses dependent agents (paused_agents=1). Desktop Settings connector list opens OAuth in the system browser (tokens never touch the app); extension renamed to Maman Browser Relay (accessory framing)                                                                                                                                                                                                                                           |
 | M9 ROI + admin                           | complete | @maman/roi-engine (built at M7; 12 tests, 100% stmts): baseline/verified-time/net-value with measured/inferred/estimated provenance, never infers an hourly rate, cohort suppression <5. apps/api admin aggregate endpoints computed inside tenant RLS transactions — 3 Testcontainers tests prove six-user aggregate matches the sum, four-user cohort suppressed, no cross-org leakage; roi/me self-scoped; NO endpoint exposes another member events/screens/ranking. apps/web Next.js 15 admin console (Overview/Agents/Policies/Budgets/Audit/Privacy) rendering live API aggregates — verified end-to-end (6/6 seats, 1.7 verified hours, $127.02 net value, cohort 6) with explicit no-screen-content/no-ranking banner; pnpm demo starts API+worker+web+prints URLs                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| M10 Hardening + handoff                  | pending  | —                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| M10 Hardening + handoff                  | complete | Security integration suite (cross-tenant reads return 404 never 403; kill switch pauses agents + halts runs for the caller org ONLY and writes a tamper-evident audit event; dev auth mode cannot be constructed under NODE_ENV=production) — 5 tests. Org-wide kill switch (POST /v1/admin/kill-switch, repo engageKillSwitch) + tenant-scoped GET /v1/agents/:id proving the 404 invariant. Production Dockerfiles for API/worker/web (multi-stage, non-root, healthcheck). Docs: RUNBOOK.md (processes, levers, incident table), RETENTION.md (device encryption, real deletion via tombstones, append-only server retention, cohort suppression), ADRs 0002 (deterministic policy / untrusted LLM), 0003 (shadow→supervised→autonomous, never by confidence), 0004 (server-side connector broker), 0007 (immutable receipts + ROI provenance). OpenAPI regenerated. FINAL VERIFICATION: 453 unit + 65 integration TS tests, 43 Rust, 20 Swift checks all pass; 0 lint errors; 19/19 packages typecheck; desktop bundle builds; every §31 non-negotiable has an enforcing test                                                                                                                         |
 
 ## Capability Mesh (in progress — supersedes/extends M7–M9 plans)
 
@@ -37,7 +37,39 @@ Evidence must be exact (commands run, test counts). No marketing language.
 - Suggestion budget and quiet-hour enforcement logic lands with the suggestion policy (M5); settings exist now.
 - Desktop settings persist to a JSON file until the encrypted SQLite store lands (M3).
 
-## Next milestone
+## Final verification (M0–M10 complete)
 
-M3: sidecar JSONL protocol, demo observer, local SQLite schema, Keychain key,
-encryption + redaction, retention/deletion, event timeline, sync outbox.
+All eleven milestones and the Capability Mesh are complete. Totals as of the M10
+gate:
+
+- **Tests**: 453 TypeScript unit tests + 65 integration tests (46 db, 15 api, 4
+  worker, all Testcontainers/Temporal) + 43 Rust + 20 Swift checks — all pass.
+- **Static**: 0 lint errors; 19/19 packages + apps typecheck under strict TS.
+- **Build**: every package builds; API/worker bundle via tsup; the Next.js admin
+  console builds; the desktop frontend builds and the Tauri debug bundle
+  (`Maman.app`) compiles.
+- **Demo**: `pnpm demo` brings up infrastructure, migrates, seeds (6 users +
+  verified ROI), and starts API + worker + admin console credential-free.
+
+### Non-negotiables — each has an enforcing test
+
+- No keystrokes/passwords/auth/payment/private-browsing capture — Swift observer
+  - Rust ingest-gate tests; extension has no such channel.
+- Never weaken authz/tenant-isolation/redaction/approval/audit to pass a test —
+  cross-tenant returns 404 (security suite); approvals bound to diff hash
+  (run-engine + worker); audit hash chain (db + security suite).
+- LLM output is untrusted — strict Zod + policy check, drafts never get write
+  steps (agent-runtime validator/compiler tests).
+- Raw pixels/typed input never leave the device; secrets never in
+  logs/analytics/prompts/AgentSpec — redaction + logger-redact + connector suite
+  (token never in any client response or ciphertext column).
+- Cross-tenant → 404 not 403; kill switch and connector-disconnect are strictly
+  tenant-scoped.
+- Gmail metadata + drafts only (no send/delete) in v1 — connector suite asserts
+  no `gmail.send` scope.
+
+This is a production-shaped v1, not "production ready": real deployment needs
+live WorkOS/connector credentials, code-signing/notarization for the desktop
+app, load and chaos testing, and a full Playwright journey suite (the security-
+and value-critical paths are covered by the integration and E2E-preview checks
+recorded above).

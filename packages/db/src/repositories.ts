@@ -4,6 +4,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OrganizationRole } from "@maman/contracts";
 import * as schema from "./schema.js";
 import { withTenant, type TenantContext } from "./tenant.js";
+import { appendAuditEventTx } from "./audit.js";
 
 /**
  * Tenant-scoped repositories. Every function REQUIRES TenantContext and runs
@@ -324,6 +325,64 @@ export async function getLatestPolicyVersion(sql: Sql, ctx: TenantContext) {
       .orderBy(desc(schema.policy_versions.version_number))
       .limit(1);
     return rows[0] ?? null;
+  });
+}
+
+/**
+ * Tenant-scoped agent lookup. Returns null when the agent does not exist OR
+ * belongs to another tenant — RLS makes those cases indistinguishable, so the
+ * caller returns 404 (never 403), never leaking cross-tenant existence.
+ */
+export async function getAgentById(sql: Sql, ctx: TenantContext, agentId: string) {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await db(tx)
+      .select()
+      .from(schema.agents)
+      .where(
+        and(eq(schema.agents.organization_id, ctx.organizationId), eq(schema.agents.id, agentId)),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  });
+}
+
+// ---------- kill switch (org-wide agent halt) ----------
+
+/**
+ * Global kill switch: pauses EVERY non-retired agent in the org and marks
+ * queued/running runs cancelled. Deterministic and idempotent; used by the
+ * "stop everything" control. Returns what it affected.
+ */
+export async function engageKillSwitch(
+  sql: Sql,
+  ctx: TenantContext,
+  actorUserId: string,
+): Promise<{ paused_agents: number; halted_runs: number }> {
+  return withTenant(sql, ctx, async (tx) => {
+    const paused = await tx`
+      UPDATE agents SET state = 'paused', updated_at = now()
+      WHERE organization_id = ${ctx.organizationId}
+        AND state IN ('observed', 'shadow', 'supervised', 'active')
+      RETURNING id
+    `;
+    const halted = await tx`
+      UPDATE agent_runs SET status = 'cancelled', completed_at = now()
+      WHERE organization_id = ${ctx.organizationId}
+        AND status IN ('queued', 'validating', 'running', 'waiting_approval')
+      RETURNING id
+    `;
+    await appendAuditEventTx(tx, {
+      organization_id: ctx.organizationId,
+      actor_type: "user",
+      actor_id: actorUserId,
+      action: "kill_switch.engage",
+      resource_type: "organization",
+      resource_id: ctx.organizationId,
+      outcome: "success",
+      reason_code: "operator_initiated",
+      metadata: { paused_agents: paused.length, halted_runs: halted.length },
+    });
+    return { paused_agents: paused.length, halted_runs: halted.length };
   });
 }
 

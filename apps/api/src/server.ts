@@ -18,7 +18,7 @@ import type { ServerEnv } from "@maman/config";
 import type { Sql } from "postgres";
 import { createAuthenticator, requirePrincipal, type Authenticator } from "./auth.js";
 import { authorize } from "./authorization.js";
-import { adminAudit, adminOverview } from "./admin.js";
+import { adminAudit, adminOverview, engageKillSwitch, getAgentById } from "./admin.js";
 import { registerConnectorRoutes } from "./connectors.js";
 import type { TokenTransport } from "@maman/connector-auth";
 
@@ -196,6 +196,48 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
     if (!deps.sql) return [];
     return adminAudit(deps.sql, principal.organization_id, 100);
+  });
+
+  app.get("/v1/agents/:id", { schema: { tags: ["agents"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "agents.read_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to read agents.");
+    }
+    if (!deps.sql) return reply.status(404).send({ status: 404 });
+    const agentId = (req.params as { id: string }).id;
+    const agent = await getAgentById(
+      deps.sql,
+      { organizationId: principal.organization_id },
+      agentId,
+    );
+    if (!agent) {
+      // Cross-tenant or missing — both return 404, never 403 (no existence leak).
+      return reply.status(404).header("content-type", "application/problem+json").send({
+        type: "about:blank",
+        title: "Not Found",
+        status: 404,
+        detail: "Agent not found.",
+        request_id: req.id,
+      });
+    }
+    return agent;
+  });
+
+  // Kill switch: any org member can halt everything for their org; an admin
+  // halts the whole org. Deterministic, audited, and idempotent.
+  app.post("/v1/admin/kill-switch", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "agents.write_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to engage the kill switch.");
+    }
+    if (!deps.sql) return { paused_agents: 0, halted_runs: 0, unavailable: true };
+    return engageKillSwitch(
+      deps.sql,
+      { organizationId: principal.organization_id },
+      principal.user_id,
+    );
   });
 
   registerConnectorRoutes(app, {

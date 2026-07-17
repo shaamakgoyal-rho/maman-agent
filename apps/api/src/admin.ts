@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 import { aggregate, MIN_COHORT_SIZE } from "@maman/roi-engine";
 import { withTenant } from "@maman/db";
+export { engageKillSwitch, getAgentById } from "@maman/db";
 
 /**
  * Admin aggregate reporting. Every figure is org-scoped and computed inside a
