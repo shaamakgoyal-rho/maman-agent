@@ -1,9 +1,26 @@
+import { useState } from "react";
 import { product } from "@maman/config";
 import { useSettings } from "../../state/settings.js";
-import { Card, Muted, SectionTitle, Toggle } from "../ui.js";
+import { invokeCommand, isTauri } from "../../lib/bridge.js";
+import { Button, Card, Muted, SectionTitle, Toggle } from "../ui.js";
 
 export function Settings() {
   const { settings, update } = useSettings();
+  const [pairingToken, setPairingToken] = useState<string | null>(null);
+  const [pairingError, setPairingError] = useState<string | null>(null);
+
+  const beginPairing = async () => {
+    setPairingError(null);
+    if (!isTauri()) {
+      setPairingError("Pairing requires the desktop app (web preview has no native host).");
+      return;
+    }
+    try {
+      setPairingToken(await invokeCommand<string>("pairing_begin"));
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   return (
     <div className="space-y-3">
@@ -84,6 +101,26 @@ export function Settings() {
           Hold Maman for a moment to drag it anywhere; it snaps near screen edges and remembers its
           spot per display.
         </Muted>
+      </Card>
+
+      <Card>
+        <SectionTitle>Browser extension</SectionTitle>
+        <Muted>
+          Pair the Maman Observer Chrome extension for semantic browser observation on sites you
+          allow. Install it, then generate a one-time token (valid five minutes) and paste it into
+          the extension popup.
+        </Muted>
+        <div className="mt-2 space-y-2">
+          <Button variant="secondary" onClick={() => void beginPairing()}>
+            Generate pairing token
+          </Button>
+          {pairingToken && (
+            <p className="break-all rounded-lg border border-line bg-bg p-2 font-mono text-xs">
+              {pairingToken}
+            </p>
+          )}
+          {pairingError && <p className="text-xs text-danger">{pairingError}</p>}
+        </div>
       </Card>
 
       <Card>

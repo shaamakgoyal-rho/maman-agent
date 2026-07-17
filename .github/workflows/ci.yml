@@ -60,5 +60,7 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Observer no-network / no-keystroke scan
+        run: bash scripts/scan-observer-no-network.sh
       - name: Run Swift tests
         run: bash scripts/test-swift.sh

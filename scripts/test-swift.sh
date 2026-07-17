@@ -10,8 +10,14 @@ fi
 
 PKG="$ROOT_DIR/native/macos-observer"
 if [[ -f "$PKG/Package.swift" ]]; then
-  echo "== swift test: $PKG"
-  (cd "$PKG" && swift test)
+  if xcrun --find xctest >/dev/null 2>&1; then
+    echo "== swift test: $PKG"
+    (cd "$PKG" && swift test)
+  else
+    # Command Line Tools only (no XCTest): run the mirrored assertion runner.
+    echo "== swift run ObserverCoreTestRunner (XCTest unavailable): $PKG"
+    (cd "$PKG" && swift run ObserverCoreTestRunner)
+  fi
 else
   echo "no Swift package present yet"
 fi

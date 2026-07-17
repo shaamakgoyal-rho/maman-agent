@@ -4,6 +4,7 @@
 //! Commands validate their inputs, and window-sensitive commands check the
 //! calling window's label (the pet window may never reach privileged surfaces).
 
+pub mod browser_bridge;
 pub mod observer;
 pub mod redaction;
 pub mod store;
@@ -497,6 +498,189 @@ async fn events_set_excluded<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+// ---------- browser extension pairing + socket bridge ----------
+
+const PAIRING_FILE: &str = "browser-pairing.json";
+
+/// Panel-only: starts a pairing session. Only the token HASH is stored; the
+/// plaintext token is shown once in the panel for the user to paste into the
+/// extension, and expires after five minutes.
+#[tauri::command]
+fn pairing_begin<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<String, String> {
+    require_panel(&window)?;
+    let mut token_bytes = [0u8; 32];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut token_bytes);
+    let token = browser_bridge::base64url_encode(&token_bytes);
+    let pending = browser_bridge::PendingPairing {
+        token_sha256: browser_bridge::sha256_hex(token.as_bytes()),
+        expires_at_ms: browser_bridge::now_unix_ms() + browser_bridge::PAIRING_TOKEN_TTL_MS,
+    };
+    let path = config_path(&app, PAIRING_FILE)?;
+    fs::write(&path, serde_json::to_string(&pending).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(token)
+}
+
+fn socket_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("data dir unavailable: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("browser-host.sock"))
+}
+
+/// Handles one JSON-line request from the native host. Pure enough to test:
+/// all effects flow through the provided closures.
+fn handle_bridge_request<R: Runtime>(
+    app: &AppHandle<R>,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    match request.get("type").and_then(|v| v.as_str()) {
+        Some("pair_check") => {
+            let Some(token) = request.get("token").and_then(|v| v.as_str()) else {
+                return serde_json::json!({"ok": false, "error": "missing token"});
+            };
+            let Ok(path) = config_path(app, PAIRING_FILE) else {
+                return serde_json::json!({"ok": false, "error": "no pairing pending"});
+            };
+            let Ok(raw) = fs::read_to_string(&path) else {
+                return serde_json::json!({"ok": false, "error": "no pairing pending"});
+            };
+            let Ok(pending) = serde_json::from_str::<browser_bridge::PendingPairing>(&raw) else {
+                return serde_json::json!({"ok": false, "error": "no pairing pending"});
+            };
+            if browser_bridge::now_unix_ms() > pending.expires_at_ms {
+                let _ = fs::remove_file(&path);
+                return serde_json::json!({"ok": false, "error": "pairing token expired"});
+            }
+            if browser_bridge::sha256_hex(token.as_bytes()) != pending.token_sha256 {
+                return serde_json::json!({"ok": false, "error": "pairing token mismatch"});
+            }
+            // Consume the token, mint and store the long-lived shared secret.
+            let _ = fs::remove_file(&path);
+            let mut secret = [0u8; 32];
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut secret);
+            let secret_b64 = browser_bridge::base64url_encode(&secret);
+            match keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
+                .and_then(|e| e.set_password(&secret_b64).map(|_| ()))
+            {
+                Ok(()) => serde_json::json!({"ok": true, "shared_secret": secret_b64}),
+                Err(e) => serde_json::json!({"ok": false, "error": format!("keychain: {e}")}),
+            }
+        }
+        Some("envelope") => {
+            let Some(envelope) = request.get("envelope") else {
+                return serde_json::json!({"ok": false, "error": "missing envelope"});
+            };
+            let Ok(secret) =
+                keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
+                    .and_then(|e| e.get_password())
+            else {
+                return serde_json::json!({"ok": false, "error": "not paired"});
+            };
+            if !browser_bridge::verify_envelope_hmac(envelope, &secret) {
+                return serde_json::json!({"ok": false, "error": "bad signature"});
+            }
+            let payload = envelope.get("payload").cloned().unwrap_or_default();
+            if payload.get("type").and_then(|v| v.as_str()) != Some("semantic_event") {
+                return serde_json::json!({"ok": false, "error": "unsupported payload"});
+            }
+            let Some(shape) = payload.get("event") else {
+                return serde_json::json!({"ok": false, "error": "missing event"});
+            };
+            let event_id = format!(
+                "{}",
+                uuid_v4_like(&browser_bridge::sha256_hex(
+                    serde_json::to_string(shape).unwrap_or_default().as_bytes()
+                ))
+            );
+            let Some(event) = browser_bridge::shape_to_workflow_event(
+                shape,
+                (
+                    "00000000-0000-7000-8000-000000000000",
+                    "00000000-0000-7000-8000-000000000001",
+                    "00000000-0000-7000-8000-000000000002",
+                ),
+                browser_bridge::now_unix_ms(),
+                &store::iso_from_unix_ms(browser_bridge::now_unix_ms()),
+                &event_id,
+            ) else {
+                return serde_json::json!({"ok": false, "error": "malformed shape"});
+            };
+            // Same gate + encrypted pipeline as every other event.
+            let settings = load_gate_settings(app);
+            match gate_event(&settings, &event) {
+                Ok(None) => {
+                    let app2 = app.clone();
+                    let result = tauri::async_runtime::block_on(async move {
+                        let state = app2.state::<StoreState>();
+                        let guard = store_guard(&app2, &state).await?;
+                        guard
+                            .as_ref()
+                            .expect("initialized")
+                            .insert_event(&event, store::EVENT_RETENTION_DAYS_DEFAULT)
+                            .await
+                            .map_err(|e| e.to_string())
+                    });
+                    match result {
+                        Ok(_) => serde_json::json!({"ok": true}),
+                        Err(e) => serde_json::json!({"ok": false, "error": e}),
+                    }
+                }
+                Ok(Some(reason)) => serde_json::json!({"ok": true, "dropped": reason}),
+                Err(e) => serde_json::json!({"ok": false, "error": e}),
+            }
+        }
+        _ => serde_json::json!({"ok": false, "error": "unknown request"}),
+    }
+}
+
+/// Deterministic UUID-shaped id from a hash (browser events arrive without ids).
+fn uuid_v4_like(hash_hex: &str) -> String {
+    let h = format!("{hash_hex:0<32}");
+    format!(
+        "{}-{}-7{}-8{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
+}
+
+fn start_bridge_listener<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        let Ok(path) = socket_path(&app) else { return };
+        let _ = fs::remove_file(&path);
+        let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) else {
+            eprintln!("bridge: cannot bind socket");
+            return;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        for stream in listener.incoming().flatten() {
+            use std::io::{BufRead, BufReader, Write};
+            let mut reader = BufReader::new(&stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let reply = match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(request) => handle_bridge_request(&app, &request),
+                Err(e) => serde_json::json!({"ok": false, "error": format!("bad json: {e}")}),
+            };
+            let mut writer = &stream;
+            let _ = writer.write_all(format!("{reply}\n").as_bytes());
+        }
+    });
+}
+
 /// Explicit “Delete this device's data”: removes the database and Keychain key.
 #[tauri::command]
 async fn device_data_wipe<R: Runtime>(
@@ -540,10 +724,12 @@ pub fn run() {
             events_delete_all,
             events_delete_app,
             events_set_excluded,
-            device_data_wipe
+            device_data_wipe,
+            pairing_begin
         ])
         .setup(|app| {
             restore_pet_position(&app.handle().clone());
+            start_bridge_listener(app.handle().clone());
 
             // Global shortcut: Control+Option+P toggles the panel.
             {

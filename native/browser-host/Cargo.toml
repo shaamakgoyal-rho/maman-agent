@@ -1,0 +1,19 @@
+[package]
+name = "maman-browser-host"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+description = "Chrome native messaging host bridging the Maman extension to the desktop core. No direct server or connector access."
+
+[[bin]]
+name = "maman-browser-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[profile.release]
+lto = true
+strip = true
