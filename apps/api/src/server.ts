@@ -1,4 +1,9 @@
-import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, {
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from "fastify";
 import fastifySwagger from "@fastify/swagger";
 import {
   jsonSchemaTransform,
@@ -13,6 +18,7 @@ import type { ServerEnv } from "@maman/config";
 import type { Sql } from "postgres";
 import { createAuthenticator, requirePrincipal, type Authenticator } from "./auth.js";
 import { authorize } from "./authorization.js";
+import { adminAudit, adminOverview } from "./admin.js";
 
 export type ServerDeps = {
   env: ServerEnv;
@@ -127,6 +133,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
   });
 
+  // Dev-only helper so local tools (the admin console) can resolve the seeded
+  // org UUID from its WorkOS id. Registered ONLY in AUTH_MODE=dev.
+  if (env.AUTH_MODE === "dev") {
+    app.get("/v1/dev/resolve-org", async (req, reply) => {
+      const workosId = (req.query as { workos_id?: string }).workos_id;
+      if (!deps.sql || !workosId) return reply.status(404).send({ status: 404 });
+      const rows = await deps.sql<{ id: string }[]>`
+        SELECT id FROM organizations WHERE workos_organization_id = ${workosId}
+      `;
+      if (rows.length === 0) return reply.status(404).send({ status: 404 });
+      return { organization_id: rows[0]!.id };
+    });
+  }
+
   // ---- v1 ----
   app.get(
     "/v1/me",
@@ -145,21 +165,44 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   // Reference implementation of the centralized authorization pattern for all
   // future admin routes; returns 403 problem details on role denial.
+  const forbid = (req: FastifyRequest, reply: FastifyReply, detail: string) =>
+    reply.status(403).header("content-type", "application/problem+json").send({
+      type: "about:blank",
+      title: "Forbidden",
+      status: 403,
+      detail,
+      request_id: req.id,
+    });
+
   app.get("/v1/admin/overview", { schema: { tags: ["admin"] } }, async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
     if (!principal) return;
-    const decision = authorize(principal, "org.overview.read");
-    if (!decision.allowed) {
-      return reply.status(403).header("content-type", "application/problem+json").send({
-        type: "about:blank",
-        title: "Forbidden",
-        status: 403,
-        detail: "Role is not permitted to read the organization overview.",
-        request_id: req.id,
-      });
+    if (!authorize(principal, "org.overview.read").allowed) {
+      return forbid(req, reply, "Role is not permitted to read the organization overview.");
     }
-    // Aggregates land at M9; the authorization surface exists now.
-    return { organization_id: principal.organization_id, cards: [] };
+    if (!deps.sql) return { organization_id: principal.organization_id, unavailable: true };
+    return adminOverview(deps.sql, principal.organization_id);
+  });
+
+  app.get("/v1/admin/audit", { schema: { tags: ["admin"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "org.audit.read").allowed) {
+      return forbid(req, reply, "Role is not permitted to read the audit log.");
+    }
+    if (!deps.sql) return [];
+    return adminAudit(deps.sql, principal.organization_id, 100);
+  });
+
+  // There is deliberately NO endpoint returning another member's raw events,
+  // screen content, or a productivity ranking. `roi/me` is self-scoped only.
+  app.get("/v1/roi/me", { schema: { tags: ["roi"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "roi.read_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to read personal ROI.");
+    }
+    return { user_id: principal.user_id, verified_hours: 0, net_value_usd: null };
   });
 
   return app;

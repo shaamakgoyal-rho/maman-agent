@@ -66,7 +66,51 @@ try {
     });
   }
 
-  console.log(`seeded demo org "${DEMO_ORG.name}" (${orgId}) with ${DEMO_USERS.length} users`);
+  // Seed a demo agent + verified ROI measurements for all six users so the
+  // admin overview has an aggregate above the five-person cohort minimum.
+  await withTenant(sql, { organizationId: orgId }, async (tx) => {
+    const members = await tx<{ user_id: string }[]>`
+      SELECT user_id FROM memberships WHERE organization_id = ${orgId}
+    `;
+    for (const [i, member] of members.entries()) {
+      const agentId = uuidv7();
+      const versionId = uuidv7();
+      const policyId = uuidv7();
+      await tx`
+        INSERT INTO policy_versions (id, organization_id, version_number, policy, sha256, created_by_user_id)
+        VALUES (${policyId}, ${orgId}, ${1000 + i}, '{"rules":[]}', ${"seed" + i}, ${member.user_id})
+        ON CONFLICT DO NOTHING
+      `;
+      await tx`
+        INSERT INTO agents (id, organization_id, owner_user_id, name, description, state, current_version_id)
+        VALUES (${agentId}, ${orgId}, ${member.user_id}, 'Reconcile account lists with Salesforce', 'demo', 'supervised', ${versionId})
+        ON CONFLICT DO NOTHING
+      `;
+      await tx`
+        INSERT INTO agent_versions (id, organization_id, agent_id, version_number, schema_version, spec, spec_sha256, created_by_type, policy_version_id)
+        VALUES (${versionId}, ${orgId}, ${agentId}, 1, 1, '{}', ${"spec" + i}, 'compiler', ${policyId})
+        ON CONFLICT DO NOTHING
+      `;
+      const runId = uuidv7();
+      await tx`
+        INSERT INTO agent_runs (id, organization_id, owner_user_id, agent_id, agent_version_id, temporal_workflow_id, trigger_type, trigger_idempotency_key, mode, status, policy_version_id, requested_at, model_cost_usd, connector_cost_usd)
+        VALUES (${runId}, ${orgId}, ${member.user_id}, ${agentId}, ${versionId}, ${"wf-seed-" + i}, 'manual', ${"idem-seed-" + i}, 'supervised', 'completed', ${policyId}, now(), 0.01, 0.07)
+        ON CONFLICT DO NOTHING
+      `;
+      // ~17 verified minutes saved per run, net value at $75/h loaded rate.
+      const savedMs = 17 * 60_000;
+      const netUsd = ((savedMs / 3_600_000) * 75 - 0.08).toFixed(6);
+      await tx`
+        INSERT INTO roi_measurements (id, organization_id, owner_user_id, agent_id, run_id, baseline_ms, automated_human_ms, intervention_ms, verified_saved_ms, gross_value_usd, model_cost_usd, connector_cost_usd, infrastructure_cost_usd, net_value_usd, verification_status)
+        VALUES (${uuidv7()}, ${orgId}, ${member.user_id}, ${agentId}, ${runId}, ${20 * 60_000}, ${60_000}, ${60_000}, ${savedMs}, ${((savedMs / 3_600_000) * 75).toFixed(6)}, 0.01, 0.07, 0, ${netUsd}, 'verified')
+        ON CONFLICT DO NOTHING
+      `;
+    }
+  });
+
+  console.log(
+    `seeded demo org "${DEMO_ORG.name}" (${orgId}) with ${DEMO_USERS.length} users + ROI`,
+  );
 } finally {
   await close();
 }

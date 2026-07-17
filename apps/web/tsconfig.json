@@ -1,0 +1,19 @@
+{
+  "extends": "@maman/tsconfig/react.json",
+  "compilerOptions": {
+    "verbatimModuleSyntax": false,
+    "jsx": "preserve",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "allowJs": true,
+    "incremental": true
+  },
+  "include": ["src", "test", "next-env.d.ts", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
