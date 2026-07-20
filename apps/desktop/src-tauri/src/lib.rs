@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, PhysicalPosition, Runtime, WebviewWindow, Window};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewWindow, Window};
 use tokio::sync::Mutex;
 
 use store::{KeychainKeyProvider, LocalStore, TimelineEntry};
@@ -899,6 +899,207 @@ fn start_sync_loop<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+// ---------- observer sidecar supervision ----------
+
+use observer::{ObserverGate, ObserverStatus};
+
+/// Live observer status, surfaced to the pet UI (honest, never a silent degrade).
+pub struct ObserverState(pub std::sync::Mutex<ObserverStatus>);
+
+fn set_observer_status<R: Runtime>(app: &AppHandle<R>, status: ObserverStatus) {
+    if let Some(state) = app.try_state::<ObserverState>() {
+        if let Ok(mut guard) = state.0.lock() {
+            *guard = status;
+        }
+    }
+    let label = match status {
+        ObserverStatus::Disabled => "disabled",
+        ObserverStatus::Starting => "starting",
+        ObserverStatus::Observing => "observing",
+        ObserverStatus::PermissionRequired => "permission_required",
+        ObserverStatus::Failed => "failed",
+    };
+    let _ = app.emit("observer:status", label);
+}
+
+#[tauri::command]
+fn observer_status<R: Runtime>(app: AppHandle<R>) -> String {
+    let status = app
+        .try_state::<ObserverState>()
+        .and_then(|s| s.0.lock().ok().map(|g| *g))
+        .unwrap_or(ObserverStatus::Disabled);
+    match status {
+        ObserverStatus::Disabled => "disabled",
+        ObserverStatus::Starting => "starting",
+        ObserverStatus::Observing => "observing",
+        ObserverStatus::PermissionRequired => "permission_required",
+        ObserverStatus::Failed => "failed",
+    }
+    .to_string()
+}
+
+/// Opens the macOS Accessibility settings pane so the user can grant permission.
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads the observer gate (consent complete AND not paused) from settings.
+fn load_observer_gate<R: Runtime>(app: &AppHandle<R>) -> ObserverGate {
+    let json = config_path(app, SETTINGS_FILE)
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let consent = json
+        .as_ref()
+        .map(|j| {
+            j.get("onboarding_complete").and_then(|v| v.as_bool()).unwrap_or(false)
+                && j.get("comprehension_confirmed").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let paused = json
+        .as_ref()
+        .and_then(|j| j.get("observation_paused").and_then(|v| v.as_bool()))
+        .unwrap_or(true);
+    ObserverGate { consent_complete: consent, observation_paused: paused }
+}
+
+/// Resolves the observer sidecar binary: alongside the app executable in a
+/// bundle, or the local Swift release build during development.
+fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("maman-observer");
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+    }
+    // Dev fallback: the Swift release build in the repo.
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../native/macos-observer/.build/release/maman-observer");
+    if dev.exists() {
+        return Some(dev);
+    }
+    None
+}
+
+/// Persists one observer-emitted event/boundary through the ingest gate.
+async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
+    let state = app.state::<StoreState>();
+    let mut guard = match store_guard(app, &state).await {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if let Some(store) = guard.as_mut() {
+        let _ = store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await;
+    }
+}
+
+/// Supervises the observer sidecar: spawns only when the gate allows, streams
+/// its JSONL over stdio into the ingest gate, and applies the restart policy.
+/// A quiet loop re-checks the gate so pause/consent changes start/stop it.
+fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command as TokioCommand;
+
+    tauri::async_runtime::spawn(async move {
+        let mut policy = observer::RestartPolicy::new();
+        loop {
+            let gate = load_observer_gate(&app);
+            if !gate.should_observe() {
+                set_observer_status(&app, ObserverStatus::Disabled);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+            let Some(bin) = resolve_observer_binary(&app) else {
+                set_observer_status(&app, ObserverStatus::Failed);
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            };
+
+            set_observer_status(&app, ObserverStatus::Starting);
+            let spawned = TokioCommand::new(&bin)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            let mut child = match spawned {
+                Ok(c) => c,
+                Err(_) => {
+                    if policy.on_crash(std::time::Instant::now()) == observer::RestartDecision::GiveUp
+                    {
+                        set_observer_status(&app, ObserverStatus::Failed);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            // Configure the observer with the current allowlist, then resume.
+            let settings = load_gate_settings(&app);
+            if let Some(mut stdin) = child.stdin.take() {
+                let configure = serde_json::json!({
+                    "type": "configure",
+                    "allowlist_bundles": [],
+                    "allowlist_domains": settings.allowlist_domains,
+                    "private_apps": settings.private_apps,
+                })
+                .to_string();
+                let _ = stdin.write_all(format!("{configure}\n").as_bytes()).await;
+                let _ = stdin.write_all(b"{\"type\":\"resume\"}\n").await;
+                let _ = stdin.flush().await;
+                // Hold stdin open for the life of the child.
+                std::mem::forget(stdin);
+            }
+
+            set_observer_status(&app, ObserverStatus::Observing);
+            let started = std::time::Instant::now();
+            if let Some(stdout) = child.stdout.take() {
+                let mut lines = BufReader::new(stdout).lines();
+                loop {
+                    // Stop promptly if the gate flipped (pause / consent revoked).
+                    if !load_observer_gate(&app).should_observe() {
+                        let _ = child.start_kill();
+                        break;
+                    }
+                    match lines.next_line().await {
+                        Ok(Some(line)) => match observer::parse_observer_line(&line) {
+                            observer::ObserverLine::Event(ev) => ingest_observer_value(&app, &ev).await,
+                            observer::ObserverLine::Boundary { .. } => {
+                                set_observer_status(&app, ObserverStatus::Observing);
+                            }
+                            observer::ObserverLine::Error { code, fatal } => {
+                                set_observer_status(&app, observer::status_for_error(&code, fatal));
+                            }
+                            observer::ObserverLine::Heartbeat { .. }
+                            | observer::ObserverLine::Hello { .. }
+                            | observer::ObserverLine::Ignored => {}
+                        },
+                        _ => break, // stdout closed → child exiting
+                    }
+                }
+            }
+
+            let _ = child.wait().await;
+            // A long healthy run clears the restart history.
+            if started.elapsed() > std::time::Duration::from_secs(60) {
+                policy.on_stable();
+            }
+            if policy.on_crash(std::time::Instant::now()) == observer::RestartDecision::GiveUp {
+                set_observer_status(&app, ObserverStatus::Failed);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
 // ---------- entry ----------
 
 pub fn run() {
@@ -907,6 +1108,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(StoreState(Mutex::new(None)))
+        .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
         .invoke_handler(tauri::generate_handler![
             settings_load,
             settings_save,
@@ -928,12 +1130,15 @@ pub fn run() {
             device_data_wipe,
             pairing_begin,
             device_enroll,
-            sync_now
+            sync_now,
+            observer_status,
+            open_accessibility_settings
         ])
         .setup(|app| {
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
             start_sync_loop(app.handle().clone());
+            start_observer_supervisor(app.handle().clone());
 
             // Global shortcut: Control+Option+P toggles the panel.
             {

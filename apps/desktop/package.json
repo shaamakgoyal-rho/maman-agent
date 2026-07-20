@@ -12,7 +12,9 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "build": "vite build"
+    "build": "vite build",
+    "build:observer": "bash scripts/build-observer.sh",
+    "build:desktop": "bash scripts/build-observer.sh && vite build"
   },
   "dependencies": {
     "@maman/config": "workspace:*",

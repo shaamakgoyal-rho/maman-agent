@@ -21,6 +21,7 @@ final class ObserverRuntime {
     private var lastBoundaryReason: ObserverMessage.BoundaryReason?
     private var axObserver: AXObserver?
     private var observedPid: pid_t = 0
+    private var permissionErrorEmitted = false
 
     private let out = FileHandle.standardOutput
     private let identity = (
@@ -166,7 +167,20 @@ final class ObserverRuntime {
     }
 
     private func attachAx(to app: NSRunningApplication) {
-        guard AXIsProcessTrusted() else { return } // degrade silently without permission
+        guard AXIsProcessTrusted() else {
+            // Never degrade silently: surface the missing permission once so the
+            // Rust core and the pet can honestly show "not observing".
+            if !permissionErrorEmitted {
+                permissionErrorEmitted = true
+                emit(.error(
+                    code: "accessibility_permission_required",
+                    message: "Grant Accessibility permission in System Settings to observe allowed apps.",
+                    fatal: false
+                ))
+            }
+            return
+        }
+        permissionErrorEmitted = false
         let pid = app.processIdentifier
         if pid == observedPid { return }
         detachAx()

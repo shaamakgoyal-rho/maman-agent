@@ -1,14 +1,47 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { product } from "@maman/config";
 import { useSettings } from "../../state/settings.js";
 import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle, Toggle } from "../ui.js";
+
+/** Honest observation status — the pet never silently pretends to observe. */
+const OBSERVER_STATUS_LABEL: Record<string, string> = {
+  disabled: "Not observing (paused or consent not given)",
+  starting: "Starting the observer…",
+  observing: "Observing allowed apps",
+  permission_required: "Not observing — Accessibility permission needed",
+  failed: "Not observing — the observer could not start",
+};
 
 export function Settings() {
   const { settings, update } = useSettings();
   const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [observerStatus, setObserverStatus] = useState<string | null>(null);
+
+  // Poll the native observer status so the panel reflects it honestly.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    const tick = () => {
+      invokeCommand<string>("observer_status")
+        .then((s) => {
+          if (active) setObserverStatus(s);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  const grantAccessibility = () => {
+    void invokeCommand("open_accessibility_settings").catch(() => {});
+  };
 
   const connect = async (provider: string) => {
     setConnectError(null);
@@ -124,6 +157,37 @@ export function Settings() {
           Hold Maman for a moment to drag it anywhere; it snaps near screen edges and remembers its
           spot per display.
         </Muted>
+      </Card>
+
+      <Card>
+        <SectionTitle>Observation</SectionTitle>
+        {!isTauri() ? (
+          <Muted>Observation runs in the desktop app (not the web preview).</Muted>
+        ) : (
+          <>
+            <p className="text-sm">
+              {observerStatus
+                ? (OBSERVER_STATUS_LABEL[observerStatus] ?? observerStatus)
+                : "Checking…"}
+            </p>
+            {observerStatus === "permission_required" && (
+              <div className="mt-2">
+                <Muted>
+                  Maman is not observing because macOS Accessibility permission is not granted. It
+                  never guesses — grant permission to resume.
+                </Muted>
+                <Button variant="secondary" onClick={grantAccessibility}>
+                  Grant Accessibility permission
+                </Button>
+              </div>
+            )}
+            {observerStatus === "failed" && (
+              <Muted>
+                The observer could not start. It will retry; nothing is observed meanwhile.
+              </Muted>
+            )}
+          </>
+        )}
       </Card>
 
       <Card>

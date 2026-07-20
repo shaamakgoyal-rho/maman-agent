@@ -44,3 +44,4 @@ DerivedData/
 *.log
 pnpm-debug.log*
 .gstack/
+apps/desktop/src-tauri/binaries/

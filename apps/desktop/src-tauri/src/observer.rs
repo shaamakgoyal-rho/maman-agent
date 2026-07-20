@@ -7,8 +7,106 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 pub const MAX_RESTARTS: usize = 3;
 pub const RESTART_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// The error code the Swift observer emits when Accessibility is not granted.
+/// We surface this honestly to the UI rather than silently degrading.
+pub const ACCESSIBILITY_PERMISSION_CODE: &str = "accessibility_permission_required";
+
+/// Whether the observer may run. Spawning is gated on BOTH the consent flow
+/// being complete AND observation not being paused — the sidecar never starts
+/// otherwise, and is killed if either condition flips.
+#[derive(Debug, Clone, Copy)]
+pub struct ObserverGate {
+    pub consent_complete: bool,
+    pub observation_paused: bool,
+}
+
+impl ObserverGate {
+    pub fn should_observe(&self) -> bool {
+        self.consent_complete && !self.observation_paused
+    }
+}
+
+/// Honest observer state surfaced to the pet UI (never a silent degrade).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserverStatus {
+    /// Consent not given or observation paused — deliberately not running.
+    Disabled,
+    /// Spawned; waiting for the first hello/heartbeat.
+    Starting,
+    /// Running and reporting.
+    Observing,
+    /// Running but Accessibility permission is missing — the user must grant it.
+    PermissionRequired,
+    /// Crash-looped past the restart budget — supervision gave up.
+    Failed,
+}
+
+/// One parsed line from the observer's stdout (the JSONL protocol).
+#[derive(Debug, PartialEq)]
+pub enum ObserverLine {
+    Hello { observer_version: String },
+    /// The inner SemanticEvent object, ready for the ingest gate (carries
+    /// `source: "macos_ax"` and all required fields).
+    Event(Value),
+    Boundary { reason: String },
+    Heartbeat { events_emitted: i64 },
+    Error { code: String, fatal: bool },
+    /// Malformed or an unrecognized message type — dropped, never crashes.
+    Ignored,
+}
+
+/// Parses one observer stdout line. Unknown/garbage lines are `Ignored`, never
+/// an error (a misbehaving child must not take down supervision).
+pub fn parse_observer_line(line: &str) -> ObserverLine {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return ObserverLine::Ignored;
+    };
+    match v.get("type").and_then(|t| t.as_str()) {
+        Some("hello") => ObserverLine::Hello {
+            observer_version: v
+                .get("observer_version")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        Some("event") => match v.get("event") {
+            Some(ev) if ev.is_object() => ObserverLine::Event(ev.clone()),
+            _ => ObserverLine::Ignored,
+        },
+        Some("boundary") => ObserverLine::Boundary {
+            reason: v
+                .get("reason")
+                .and_then(|s| s.as_str())
+                .unwrap_or("hard_denied")
+                .to_string(),
+        },
+        Some("heartbeat") => ObserverLine::Heartbeat {
+            events_emitted: v.get("events_emitted").and_then(|n| n.as_i64()).unwrap_or(0),
+        },
+        Some("error") => ObserverLine::Error {
+            code: v.get("code").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            fatal: v.get("fatal").and_then(|b| b.as_bool()).unwrap_or(false),
+        },
+        _ => ObserverLine::Ignored,
+    }
+}
+
+/// Maps an observer error line to the status the UI should show.
+pub fn status_for_error(code: &str, fatal: bool) -> ObserverStatus {
+    if code == ACCESSIBILITY_PERMISSION_CODE {
+        ObserverStatus::PermissionRequired
+    } else if fatal {
+        ObserverStatus::Failed
+    } else {
+        // Non-fatal error (e.g. teach-mode-unavailable) — keep observing.
+        ObserverStatus::Observing
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct RestartPolicy {
@@ -85,5 +183,91 @@ mod tests {
         policy.on_crash(t0 + Duration::from_secs(2));
         policy.on_stable();
         assert_eq!(policy.on_crash(t0 + Duration::from_secs(3)), RestartDecision::Restart);
+    }
+
+    // ---- spawn gating (consent + pause) ----
+
+    #[test]
+    fn observer_refuses_to_start_without_consent() {
+        let gate = ObserverGate { consent_complete: false, observation_paused: false };
+        assert!(!gate.should_observe(), "must not observe before consent");
+    }
+
+    #[test]
+    fn observer_refuses_to_start_while_paused() {
+        let gate = ObserverGate { consent_complete: true, observation_paused: true };
+        assert!(!gate.should_observe(), "must not observe while paused");
+    }
+
+    #[test]
+    fn observer_starts_only_with_consent_and_not_paused() {
+        let gate = ObserverGate { consent_complete: true, observation_paused: false };
+        assert!(gate.should_observe());
+    }
+
+    // ---- JSONL protocol parsing ----
+
+    #[test]
+    fn parses_each_protocol_message_type() {
+        assert_eq!(
+            parse_observer_line(r#"{"type":"hello","observer_version":"0.1.0","capabilities":["macos_ax"],"pid":42}"#),
+            ObserverLine::Hello { observer_version: "0.1.0".into() }
+        );
+        assert_eq!(
+            parse_observer_line(r#"{"type":"boundary","reason":"user_private","occurred_at":"2026-07-20T10:00:00.000Z"}"#),
+            ObserverLine::Boundary { reason: "user_private".into() }
+        );
+        assert_eq!(
+            parse_observer_line(r#"{"type":"heartbeat","occurred_at":"x","events_emitted":7}"#),
+            ObserverLine::Heartbeat { events_emitted: 7 }
+        );
+        assert_eq!(
+            parse_observer_line(r#"{"type":"error","code":"accessibility_permission_required","message":"m","fatal":false}"#),
+            ObserverLine::Error {
+                code: ACCESSIBILITY_PERMISSION_CODE.into(),
+                fatal: false
+            }
+        );
+    }
+
+    #[test]
+    fn garbage_and_unknown_lines_are_ignored_never_panic() {
+        assert_eq!(parse_observer_line("not json"), ObserverLine::Ignored);
+        assert_eq!(parse_observer_line("{}"), ObserverLine::Ignored);
+        assert_eq!(parse_observer_line(r#"{"type":"nope"}"#), ObserverLine::Ignored);
+        assert_eq!(parse_observer_line(r#"{"type":"event"}"#), ObserverLine::Ignored);
+    }
+
+    #[test]
+    fn event_line_yields_an_ingestable_object_with_source() {
+        let line = r#"{"type":"event","event":{"schema_version":1,"event_id":"0191aaaa-0000-7000-8000-000000000001","source":"macos_ax","occurred_at":"2026-07-20T10:00:00.000Z","event_type":"element_focused","sensitivity":"internal","app":{"display_name":"Salesforce"}}}"#;
+        match parse_observer_line(line) {
+            ObserverLine::Event(ev) => {
+                // The inner object is exactly what the ingest gate/insert_event needs.
+                assert_eq!(ev.get("source").and_then(|s| s.as_str()), Some("macos_ax"));
+                assert_eq!(
+                    ev.get("event_id").and_then(|s| s.as_str()),
+                    Some("0191aaaa-0000-7000-8000-000000000001")
+                );
+                assert!(ev.pointer("/app/display_name").is_some());
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    // ---- honest status (never a silent degrade) ----
+
+    #[test]
+    fn missing_accessibility_permission_surfaces_permission_required() {
+        assert_eq!(
+            status_for_error(ACCESSIBILITY_PERMISSION_CODE, false),
+            ObserverStatus::PermissionRequired
+        );
+    }
+
+    #[test]
+    fn a_fatal_error_surfaces_failed_a_nonfatal_one_keeps_observing() {
+        assert_eq!(status_for_error("some_crash", true), ObserverStatus::Failed);
+        assert_eq!(status_for_error("teach_mode_unavailable", false), ObserverStatus::Observing);
     }
 }
