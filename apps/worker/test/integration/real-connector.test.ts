@@ -202,12 +202,16 @@ describe("real-mode supervised run (M11)", () => {
     // Drive the supervised sequence: reads + propose, then the approved write.
     let outputs: Record<string, unknown> = {};
     let approvedDiffSha = "";
+    let approvedDiff: unknown = null;
     for (const step of [...spec.steps].sort((a, b) => a.order - b.order)) {
       if (step.mode === "write") continue;
       const r = await activities.executeReadStep({ spec, step_id: step.step_id, outputs, run });
       expect(r.status).not.toBe("failed");
       outputs = r.outputs;
-      if (r.status === "proposed") approvedDiffSha = r.diff_sha256!;
+      if (r.status === "proposed") {
+        approvedDiffSha = r.diff_sha256!;
+        approvedDiff = r.diff;
+      }
     }
     const writeStep = spec.steps.find((s) => s.mode === "write")!;
     const w = await activities.executeWriteStep({
@@ -216,6 +220,7 @@ describe("real-mode supervised run (M11)", () => {
       outputs,
       run,
       approved_diff_sha: approvedDiffSha,
+      approved_diff: approvedDiff,
     });
     expect(w.status).toBe("completed");
     expect(w.verified).toBe(true); // independent read-back over HTTP confirmed the writes

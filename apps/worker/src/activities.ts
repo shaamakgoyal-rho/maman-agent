@@ -56,6 +56,15 @@ const runState = new Map<
   { state: RunState; proposedDiffs: Map<string, ProposedDiff>; startedAt: number }
 >();
 
+/**
+ * Clears the in-memory run cache — used by chaos tests to simulate a worker
+ * process restart (a real restart loses this cache; the write must survive
+ * anyway because the workflow carries the approved diff + outputs in history).
+ */
+export function __resetRunStateForTests(): void {
+  runState.clear();
+}
+
 function ctxOf(run: AgentRunInput): CapabilityContext {
   return {
     run_id: run.run_id,
@@ -131,13 +140,17 @@ export function createActivities(deps: ActivityDeps): RunActivities {
       }
     },
 
-    async executeWriteStep({ spec, step_id, outputs, run, approved_diff_sha }) {
+    async executeWriteStep({ spec, step_id, outputs, run, approved_diff_sha, approved_diff }) {
       const step = spec.steps.find((s) => s.step_id === step_id)!;
       const entry = getRun(run);
       entry.state.outputs = { ...entry.state.outputs, ...outputs };
-      // Reload the proposed diff produced earlier in this run.
+      // The workflow carries the approved diff through history, so the write is
+      // reconstructable after a worker restart. Fall back to the in-memory cache
+      // only if the workflow didn't supply it (older histories).
       const proposeStep = spec.steps.find((s) => s.mode === "propose_write");
-      const approvedDiff = proposeStep ? entry.proposedDiffs.get(proposeStep.step_id) : undefined;
+      const approvedDiff =
+        (approved_diff as ProposedDiff | undefined) ??
+        (proposeStep ? entry.proposedDiffs.get(proposeStep.step_id) : undefined);
       if (!approvedDiff) {
         return { status: "failed", outputs: entry.state.outputs, error_code: "no_proposed_diff" };
       }

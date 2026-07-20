@@ -52,6 +52,12 @@ export interface RunActivities {
     outputs: Record<string, unknown>;
     run: AgentRunInput;
     approved_diff_sha: string;
+    /**
+     * The approved diff itself, carried through workflow history so the write
+     * is reconstructable after a worker restart — never relying on the worker's
+     * in-memory cache (which a restart loses).
+     */
+    approved_diff: unknown;
   }): Promise<StepActivityResult>;
   /** Persists the approval request (one-time token minted server-side). */
   createApproval(input: {
@@ -212,6 +218,9 @@ export async function agentRunWorkflow(
   // 3–15. Execute steps in order.
   const orderedSteps = [...spec.steps].sort((a, b) => a.order - b.order);
   let lastDiffSha: string | null = null;
+  // The full approved diff travels in workflow state (persisted to history), so
+  // the write activity can run after a worker restart without any in-memory cache.
+  let lastDiff: unknown = null;
 
   for (const step of orderedSteps) {
     if (cancellation) return finish("cancelled");
@@ -259,6 +268,7 @@ export async function agentRunWorkflow(
       if (result.diff_sha256) {
         summary.diff_sha256 = result.diff_sha256;
         lastDiffSha = result.diff_sha256;
+        lastDiff = result.diff ?? null;
         proposedChanges += result.change_count ?? 0;
       }
       await bookkeeping.recordStepResult({
@@ -337,6 +347,7 @@ export async function agentRunWorkflow(
         outputs,
         run,
         approved_diff_sha: lastDiffSha,
+        approved_diff: lastDiff,
       });
     } catch {
       summary.status = "failed";
