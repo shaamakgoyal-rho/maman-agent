@@ -135,6 +135,7 @@ describe("asset provenance (owner-authorized Seedy pet)", () => {
     expect(statSync(join(dir, "spritesheet.webp")).isFile()).toBe(true);
     expect(statSync(join(dir, "pet.json")).isFile()).toBe(true);
     expect(statSync(join(dir, "character-brief.md")).isFile()).toBe(true);
+    expect(statSync(join(dir, "look-mechanics.md")).isFile()).toBe(true);
   });
 
   it("the committed atlas is byte-for-byte the vendored Seedy source", () => {

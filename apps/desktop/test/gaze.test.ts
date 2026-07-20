@@ -5,6 +5,7 @@ import {
   gazeFrameForPointer,
   pointerAngleDeg,
 } from "../src/pet/gaze.js";
+import { NEUTRAL_FRAME } from "../src/pet/atlas.js";
 
 describe("pointer angle (0°=up, 90°=right)", () => {
   it("maps cardinal directions correctly", () => {
@@ -46,5 +47,35 @@ describe("dead zone (acceptance 13)", () => {
   it("returns a frame just outside the dead zone", () => {
     expect(gazeFrameForPointer(GAZE_DEAD_ZONE_PX, 0)).toEqual({ row: 9, column: 4 }); // 90°
     expect(gazeFrameForPointer(0, GAZE_DEAD_ZONE_PX)).toEqual({ row: 10, column: 0 }); // 180°
+  });
+});
+
+// Locks the Seedy look-mechanics contract (see
+// src/pet/assets/seedy-source/look-mechanics.md) against the vendored atlas:
+// 16 steps of 22.5° clockwise from 000°=up, cardinals in screen coordinates.
+describe("Seedy look-mechanics contract", () => {
+  it("places the four cardinal poses at the documented cells", () => {
+    expect(gazeFrameForAngle(0)).toEqual({ row: 9, column: 0 }); // 000 up
+    expect(gazeFrameForAngle(90)).toEqual({ row: 9, column: 4 }); // 090 screen-right
+    expect(gazeFrameForAngle(180)).toEqual({ row: 10, column: 0 }); // 180 down
+    expect(gazeFrameForAngle(270)).toEqual({ row: 10, column: 4 }); // 270 screen-left
+  });
+
+  it("row 9 carries 000°–157.5° and row 10 carries 180°–337.5°", () => {
+    for (let i = 0; i < 8; i++) expect(gazeFrameForAngle(i * 22.5).row).toBe(9);
+    for (let i = 8; i < 16; i++) expect(gazeFrameForAngle(i * 22.5).row).toBe(10);
+  });
+
+  it("the two documented one-step transitions cross the row boundary", () => {
+    // 157.5° -> 180° is exactly one step (row 9 col 7 → row 10 col 0).
+    expect(gazeFrameForAngle(157.5)).toEqual({ row: 9, column: 7 });
+    expect(gazeFrameForAngle(180)).toEqual({ row: 10, column: 0 });
+    // 337.5° -> 000° is exactly one step (row 10 col 7 → row 9 col 0).
+    expect(gazeFrameForAngle(337.5)).toEqual({ row: 10, column: 7 });
+    expect(gazeFrameForAngle(360)).toEqual({ row: 9, column: 0 });
+  });
+
+  it("the neutral/front pose is the atlas cell the source manifest names", () => {
+    expect(NEUTRAL_FRAME).toEqual({ row: 0, column: 6 });
   });
 });
