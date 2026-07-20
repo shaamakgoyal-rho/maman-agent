@@ -12,15 +12,39 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
-import { principalSchema, type Principal } from "@maman/contracts";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  deviceRegisterRequestSchema,
+  principalSchema,
+  syncBatchRequestSchema,
+  SYNC_MAX_BATCH_SIZE,
+  uuidv7,
+  type Principal,
+} from "@maman/contracts";
 import type { ServerEnv } from "@maman/config";
 import type { Sql } from "postgres";
-import { createAuthenticator, requirePrincipal, type Authenticator } from "./auth.js";
+import {
+  createAuthenticator,
+  CompositeAuthenticator,
+  DeviceTokenAuthenticator,
+  requirePrincipal,
+  type Authenticator,
+} from "./auth.js";
 import { authorize } from "./authorization.js";
 import { adminAudit, adminOverview, engageKillSwitch, getAgentById } from "./admin.js";
+import {
+  createDeviceSession,
+  deviceSessionActive,
+  ingestSyncedEvents,
+  revokeDeviceSessionByToken,
+  upsertDevice,
+} from "@maman/db";
+import { DEVICE_TOKEN_TTL_MS, signDeviceToken } from "./device-token.js";
 import { registerConnectorRoutes } from "./connectors.js";
 import type { TokenTransport } from "@maman/connector-auth";
+
+const SYNC_MIN_INTERVAL_SECONDS = 30;
+const sha256Hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
 export type ServerDeps = {
   env: ServerEnv;
@@ -47,7 +71,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     throw new Error("FATAL: AUTH_MODE=dev is forbidden in production.");
   }
 
-  const authenticator = deps.authenticator ?? createAuthenticator(env);
+  // Device tokens are accepted first (desktop app), then the user authenticator.
+  // With a DB present, revocation/rotation is authoritative via a session check.
+  const sql = deps.sql;
+  const deviceAuth = new DeviceTokenAuthenticator(
+    env.DEVICE_TOKEN_SIGNING_SECRET,
+    sql
+      ? ({ organization_id, token_sha256 }) =>
+          deviceSessionActive(sql, { organizationId: organization_id }, token_sha256)
+      : undefined,
+  );
+  const authenticator = new CompositeAuthenticator(
+    deviceAuth,
+    deps.authenticator ?? createAuthenticator(env),
+  );
 
   const app = Fastify({
     logger: {
@@ -238,6 +275,151 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       { organizationId: principal.organization_id },
       principal.user_id,
     );
+  });
+
+  // ---- device enrollment + sync (desktop ↔ API) ----
+
+  // Enroll a device: an authenticated USER session exchanges device metadata for
+  // a scoped, HMAC-signed device token. The desktop stores it in the OS keychain.
+  app.post("/v1/devices/enroll", { schema: { tags: ["devices"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (principal.auth_mode === "device") {
+      return forbid(req, reply, "Re-enroll from a user session, or rotate the device token.");
+    }
+    if (!authorize(principal, "devices.manage_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to enroll a device.");
+    }
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const parsed = deviceRegisterRequestSchema.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+
+    const ctx = { organizationId: principal.organization_id };
+    const deviceId = await upsertDevice(deps.sql, ctx, {
+      device_id: uuidv7(),
+      owner_user_id: principal.user_id,
+      device_public_id: parsed.data.device_public_id,
+      platform: parsed.data.platform,
+      app_version: parsed.data.app_version,
+      observer_version: parsed.data.observer_version,
+      capabilities: parsed.data.capabilities,
+    });
+    const now = Date.now();
+    const expiresAtMs = now + DEVICE_TOKEN_TTL_MS;
+    const tokenFamilyId = uuidv7();
+    const token = signDeviceToken(
+      {
+        device_id: deviceId,
+        organization_id: principal.organization_id,
+        user_id: principal.user_id,
+        role: principal.role,
+        token_family_id: tokenFamilyId,
+        issued_at_ms: now,
+        expires_at_ms: expiresAtMs,
+      },
+      env.DEVICE_TOKEN_SIGNING_SECRET,
+    );
+    const expiresAt = new Date(expiresAtMs).toISOString();
+    await createDeviceSession(deps.sql, ctx, {
+      session_id: uuidv7(),
+      user_id: principal.user_id,
+      device_id: deviceId,
+      token_family_id: tokenFamilyId,
+      token_sha256: sha256Hex(token),
+      expires_at: expiresAt,
+    });
+    return {
+      device_id: deviceId,
+      device_token: token,
+      device_token_expires_at: expiresAt,
+      sync_policy: {
+        max_batch_size: SYNC_MAX_BATCH_SIZE,
+        min_sync_interval_seconds: SYNC_MIN_INTERVAL_SECONDS,
+      },
+      server_time: new Date(now).toISOString(),
+    };
+  });
+
+  // Rotate a device token: the current device token is revoked and a new one is
+  // issued in the same token family.
+  app.post("/v1/devices/rotate", { schema: { tags: ["devices"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (principal.auth_mode !== "device" || !principal.device_id) {
+      return forbid(req, reply, "Rotation requires the current device token.");
+    }
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const header = req.headers.authorization ?? "";
+    const currentToken = header.slice("Bearer ".length);
+    const ctx = { organizationId: principal.organization_id };
+    const revoked = await revokeDeviceSessionByToken(deps.sql, ctx, sha256Hex(currentToken));
+    if (!revoked) {
+      return reply.status(409).send({ status: 409, title: "Session already rotated or revoked" });
+    }
+    const now = Date.now();
+    const expiresAtMs = now + DEVICE_TOKEN_TTL_MS;
+    const token = signDeviceToken(
+      {
+        device_id: principal.device_id,
+        organization_id: principal.organization_id,
+        user_id: principal.user_id,
+        role: principal.role,
+        token_family_id: revoked.token_family_id,
+        issued_at_ms: now,
+        expires_at_ms: expiresAtMs,
+      },
+      env.DEVICE_TOKEN_SIGNING_SECRET,
+    );
+    const expiresAt = new Date(expiresAtMs).toISOString();
+    await createDeviceSession(deps.sql, ctx, {
+      session_id: uuidv7(),
+      user_id: principal.user_id,
+      device_id: principal.device_id,
+      token_family_id: revoked.token_family_id,
+      token_sha256: sha256Hex(token),
+      expires_at: expiresAt,
+      rotated_from_session_id: revoked.id,
+    });
+    return {
+      device_token: token,
+      device_token_expires_at: expiresAt,
+      server_time: new Date(now).toISOString(),
+    };
+  });
+
+  // Sync: the device uploads redacted, identity-safe projections. The strict
+  // contract rejects any raw-event shape; dedupe is on (org, event_id).
+  app.post("/v1/sync/events", { schema: { tags: ["sync"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (principal.auth_mode !== "device" || !principal.device_id) {
+      return forbid(req, reply, "Event sync requires a device token.");
+    }
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const parsed = syncBatchRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      // A rejected batch means a raw/oversized shape tried to leave the device.
+      return reply.status(400).send({ status: 400, title: "Invalid sync projection" });
+    }
+    const result = await ingestSyncedEvents(
+      deps.sql,
+      { organizationId: principal.organization_id },
+      {
+        device_id: principal.device_id,
+        owner_user_id: principal.user_id,
+        events: parsed.data.events.map((e) => ({
+          event_id: e.event_id,
+          occurred_at: e.occurred_at,
+          source: e.source,
+          app_category: e.app_category,
+          event_type: e.event_type,
+          sensitivity: e.sensitivity,
+          excluded_from_learning: e.excluded_from_learning,
+          projection: e,
+        })),
+      },
+    );
+    return { ...result, server_time: new Date().toISOString() };
   });
 
   registerConnectorRoutes(app, {

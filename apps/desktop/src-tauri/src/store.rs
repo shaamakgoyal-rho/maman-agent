@@ -141,7 +141,12 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
   encrypted_payload BLOB NOT NULL,
   attempt_count INTEGER NOT NULL DEFAULT 0,
   available_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- Local-only linkage so deletion removes queued projections. Never uploaded:
+  -- ref_event_id ties a queued projection to its source event; app_hmac is the
+  -- same de-identified keyed HMAC used for per-app deletion.
+  ref_event_id TEXT,
+  app_hmac TEXT
 );
 CREATE TABLE IF NOT EXISTS deletion_tombstones (
   tombstone_id TEXT PRIMARY KEY,
@@ -174,12 +179,16 @@ pub struct TimelineEntry {
     pub excluded_from_learning: bool,
 }
 
+fn unix_ms_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 fn now_iso() -> String {
     // RFC3339 UTC without external chrono dependency.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    iso_from_unix_ms(now.as_millis() as i64)
+    iso_from_unix_ms(unix_ms_now())
 }
 
 pub fn iso_from_unix_ms(ms: i64) -> String {
@@ -335,6 +344,13 @@ impl LocalStore {
         .bind(&expires_at)
         .execute(&self.pool)
         .await?;
+
+        // Enqueue the redacted, identity-safe projection for upload. This is the
+        // ONLY shape that leaves the device; the raw event stays encrypted here.
+        // Linked to event_id + app_hmac so deletion removes the queued projection.
+        let projection = redacted_projection(event, &app_category);
+        self.outbox_enqueue_event(&event_id, &app_hmac, &projection).await?;
+
         Ok(event_id)
     }
 
@@ -501,8 +517,9 @@ impl LocalStore {
             .await?;
         if result.rows_affected() > 0 {
             self.tombstone("workflow_event", event_id).await?;
-            // Deleted records leave the outbox within one minute; we do it now.
-            sqlx::query("DELETE FROM sync_outbox WHERE message_type = 'event' AND outbox_id = ?")
+            // The queued redacted projection is removed with the event so a
+            // deleted event can never sync afterward.
+            sqlx::query("DELETE FROM sync_outbox WHERE ref_event_id = ?")
                 .bind(event_id)
                 .execute(&self.pool)
                 .await?;
@@ -519,6 +536,11 @@ impl LocalStore {
             .await?;
         if result.rows_affected() > 0 {
             self.tombstone("app_history", &hmac).await?;
+            // Purge queued projections for this app so they never sync.
+            sqlx::query("DELETE FROM sync_outbox WHERE app_hmac = ?")
+                .bind(&hmac)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(result.rows_affected())
     }
@@ -526,6 +548,9 @@ impl LocalStore {
     pub async fn delete_all_events(&self) -> Result<u64, StoreError> {
         let result = sqlx::query("DELETE FROM workflow_events").execute(&self.pool).await?;
         sqlx::query("DELETE FROM workflow_episodes").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM sync_outbox WHERE message_type = 'event'")
+            .execute(&self.pool)
+            .await?;
         self.tombstone("all_events", "all").await?;
         Ok(result.rows_affected())
     }
@@ -585,11 +610,103 @@ impl LocalStore {
         Ok(id)
     }
 
+    /// Enqueues an event projection with local deletion linkage. The outbox id is
+    /// derived from the event id so re-inserting the same event does not duplicate
+    /// the queued projection, and deletion can target it precisely.
+    pub async fn outbox_enqueue_event(
+        &self,
+        event_id: &str,
+        app_hmac: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, StoreError> {
+        let id = format!("ob-evt-{event_id}");
+        let plaintext = serde_json::to_vec(payload)
+            .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
+        let aad = self.aad("sync_outbox", &id, 1);
+        let encrypted = self.encrypt(&plaintext, &aad)?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO sync_outbox
+             (outbox_id, message_type, encrypted_payload, attempt_count, available_at, created_at, ref_event_id, app_hmac)
+             VALUES (?, 'event', ?, 0, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&encrypted)
+        .bind(now_iso())
+        .bind(now_iso())
+        .bind(event_id)
+        .bind(app_hmac)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
     pub async fn outbox_depth(&self) -> Result<i64, StoreError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM sync_outbox")
             .fetch_one(&self.pool)
             .await?;
         Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Drains up to `limit` due outbox messages (available_at <= now), decrypting
+    /// each payload. Returns (outbox_id, message_type, payload). Rows whose
+    /// payload fails to decrypt are skipped (never surfaced as plaintext).
+    pub async fn outbox_drain(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, serde_json::Value)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT outbox_id, message_type, encrypted_payload FROM sync_outbox
+             WHERE available_at <= ? ORDER BY created_at ASC LIMIT ?",
+        )
+        .bind(now_iso())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.get("outbox_id");
+            let message_type: String = row.get("message_type");
+            let blob: Vec<u8> = row.get("encrypted_payload");
+            let aad = self.aad("sync_outbox", &id, 1);
+            if let Some(payload) = self
+                .decrypt(&blob, &aad)
+                .ok()
+                .and_then(|pt| serde_json::from_slice::<serde_json::Value>(&pt).ok())
+            {
+                out.push((id, message_type, payload));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Acknowledges (deletes) delivered messages. At-least-once: we only delete
+    /// after the server has accepted the batch.
+    pub async fn outbox_ack(&self, ids: &[String]) -> Result<u64, StoreError> {
+        let mut total = 0;
+        for id in ids {
+            let res = sqlx::query("DELETE FROM sync_outbox WHERE outbox_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            total += res.rows_affected();
+        }
+        Ok(total)
+    }
+
+    /// Defers messages after a failed delivery: increments attempt_count and
+    /// pushes availability out by `backoff_secs` (caller computes exponential).
+    pub async fn outbox_defer(&self, ids: &[String], backoff_secs: i64) -> Result<(), StoreError> {
+        let available = iso_from_unix_ms(unix_ms_now() + backoff_secs * 1000);
+        for id in ids {
+            sqlx::query(
+                "UPDATE sync_outbox SET attempt_count = attempt_count + 1, available_at = ? WHERE outbox_id = ?",
+            )
+            .bind(&available)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn tombstone_count(&self) -> Result<i64, StoreError> {
@@ -602,6 +719,57 @@ impl LocalStore {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+/// Builds the redacted, identity-safe projection uploaded to the server. It
+/// carries coarse category, semantic tags, and bucketed counts only — never an
+/// app display name, domain, URL, raw payload, or typed value. Mirrors the
+/// `syncEventProjectionSchema` contract exactly (strict on the server).
+pub fn redacted_projection(event: &serde_json::Value, app_category: &str) -> serde_json::Value {
+    let get = |path: &[&str]| -> Option<&serde_json::Value> {
+        let mut cur = event;
+        for p in path {
+            cur = cur.get(p)?;
+        }
+        Some(cur)
+    };
+    let item_count = get(&["context", "item_count"]).and_then(|v| v.as_i64());
+    let bucket = item_count.map(|n| match n {
+        i64::MIN..=1 => "1",
+        2..=10 => "2_10",
+        11..=50 => "11_50",
+        51..=200 => "51_200",
+        _ => "201_plus",
+    });
+    let mut projection = serde_json::json!({
+        "schema_version": 1,
+        "event_id": get(&["event_id"]).and_then(|v| v.as_str()).unwrap_or_default(),
+        "occurred_at": get(&["occurred_at"]).and_then(|v| v.as_str()).unwrap_or_default(),
+        "monotonic_ms": get(&["monotonic_ms"]).and_then(|v| v.as_i64()).unwrap_or(0).max(0),
+        "source": get(&["source"]).and_then(|v| v.as_str()).unwrap_or_default(),
+        "app_category": app_category,
+        "event_type": get(&["event_type"]).and_then(|v| v.as_str()).unwrap_or_default(),
+        "sensitivity": get(&["sensitivity"]).and_then(|v| v.as_str()).unwrap_or_default(),
+        "excluded_from_learning": false,
+    });
+    if let Some(v) = get(&["target", "role"]).and_then(|v| v.as_str()) {
+        projection["target_role"] = serde_json::json!(v);
+    }
+    if let Some(v) = get(&["target", "semantic_type"]).and_then(|v| v.as_str()) {
+        projection["semantic_type"] = serde_json::json!(v);
+    }
+    if let Some(v) = get(&["context", "object_type"]).and_then(|v| v.as_str()) {
+        projection["object_type"] = serde_json::json!(v);
+    }
+    if let Some(v) = get(&["duration_ms"]).and_then(|v| v.as_i64()) {
+        if v >= 0 {
+            projection["duration_ms"] = serde_json::json!(v);
+        }
+    }
+    if let Some(b) = bucket {
+        projection["item_count_bucket"] = serde_json::json!(b);
+    }
+    projection
 }
 
 /// Maps app identity to the coarse category exposed to the pattern engine.
@@ -671,6 +839,102 @@ mod tests {
         assert_eq!(timeline.len(), 1);
         assert!(timeline[0].app_display_name.contains(MARKER));
         assert_eq!(timeline[0].app_category, "crm");
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn outbox_enqueues_redacted_projection_without_identity() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        let event = json!({
+            "schema_version": 1,
+            "event_id": "0191bbbb-0000-7000-8000-000000000001",
+            "occurred_at": "2026-07-18T10:00:00.000Z",
+            "monotonic_ms": 4242,
+            "source": "macos_ax",
+            "app": { "display_name": "Salesforce ACME_SECRET_NAME", "domain": "acme.my.salesforce.com" },
+            "event_type": "record_update",
+            "target": { "role": "row", "semantic_type": "save_button" },
+            "context": { "object_type": "account", "item_count": 14 },
+            "duration_ms": 1500,
+            "sensitivity": "internal",
+            "redaction": { "applied": false, "reasons": [] }
+        });
+        store.insert_event(&event, 30).await.unwrap();
+
+        let drained = store.outbox_drain(10).await.unwrap();
+        assert_eq!(drained.len(), 1);
+        let (_, message_type, payload) = &drained[0];
+        assert_eq!(message_type, "event");
+
+        // Identity/raw content must NOT be present in the projection.
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("ACME_SECRET_NAME"), "app name leaked");
+        assert!(!serialized.contains("salesforce.com"), "domain leaked");
+        assert!(!serialized.contains("display_name"), "raw field leaked");
+
+        // Safe, redacted fields ARE present.
+        assert_eq!(payload["app_category"], "crm");
+        assert_eq!(payload["source"], "macos_ax");
+        assert_eq!(payload["semantic_type"], "save_button");
+        assert_eq!(payload["object_type"], "account");
+        assert_eq!(payload["item_count_bucket"], "11_50");
+        assert_eq!(payload["excluded_from_learning"], false);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn outbox_ack_removes_and_defer_delays_redelivery() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        store.insert_event(&sample_event(1), 30).await.unwrap();
+        store.insert_event(&sample_event(2), 30).await.unwrap();
+        assert_eq!(store.outbox_depth().await.unwrap(), 2);
+
+        let drained = store.outbox_drain(10).await.unwrap();
+        assert_eq!(drained.len(), 2);
+
+        // Ack the first → it is gone; one remains.
+        store.outbox_ack(&[drained[0].0.clone()]).await.unwrap();
+        assert_eq!(store.outbox_depth().await.unwrap(), 1);
+
+        // Defer the remaining with a long backoff → not due, so drain sees none,
+        // but it is still queued (at-least-once, retried later).
+        store.outbox_defer(&[drained[1].0.clone()], 3600).await.unwrap();
+        assert_eq!(store.outbox_drain(10).await.unwrap().len(), 0);
+        assert_eq!(store.outbox_depth().await.unwrap(), 1);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_an_event_purges_its_queued_projection() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        store.insert_event(&sample_event(1), 30).await.unwrap();
+        assert_eq!(store.outbox_depth().await.unwrap(), 1);
+
+        let event_id = sample_event(1)["event_id"].as_str().unwrap().to_string();
+        assert!(store.delete_event(&event_id).await.unwrap());
+        // A deleted event can never sync: its projection left the outbox too.
+        assert_eq!(store.outbox_depth().await.unwrap(), 0);
+        assert_eq!(store.tombstone_count().await.unwrap(), 1);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_app_history_purges_queued_projections_for_that_app() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        store.insert_event(&sample_event(1), 30).await.unwrap();
+        store.insert_event(&sample_event(2), 30).await.unwrap();
+        assert_eq!(store.outbox_depth().await.unwrap(), 2);
+        // Both sample events share the same app display name (same app_hmac).
+        let removed = store
+            .delete_app_history(&format!("Salesforce {MARKER}"))
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.outbox_depth().await.unwrap(), 0);
         store.close().await;
     }
 

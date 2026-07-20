@@ -9,3 +9,4 @@ export * from "./auth.js";
 export * from "./audit.js";
 export * from "./observer-protocol.js";
 export * from "./receipt.js";
+export * from "./sync.js";

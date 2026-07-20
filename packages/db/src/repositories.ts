@@ -497,6 +497,155 @@ export async function getConnectorSecret(
   });
 }
 
+// ---------- device enrollment + sessions ----------
+
+export async function upsertDevice(
+  sql: Sql,
+  ctx: TenantContext,
+  input: {
+    device_id: string;
+    owner_user_id: string;
+    device_public_id: string;
+    platform: string;
+    app_version: string;
+    observer_version: string;
+    capabilities: string[];
+  },
+): Promise<string> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<{ id: string }[]>`
+      INSERT INTO devices (
+        id, organization_id, owner_user_id, device_public_id, platform,
+        app_version, observer_version, capabilities, last_seen_at, created_at
+      ) VALUES (
+        ${input.device_id}, ${ctx.organizationId}, ${input.owner_user_id}, ${input.device_public_id},
+        ${input.platform}, ${input.app_version}, ${input.observer_version},
+        ${JSON.stringify(input.capabilities)}::jsonb, now(), now()
+      )
+      ON CONFLICT (organization_id, device_public_id) DO UPDATE SET
+        app_version = EXCLUDED.app_version,
+        observer_version = EXCLUDED.observer_version,
+        capabilities = EXCLUDED.capabilities,
+        last_seen_at = now(),
+        revoked_at = NULL
+      RETURNING id
+    `;
+    return rows[0]!.id;
+  });
+}
+
+export async function createDeviceSession(
+  sql: Sql,
+  ctx: TenantContext,
+  input: {
+    session_id: string;
+    user_id: string;
+    device_id: string;
+    token_family_id: string;
+    token_sha256: string;
+    expires_at: string;
+    rotated_from_session_id?: string;
+  },
+): Promise<void> {
+  await withTenant(sql, ctx, async (tx) => {
+    await tx`
+      INSERT INTO device_sessions (
+        id, organization_id, user_id, device_id, token_family_id,
+        refresh_token_sha256, rotated_from_session_id, expires_at, last_used_at, created_at
+      ) VALUES (
+        ${input.session_id}, ${ctx.organizationId}, ${input.user_id}, ${input.device_id},
+        ${input.token_family_id}, ${input.token_sha256}, ${input.rotated_from_session_id ?? null},
+        ${input.expires_at}, now(), now()
+      )
+    `;
+  });
+}
+
+/** Revokes the session for a device token hash. Returns the revoked session (for family reuse). */
+export async function revokeDeviceSessionByToken(
+  sql: Sql,
+  ctx: TenantContext,
+  tokenSha256: string,
+): Promise<{ id: string; device_id: string; token_family_id: string; user_id: string } | null> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<
+      { id: string; device_id: string; token_family_id: string; user_id: string }[]
+    >`
+      UPDATE device_sessions SET revoked_at = now()
+      WHERE organization_id = ${ctx.organizationId}
+        AND refresh_token_sha256 = ${tokenSha256}
+        AND revoked_at IS NULL
+      RETURNING id, device_id, token_family_id, user_id
+    `;
+    return rows[0] ?? null;
+  });
+}
+
+/** True when a non-revoked, unexpired device session exists for this token hash. */
+export async function deviceSessionActive(
+  sql: Sql,
+  ctx: TenantContext,
+  tokenSha256: string,
+): Promise<boolean> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<{ id: string }[]>`
+      SELECT id FROM device_sessions
+      WHERE organization_id = ${ctx.organizationId}
+        AND refresh_token_sha256 = ${tokenSha256}
+        AND revoked_at IS NULL
+        AND expires_at > now()
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  });
+}
+
+export type SyncedEventInput = {
+  event_id: string;
+  occurred_at: string;
+  source: string;
+  app_category: string;
+  event_type: string;
+  sensitivity: string;
+  excluded_from_learning: boolean;
+  projection: unknown;
+};
+
+/**
+ * Ingests redacted event projections, deduped on (organization_id, event_id).
+ * At-least-once upload + exactly-once store: re-uploading a batch inserts nothing
+ * new. Returns how many rows were newly accepted vs. already present.
+ */
+export async function ingestSyncedEvents(
+  sql: Sql,
+  ctx: TenantContext,
+  input: { device_id: string; owner_user_id: string; events: SyncedEventInput[] },
+): Promise<{ accepted: number; deduped: number }> {
+  return withTenant(sql, ctx, async (tx) => {
+    let accepted = 0;
+    for (const e of input.events) {
+      const rows = await tx<{ id: string }[]>`
+        INSERT INTO synced_events (
+          id, organization_id, owner_user_id, device_id, event_id, occurred_at,
+          source, app_category, event_type, sensitivity, excluded_from_learning, projection
+        ) VALUES (
+          gen_random_uuid(), ${ctx.organizationId}, ${input.owner_user_id}, ${input.device_id},
+          ${e.event_id}, ${e.occurred_at}, ${e.source}, ${e.app_category}, ${e.event_type},
+          ${e.sensitivity}, ${e.excluded_from_learning}, ${JSON.stringify(e.projection)}::jsonb
+        )
+        ON CONFLICT (organization_id, event_id) DO NOTHING
+        RETURNING id
+      `;
+      if (rows.length > 0) accepted += 1;
+    }
+    await tx`
+      UPDATE devices SET last_seen_at = now()
+      WHERE organization_id = ${ctx.organizationId} AND id = ${input.device_id}
+    `;
+    return { accepted, deduped: input.events.length - accepted };
+  });
+}
+
 /** Persists a refreshed, re-encrypted token for an org+provider connector. */
 export async function updateConnectorTokens(
   sql: Sql,
