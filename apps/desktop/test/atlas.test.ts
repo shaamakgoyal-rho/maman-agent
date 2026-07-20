@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll } from "vitest";
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -123,25 +123,27 @@ describe("authoritative timings (acceptance 7)", () => {
   });
 });
 
-describe("asset provenance (acceptance 19)", () => {
-  it("contains no imported Seedy spritesheet or proprietary asset", () => {
-    const offenders: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir)) {
-        if (["node_modules", "dist", "target", ".turbo", "coverage"].includes(entry)) continue;
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) walk(full);
-        else if (/seedy|cluely/i.test(entry)) offenders.push(full);
-      }
-    };
-    walk(join(here, ".."));
-    expect(offenders).toEqual([]);
+describe("asset provenance (owner-authorized Seedy pet)", () => {
+  // The pet uses the "Seedy" spritesheet, vendored with the owner's
+  // authorization (the project owner owns Seedy). Provenance is auditable: the
+  // authoritative source package is committed under assets/seedy-source, and the
+  // committed atlas must be a byte-for-byte copy of that vendored source.
+  const SEEDY_SOURCE = join(here, "..", "src", "pet", "assets", "seedy-source", "spritesheet.webp");
+
+  it("vendors the authoritative Seedy source package (atlas + brief + manifest)", () => {
+    const dir = join(here, "..", "src", "pet", "assets", "seedy-source");
+    expect(statSync(join(dir, "spritesheet.webp")).isFile()).toBe(true);
+    expect(statSync(join(dir, "pet.json")).isFile()).toBe(true);
+    expect(statSync(join(dir, "character-brief.md")).isFile()).toBe(true);
   });
 
-  it("the committed atlas is produced by the in-repo generator", () => {
-    // The generator script is the only asset source; it must exist alongside
-    // the atlas so the artwork is reproducible and provenance is auditable.
+  it("the committed atlas is byte-for-byte the vendored Seedy source", () => {
+    const source = readFileSync(SEEDY_SOURCE);
+    const committed = readFileSync(ATLAS_PATH);
+    expect(committed.equals(source)).toBe(true);
+  });
+
+  it("the generator that reproduces the atlas from the vendored source exists", () => {
     expect(statSync(join(here, "..", "scripts", "generate-spritesheet.ts")).isFile()).toBe(true);
-    expect(statSync(ATLAS_PATH).isFile()).toBe(true);
   });
 });

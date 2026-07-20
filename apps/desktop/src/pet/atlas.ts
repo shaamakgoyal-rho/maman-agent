@@ -68,6 +68,13 @@ export const TRANSIENT_CYCLES = 3;
 /** The calmest closed-eye idle frame held during `sleeping` (row 0, column 2). */
 export const SLEEP_FRAME = { row: 0, column: 2 } as const;
 
+/**
+ * Seedy's dedicated neutral/front cell (row 0, column 6). It carries artwork in
+ * the atlas even though no animation cycles through it; column 7 of row 0 stays
+ * transparent.
+ */
+export const NEUTRAL_FRAME = { row: 0, column: 6 } as const;
+
 /** Product pet-state → animation mapping (locked by the addendum). */
 export const mamanAnimationMap = {
   sleeping: "idle-sleep-frame",
@@ -106,5 +113,6 @@ export function requiredCells(): Array<{ row: number; column: number }> {
   for (const def of Object.values(ANIMATIONS)) {
     for (let c = 0; c < def.frames; c++) cells.push({ row: def.row, column: c });
   }
+  cells.push({ row: NEUTRAL_FRAME.row, column: NEUTRAL_FRAME.column });
   return cells;
 }

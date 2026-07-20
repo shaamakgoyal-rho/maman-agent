@@ -35,14 +35,20 @@ Package boundaries (lint-enforced — packages must not import from apps):
 - `packages/model-provider` — Anthropic + deterministic demo implementations
 - `packages/config` — product identity, design tokens, env validation
 
-## Pet rendering (Seedy-parity addendum — binding)
+## Pet rendering (Seedy atlas — binding)
 
 - Production pet renderer is the pixel-art `SpritesheetPetRenderer`
   (`apps/desktop/src/pet/SpriteMaman.tsx`), spriteVersionNumber 2.
 - Atlas: `apps/desktop/src/pet/assets/maman-atlas.webp` — 1536×2288, 8×11 grid of
-  192×208 cells, lossless WebP, generated ONLY by
-  `apps/desktop/scripts/generate-spritesheet.ts` (original artwork; never import,
-  trace, or recolor any external mascot's spritesheet).
+  192×208 cells, transparent WebP. **The pet uses the "Seedy" pixel-art
+  spritesheet, vendored with the owner's authorization** (the project owner owns
+  Seedy; authorization given 2026-07-20, superseding the earlier
+  "original-character / never bundle Seedy" rule). The authoritative source is
+  committed under `apps/desktop/src/pet/assets/seedy-source/` (spritesheet +
+  `pet.json` + `character-brief.md` + `README.md` + contact sheet);
+  `scripts/generate-spritesheet.ts` reproduces the rendered atlas by copying that
+  vendored source, so provenance stays auditable. The atlas contract (row layout)
+  is unchanged, so the scheduler/renderer/gaze are unaffected.
 - Animation rows/timings are locked in `apps/desktop/src/pet/atlas.ts`. No CSS
   keyframes for sprite animation — the deterministic `FrameScheduler` owns timing.
 - Idle plays at 6× slow timing; transients play 3 cycles then slow idle; state
