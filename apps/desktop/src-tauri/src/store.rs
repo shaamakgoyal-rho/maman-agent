@@ -87,6 +87,28 @@ pub fn delete_keychain_key(service: &str, account: &str) {
     }
 }
 
+/// Stores an opaque secret (e.g. the device token) in the OS keychain. The
+/// device token never touches the webview or JS — only the Rust core reads it.
+pub fn store_keychain_secret(service: &str, account: &str, value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(service, account).map_err(|e| e.to_string())?;
+    entry.set_password(value).map_err(|e| e.to_string())
+}
+
+/// Loads a keychain secret, or None when unset.
+pub fn load_keychain_secret(service: &str, account: &str) -> Option<String> {
+    let entry = keyring::Entry::new(service, account).ok()?;
+    entry.get_password().ok()
+}
+
+/// One decrypted outbox message awaiting upload.
+#[derive(Debug, Clone)]
+pub struct OutboxMessage {
+    pub outbox_id: String,
+    pub message_type: String,
+    pub payload: serde_json::Value,
+    pub attempt_count: i64,
+}
+
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS local_settings (
   key TEXT PRIMARY KEY,
@@ -648,14 +670,11 @@ impl LocalStore {
     }
 
     /// Drains up to `limit` due outbox messages (available_at <= now), decrypting
-    /// each payload. Returns (outbox_id, message_type, payload). Rows whose
-    /// payload fails to decrypt are skipped (never surfaced as plaintext).
-    pub async fn outbox_drain(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<(String, String, serde_json::Value)>, StoreError> {
+    /// each payload. Rows whose payload fails to decrypt are skipped (never
+    /// surfaced as plaintext).
+    pub async fn outbox_drain(&self, limit: i64) -> Result<Vec<OutboxMessage>, StoreError> {
         let rows = sqlx::query(
-            "SELECT outbox_id, message_type, encrypted_payload FROM sync_outbox
+            "SELECT outbox_id, message_type, encrypted_payload, attempt_count FROM sync_outbox
              WHERE available_at <= ? ORDER BY created_at ASC LIMIT ?",
         )
         .bind(now_iso())
@@ -666,6 +685,7 @@ impl LocalStore {
         for row in rows {
             let id: String = row.get("outbox_id");
             let message_type: String = row.get("message_type");
+            let attempt_count: i64 = row.get("attempt_count");
             let blob: Vec<u8> = row.get("encrypted_payload");
             let aad = self.aad("sync_outbox", &id, 1);
             if let Some(payload) = self
@@ -673,7 +693,7 @@ impl LocalStore {
                 .ok()
                 .and_then(|pt| serde_json::from_slice::<serde_json::Value>(&pt).ok())
             {
-                out.push((id, message_type, payload));
+                out.push(OutboxMessage { outbox_id: id, message_type, payload, attempt_count });
             }
         }
         Ok(out)
@@ -864,8 +884,9 @@ mod tests {
 
         let drained = store.outbox_drain(10).await.unwrap();
         assert_eq!(drained.len(), 1);
-        let (_, message_type, payload) = &drained[0];
-        assert_eq!(message_type, "event");
+        let msg = &drained[0];
+        assert_eq!(msg.message_type, "event");
+        let payload = &msg.payload;
 
         // Identity/raw content must NOT be present in the projection.
         let serialized = payload.to_string();
@@ -895,12 +916,12 @@ mod tests {
         assert_eq!(drained.len(), 2);
 
         // Ack the first → it is gone; one remains.
-        store.outbox_ack(&[drained[0].0.clone()]).await.unwrap();
+        store.outbox_ack(&[drained[0].outbox_id.clone()]).await.unwrap();
         assert_eq!(store.outbox_depth().await.unwrap(), 1);
 
         // Defer the remaining with a long backoff → not due, so drain sees none,
         // but it is still queued (at-least-once, retried later).
-        store.outbox_defer(&[drained[1].0.clone()], 3600).await.unwrap();
+        store.outbox_defer(&[drained[1].outbox_id.clone()], 3600).await.unwrap();
         assert_eq!(store.outbox_drain(10).await.unwrap().len(), 0);
         assert_eq!(store.outbox_depth().await.unwrap(), 1);
         store.close().await;

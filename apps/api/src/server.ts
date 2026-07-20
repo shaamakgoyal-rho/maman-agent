@@ -14,6 +14,7 @@ import {
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  agentSpecSchema,
   deviceRegisterRequestSchema,
   principalSchema,
   syncBatchRequestSchema,
@@ -36,6 +37,7 @@ import {
   createDeviceSession,
   deviceSessionActive,
   ingestSyncedEvents,
+  persistCompiledAgent,
   revokeDeviceSessionByToken,
   upsertDevice,
 } from "@maman/db";
@@ -259,6 +261,35 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       });
     }
     return agent;
+  });
+
+  // Persist a client-compiled AgentSpec server-side (agent + immutable version).
+  app.post("/v1/agents", { schema: { tags: ["agents"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "agents.write_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to create agents.");
+    }
+    if (!deps.sql) return reply.status(503).send({ status: 503 });
+    const body = z
+      .object({ spec: agentSpecSchema, policy_version_id: z.string().uuid().optional() })
+      .safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Invalid agent spec" });
+    const spec = body.data.spec;
+    // Tenant binding: the spec must belong to the caller's org (never trust the body).
+    if (spec.organization_id !== principal.organization_id) {
+      return reply.status(400).send({ status: 400, title: "Spec org mismatch" });
+    }
+    const result = await persistCompiledAgent(
+      deps.sql,
+      { organizationId: principal.organization_id },
+      {
+        spec,
+        spec_sha256: sha256Hex(JSON.stringify(spec)),
+        policy_version_id: body.data.policy_version_id ?? uuidv7(),
+      },
+    );
+    return result;
   });
 
   // Kill switch: any org member can halt everything for their org; an admin

@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import type { Sql, TransactionSql } from "postgres";
-import type { OrganizationRole } from "@maman/contracts";
+import type { AgentSpec, OrganizationRole } from "@maman/contracts";
 import * as schema from "./schema.js";
 import { withTenant, type TenantContext } from "./tenant.js";
 import { appendAuditEventTx } from "./audit.js";
@@ -343,6 +343,73 @@ export async function getAgentById(sql: Sql, ctx: TenantContext, agentId: string
       )
       .limit(1);
     return rows[0] ?? null;
+  });
+}
+
+/**
+ * Persists a client-compiled AgentSpec: upserts the agent and appends an
+ * immutable version (deduped on spec content hash). Returns the effective
+ * version. The agent's org must match the tenant context (checked by caller).
+ */
+export async function persistCompiledAgent(
+  sql: Sql,
+  ctx: TenantContext,
+  input: { spec: AgentSpec; spec_sha256: string; policy_version_id: string },
+): Promise<{ agent_id: string; version_id: string; version_number: number }> {
+  return withTenant(sql, ctx, async (tx) => {
+    const { spec } = input;
+    const [mx] = await tx<{ n: number }[]>`
+      SELECT COALESCE(MAX(version_number), 0)::int AS n FROM agent_versions
+      WHERE organization_id = ${ctx.organizationId} AND agent_id = ${spec.agent_id}
+    `;
+    const nextVersion = Number(mx?.n ?? 0) + 1;
+
+    await tx`
+      INSERT INTO agents (
+        id, organization_id, owner_user_id, source_pattern_id, name, description,
+        state, current_version_id, created_at, updated_at
+      ) VALUES (
+        ${spec.agent_id}, ${ctx.organizationId}, ${spec.owner_user_id}, NULL,
+        ${spec.name}, ${spec.description}, ${spec.state}, ${spec.version_id}, now(), now()
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        state = EXCLUDED.state,
+        current_version_id = EXCLUDED.current_version_id,
+        updated_at = now()
+    `;
+
+    const inserted = await tx<{ id: string; version_number: number }[]>`
+      INSERT INTO agent_versions (
+        id, organization_id, agent_id, version_number, schema_version, spec,
+        spec_sha256, created_by_type, policy_version_id, created_at
+      ) VALUES (
+        ${spec.version_id}, ${ctx.organizationId}, ${spec.agent_id}, ${nextVersion}, 1,
+        ${JSON.stringify(spec)}::jsonb, ${input.spec_sha256}, ${spec.created_by},
+        ${input.policy_version_id}, now()
+      )
+      ON CONFLICT (agent_id, spec_sha256) DO NOTHING
+      RETURNING id, version_number
+    `;
+    if (inserted.length > 0) {
+      return {
+        agent_id: spec.agent_id,
+        version_id: inserted[0]!.id,
+        version_number: inserted[0]!.version_number,
+      };
+    }
+    // The identical spec was already stored — return the existing version.
+    const [existing] = await tx<{ id: string; version_number: number }[]>`
+      SELECT id, version_number FROM agent_versions
+      WHERE organization_id = ${ctx.organizationId} AND agent_id = ${spec.agent_id}
+        AND spec_sha256 = ${input.spec_sha256}
+    `;
+    return {
+      agent_id: spec.agent_id,
+      version_id: existing!.id,
+      version_number: existing!.version_number,
+    };
   });
 }
 

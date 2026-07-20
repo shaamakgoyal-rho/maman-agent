@@ -38,6 +38,8 @@
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
     "@maman/db": "workspace:*",
-    "@maman/config": "workspace:*"
+    "@maman/config": "workspace:*",
+    "@maman/agent-runtime": "workspace:*",
+    "@maman/policy-engine": "workspace:*"
   }
 }

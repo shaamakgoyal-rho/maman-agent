@@ -8,6 +8,7 @@ pub mod browser_bridge;
 pub mod observer;
 pub mod redaction;
 pub mod store;
+pub mod sync;
 
 use std::collections::HashMap;
 use std::fs;
@@ -28,6 +29,14 @@ const SETTINGS_FILE: &str = "settings.json";
 const POSITIONS_FILE: &str = "pet-positions.json";
 const KEYCHAIN_SERVICE: &str = "com.maman.desktop.keys";
 const KEYCHAIN_ACCOUNT: &str = "local-store-key";
+/// Device token lives ONLY in the keychain — never in the webview or settings.
+const KEYCHAIN_DEVICE_TOKEN_ACCOUNT: &str = "device-token";
+const SYNC_INTERVAL_SECS: u64 = 60;
+
+/// API base URL for device→server calls. Overridable for local/hosted targets.
+fn api_base_url() -> String {
+    std::env::var("MAMAN_API_BASE_URL").unwrap_or_else(|_| "http://localhost:4000".to_string())
+}
 
 /// Managed state: the encrypted local store (initialized on first use).
 pub struct StoreState(pub Mutex<Option<LocalStore>>);
@@ -776,6 +785,120 @@ async fn device_data_wipe<R: Runtime>(
     Ok(())
 }
 
+// ---------- device enrollment + sync (all HTTP originates here in Rust) ----------
+
+/// The user's authenticated identity, handed from the webview after sign-in.
+/// In dev/local mode it is dev identity headers; in production a WorkOS bearer.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+enum UserAuth {
+    Dev {
+        organization_id: String,
+        user_id: String,
+        #[serde(default = "default_role")]
+        role: String,
+    },
+    Workos {
+        bearer: String,
+    },
+}
+
+fn default_role() -> String {
+    "member".to_string()
+}
+
+impl UserAuth {
+    fn headers(&self) -> Vec<(String, String)> {
+        match self {
+            UserAuth::Dev { organization_id, user_id, role } => vec![
+                ("x-dev-org-id".into(), organization_id.clone()),
+                ("x-dev-user-id".into(), user_id.clone()),
+                ("x-dev-role".into(), role.clone()),
+            ],
+            UserAuth::Workos { bearer } => {
+                vec![("authorization".into(), format!("Bearer {bearer}"))]
+            }
+        }
+    }
+}
+
+/// Enrolls this device: exchanges the user session for a scoped device token,
+/// which is stored in the keychain (never returned to the webview). Only the
+/// device id and expiry are surfaced.
+#[tauri::command]
+async fn device_enroll<R: Runtime>(
+    window: Window<R>,
+    auth: UserAuth,
+    device_public_id: String,
+    app_version: String,
+    observer_version: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let transport = sync::ReqwestTransport::new().map_err(|e| e.to_string())?;
+    let client = sync::SyncClient::new(transport, api_base_url());
+    let body = serde_json::json!({
+        "device_public_id": device_public_id,
+        "platform": "macos",
+        "app_version": app_version,
+        "observer_version": observer_version,
+        "capabilities": ["macos_ax"],
+    });
+    let result = client.enroll(auth.headers(), body).await.map_err(|e| e.to_string())?;
+    store::store_keychain_secret(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT, &result.device_token)?;
+    Ok(serde_json::json!({
+        "device_id": result.device_id,
+        "device_token_expires_at": result.device_token_expires_at,
+        "enrolled": true,
+    }))
+}
+
+/// Drains the encrypted outbox and uploads redacted projections now.
+#[tauri::command]
+async fn sync_now<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = store::load_keychain_secret(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT)
+        .ok_or("device not enrolled")?;
+    let guard = store_guard(&app, &state).await?;
+    let store = guard.as_ref().ok_or("store unavailable")?;
+    let transport = sync::ReqwestTransport::new().map_err(|e| e.to_string())?;
+    let client = sync::SyncClient::new(transport, api_base_url());
+    let outcome = sync::drain_and_push(store, &client, &token, 200)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "uploaded": outcome.uploaded,
+        "deduped": outcome.deduped,
+        "remaining": outcome.remaining,
+    }))
+}
+
+/// Background sync loop: periodically drains the outbox when a device is
+/// enrolled. Best-effort — failures defer the batch and are retried next tick.
+fn start_sync_loop<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(SYNC_INTERVAL_SECS)).await;
+            let Some(token) =
+                store::load_keychain_secret(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT)
+            else {
+                continue;
+            };
+            let state = app.state::<StoreState>();
+            let Ok(guard) = store_guard(&app, &state).await else {
+                continue;
+            };
+            let Some(store) = guard.as_ref() else { continue };
+            let Ok(transport) = sync::ReqwestTransport::new() else { continue };
+            let client = sync::SyncClient::new(transport, api_base_url());
+            let _ = sync::drain_and_push(store, &client, &token, 200).await;
+        }
+    });
+}
+
 // ---------- entry ----------
 
 pub fn run() {
@@ -803,11 +926,14 @@ pub fn run() {
             events_delete_app,
             events_set_excluded,
             device_data_wipe,
-            pairing_begin
+            pairing_begin,
+            device_enroll,
+            sync_now
         ])
         .setup(|app| {
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
+            start_sync_loop(app.handle().clone());
 
             // Global shortcut: Control+Option+P toggles the panel.
             {

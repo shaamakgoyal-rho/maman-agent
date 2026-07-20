@@ -4,9 +4,51 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { createDbClient, loadMigrations, migrateUp, withTenant, type DbClient } from "@maman/db";
-import { uuidv7 } from "@maman/contracts";
+import { uuidv7, type AgentSpec } from "@maman/contracts";
+import { compileAgentSpec } from "@maman/agent-runtime";
+import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import type { ServerEnv } from "@maman/config";
 import { buildServer } from "../../src/server.js";
+
+async function compileSpecFor(org: string, user: string): Promise<AgentSpec> {
+  const result = await compileAgentSpec({
+    candidate: {
+      pattern_id: uuidv7(),
+      owner_user_id: user,
+      first_seen_at: "2026-07-14T09:40:00.000Z",
+      last_seen_at: "2026-07-16T15:00:00.000Z",
+      occurrence_count: 6,
+      distinct_day_count: 3,
+      median_duration_ms: 660_000,
+      p90_duration_ms: 780_000,
+      canonical_sequence: [],
+      episode_ids: [],
+      similarity_mean: 0.9,
+      repeatability_score: 0.9,
+      feasibility_score: 0.8,
+      risk_score: 0.3,
+      projected_minutes_saved_weekly: 70,
+      opportunity_score: 0.72,
+      status: "eligible",
+    },
+    generalized_intent: "reconcile_account_list",
+    desired_outcome: "Reconcile the account list with Salesforce.",
+    organization_id: org,
+    owner_user_id: user,
+    budgets: {
+      max_runtime_seconds: 300,
+      max_model_tokens: 12_000,
+      max_cost_usd: 1,
+      max_records_read: 1000,
+      max_records_written: 20,
+    },
+    policy: DEFAULT_ORG_POLICY,
+    policy_version_id: uuidv7(),
+    now: () => new Date("2026-07-18T18:00:00.000Z"),
+  });
+  if (result.status !== "valid") throw new Error("compile failed");
+  return result.spec;
+}
 
 const migrationsDir = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -178,6 +220,50 @@ describe("device enrollment + sync round-trip (M12)", () => {
     // New token works.
     const fresh = await app.inject({ method: "GET", url: "/v1/me", headers: asDevice(newToken) });
     expect(fresh.statusCode).toBe(200);
+  });
+
+  it("POST /v1/agents persists a compiled spec and is idempotent on re-post", async () => {
+    const spec = await compileSpecFor(orgA, userA);
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: asUser(orgA, userA),
+      payload: { spec },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      agent_id: spec.agent_id,
+      version_id: spec.version_id,
+      version_number: 1,
+    });
+
+    // Re-posting the identical spec returns the same version (no duplicate).
+    const again = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: asUser(orgA, userA),
+      payload: { spec },
+    });
+    expect(again.json()).toMatchObject({ version_id: spec.version_id, version_number: 1 });
+
+    const rows = await withTenant(client.sql, { organizationId: orgA }, async (tx) => {
+      const r = await tx<
+        { n: string }[]
+      >`SELECT count(*)::text AS n FROM agent_versions WHERE agent_id = ${spec.agent_id}`;
+      return Number(r[0]!.n);
+    });
+    expect(rows).toBe(1);
+  });
+
+  it("POST /v1/agents rejects a spec whose org is not the caller's (no cross-tenant write)", async () => {
+    const foreignSpec = await compileSpecFor(orgB, userB);
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: asUser(orgA, userA), // caller is org A, spec claims org B
+      payload: { spec: foreignSpec },
+    });
+    expect(res.statusCode).toBe(400);
   });
 
   it("a device token is strictly tenant-scoped: synced rows never cross orgs", async () => {
