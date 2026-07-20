@@ -354,7 +354,14 @@ export async function getAgentById(sql: Sql, ctx: TenantContext, agentId: string
 export async function persistCompiledAgent(
   sql: Sql,
   ctx: TenantContext,
-  input: { spec: AgentSpec; spec_sha256: string; policy_version_id: string },
+  input: {
+    spec: AgentSpec;
+    spec_sha256: string;
+    policy_version_id: string;
+    model_input_tokens?: number;
+    model_output_tokens?: number;
+    model_cost_usd?: number;
+  },
 ): Promise<{ agent_id: string; version_id: string; version_number: number }> {
   return withTenant(sql, ctx, async (tx) => {
     const { spec } = input;
@@ -383,11 +390,14 @@ export async function persistCompiledAgent(
     const inserted = await tx<{ id: string; version_number: number }[]>`
       INSERT INTO agent_versions (
         id, organization_id, agent_id, version_number, schema_version, spec,
-        spec_sha256, created_by_type, policy_version_id, created_at
+        spec_sha256, created_by_type, policy_version_id, created_at,
+        model_input_tokens, model_output_tokens, model_cost_usd
       ) VALUES (
         ${spec.version_id}, ${ctx.organizationId}, ${spec.agent_id}, ${nextVersion}, 1,
         ${JSON.stringify(spec)}::jsonb, ${input.spec_sha256}, ${spec.created_by},
-        ${input.policy_version_id}, now()
+        ${input.policy_version_id}, now(),
+        ${input.model_input_tokens ?? 0}, ${input.model_output_tokens ?? 0},
+        ${input.model_cost_usd ?? 0}
       )
       ON CONFLICT (agent_id, spec_sha256) DO NOTHING
       RETURNING id, version_number
@@ -423,13 +433,20 @@ export async function getCurrentAgentSpec(
   agent_version_id: string;
   policy_version_id: string;
   owner_user_id: string;
+  model_cost_usd: number;
 } | null> {
   return withTenant(sql, ctx, async (tx) => {
     const rows = await tx<
-      { spec: AgentSpec; id: string; policy_version_id: string; owner_user_id: string }[]
+      {
+        spec: AgentSpec;
+        id: string;
+        policy_version_id: string;
+        owner_user_id: string;
+        model_cost_usd: string;
+      }[]
     >`
       SELECT av.spec AS spec, av.id AS id, av.policy_version_id AS policy_version_id,
-             a.owner_user_id AS owner_user_id
+             a.owner_user_id AS owner_user_id, av.model_cost_usd AS model_cost_usd
       FROM agents a
       JOIN agent_versions av ON av.id = a.current_version_id
       WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${agentId}
@@ -445,6 +462,7 @@ export async function getCurrentAgentSpec(
       agent_version_id: rows[0]!.id,
       policy_version_id: rows[0]!.policy_version_id,
       owner_user_id: rows[0]!.owner_user_id,
+      model_cost_usd: Number(rows[0]!.model_cost_usd ?? 0),
     };
   });
 }

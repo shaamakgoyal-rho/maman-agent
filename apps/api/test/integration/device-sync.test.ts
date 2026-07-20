@@ -255,6 +255,67 @@ describe("device enrollment + sync round-trip (M12)", () => {
     expect(rows).toBe(1);
   });
 
+  it("POST /v1/agents/compile compiles server-side with the demo provider (deterministic, $0)", async () => {
+    const candidate = {
+      pattern_id: uuidv7(),
+      owner_user_id: userA,
+      first_seen_at: "2026-07-14T09:40:00.000Z",
+      last_seen_at: "2026-07-16T15:00:00.000Z",
+      occurrence_count: 6,
+      distinct_day_count: 3,
+      median_duration_ms: 660_000,
+      p90_duration_ms: 780_000,
+      canonical_sequence: [],
+      episode_ids: [],
+      similarity_mean: 0.9,
+      repeatability_score: 0.9,
+      feasibility_score: 0.8,
+      risk_score: 0.3,
+      projected_minutes_saved_weekly: 70,
+      opportunity_score: 0.72,
+      status: "eligible",
+    };
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/agents/compile",
+      headers: asUser(orgA, userA),
+      payload: {
+        candidate,
+        generalized_intent: "reconcile_account_list",
+        desired_outcome: "Reconcile the account list with Salesforce.",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.compiled_by).toBe("recipe");
+    expect(body.model_cost_usd).toBe(0); // demo provider is free
+    expect(body.spec.organization_id).toBe(orgA);
+    expect(body.spec.steps.length).toBeGreaterThan(0);
+  });
+
+  it("POST /v1/agents records the compile model cost on the version", async () => {
+    const spec = await compileSpecFor(orgA, userA);
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/agents",
+      headers: asUser(orgA, userA),
+      payload: {
+        spec,
+        model_usage: { input_tokens: 1200, output_tokens: 400, model_alias: "claude-sonnet-5" },
+        model_cost_usd: 0.0096,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const stored = await withTenant(client.sql, { organizationId: orgA }, async (tx) => {
+      const r = await tx<{ model_cost_usd: string; model_input_tokens: string }[]>`
+        SELECT model_cost_usd, model_input_tokens FROM agent_versions WHERE id = ${spec.version_id}
+      `;
+      return r[0]!;
+    });
+    expect(Number(stored.model_cost_usd)).toBeCloseTo(0.0096, 6);
+    expect(Number(stored.model_input_tokens)).toBe(1200);
+  });
+
   it("POST /v1/agents rejects a spec whose org is not the caller's (no cross-tenant write)", async () => {
     const foreignSpec = await compileSpecFor(orgB, userB);
     const res = await app.inject({

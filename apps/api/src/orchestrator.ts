@@ -12,7 +12,12 @@ import type { AgentRunInput, AgentSpec } from "@maman/contracts";
 export type PendingApproval = { step_id: string; diff_sha256: string } | null;
 
 export interface RunOrchestrator {
-  startRun(input: { workflowId: string; run: AgentRunInput; spec: AgentSpec }): Promise<void>;
+  startRun(input: {
+    workflowId: string;
+    run: AgentRunInput;
+    spec: AgentSpec;
+    model_cost_usd?: number;
+  }): Promise<void>;
   getStatus(workflowId: string): Promise<string>;
   getPendingApproval(workflowId: string): Promise<PendingApproval>;
   approve(
@@ -37,11 +42,12 @@ export class TemporalRunOrchestrator implements RunOrchestrator {
     workflowId: string;
     run: AgentRunInput;
     spec: AgentSpec;
+    model_cost_usd?: number;
   }): Promise<void> {
     await this.client.start(WORKFLOW_TYPE, {
       taskQueue: this.taskQueue,
       workflowId: input.workflowId,
-      args: [{ run: input.run, spec: input.spec }],
+      args: [{ run: input.run, spec: input.spec, model_cost_usd: input.model_cost_usd ?? 0 }],
     });
   }
 

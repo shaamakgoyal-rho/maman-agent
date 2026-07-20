@@ -14,14 +14,19 @@ import {
 import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  agentBudgetsSchema,
   agentSpecSchema,
   deviceRegisterRequestSchema,
+  patternCandidateSchema,
   principalSchema,
   syncBatchRequestSchema,
   SYNC_MAX_BATCH_SIZE,
   uuidv7,
   type Principal,
 } from "@maman/contracts";
+import { compileAgentSpec } from "@maman/agent-runtime";
+import { createModelProvider } from "@maman/model-provider";
+import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import type { ServerEnv } from "@maman/config";
 import type { Sql } from "postgres";
 import {
@@ -270,6 +275,59 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return agent;
   });
 
+  // Compile a helper server-side using the configured model provider (honors
+  // MODEL_PROVIDER; demo is default + deterministic). The model may only name
+  // and draft; the deterministic validator + policy engine still gate the spec,
+  // and the compile cost is capped by the request budget.
+  const DEFAULT_COMPILE_BUDGETS = {
+    max_runtime_seconds: 300,
+    max_model_tokens: 12_000,
+    max_cost_usd: 1,
+    max_records_read: 1000,
+    max_records_written: 20,
+  };
+  app.post("/v1/agents/compile", { schema: { tags: ["agents"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "agents.write_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to compile agents.");
+    }
+    const body = z
+      .object({
+        candidate: patternCandidateSchema,
+        generalized_intent: z.string().min(1),
+        desired_outcome: z.string().min(1).max(2000),
+        budgets: agentBudgetsSchema.optional(),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+
+    const result = await compileAgentSpec({
+      candidate: body.data.candidate,
+      generalized_intent: body.data.generalized_intent,
+      desired_outcome: body.data.desired_outcome,
+      organization_id: principal.organization_id,
+      owner_user_id: principal.user_id,
+      budgets: body.data.budgets ?? DEFAULT_COMPILE_BUDGETS,
+      policy: DEFAULT_ORG_POLICY,
+      policy_version_id: uuidv7(),
+      now: () => new Date(),
+      model: createModelProvider(env),
+    });
+    if (result.status !== "valid") {
+      return reply
+        .status(422)
+        .send({ status: 422, title: "Not compilable", issues: result.issues });
+    }
+    return {
+      spec: result.spec,
+      plain_language_plan: result.plain_language_plan,
+      compiled_by: result.compiled_by,
+      model_usage: result.model_usage,
+      model_cost_usd: result.model_cost_usd,
+    };
+  });
+
   // Persist a client-compiled AgentSpec server-side (agent + immutable version).
   app.post("/v1/agents", { schema: { tags: ["agents"] } }, async (req, reply) => {
     const principal = await requirePrincipal(req, reply);
@@ -279,7 +337,19 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
     if (!deps.sql) return reply.status(503).send({ status: 503 });
     const body = z
-      .object({ spec: agentSpecSchema, policy_version_id: z.string().uuid().optional() })
+      .object({
+        spec: agentSpecSchema,
+        policy_version_id: z.string().uuid().optional(),
+        // Compile cost from POST /v1/agents/compile, recorded on the version.
+        model_usage: z
+          .object({
+            input_tokens: z.number().int().nonnegative(),
+            output_tokens: z.number().int().nonnegative(),
+            model_alias: z.string(),
+          })
+          .optional(),
+        model_cost_usd: z.number().nonnegative().optional(),
+      })
       .safeParse(req.body);
     if (!body.success) return reply.status(400).send({ status: 400, title: "Invalid agent spec" });
     const spec = body.data.spec;
@@ -294,6 +364,15 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         spec,
         spec_sha256: sha256Hex(JSON.stringify(spec)),
         policy_version_id: body.data.policy_version_id ?? uuidv7(),
+        ...(body.data.model_usage
+          ? {
+              model_input_tokens: body.data.model_usage.input_tokens,
+              model_output_tokens: body.data.model_usage.output_tokens,
+            }
+          : {}),
+        ...(body.data.model_cost_usd !== undefined
+          ? { model_cost_usd: body.data.model_cost_usd }
+          : {}),
       },
     );
     return result;
@@ -352,7 +431,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       policy_version_id: agent.policy_version_id,
       requested_at: new Date().toISOString(),
     };
-    await deps.orchestrator.startRun({ workflowId, run, spec: agent.spec });
+    await deps.orchestrator.startRun({
+      workflowId,
+      run,
+      spec: agent.spec,
+      model_cost_usd: agent.model_cost_usd,
+    });
     return { run_id: created.run_id, workflow_id: workflowId, duplicate: false };
   });
 

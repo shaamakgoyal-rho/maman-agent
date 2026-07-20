@@ -234,6 +234,7 @@ describe("real-mode supervised run (M11)", () => {
       })),
       intervention_ms: 60_000,
       total_cost_usd: 0.08,
+      model_cost_usd: 0,
     });
 
     // The decrypted vault token was actually used against Salesforce.

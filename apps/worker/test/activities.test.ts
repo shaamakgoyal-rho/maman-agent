@@ -140,11 +140,15 @@ describe("worker activities", () => {
       })),
       intervention_ms: 0,
       total_cost_usd: 0,
+      model_cost_usd: 0.05,
     });
     const receipt = (sink.receipt as ReturnType<typeof vi.fn>).mock.calls[0]![0];
     expect(() => executionReceiptSchema.parse(receipt)).not.toThrow();
     expect(receipt.totals.writes_completed).toBe(0);
     expect(receipt.roi.net_time_saved_ms).toBe(0);
+    // The compile model cost appears on the receipt's model cost line.
+    expect(receipt.totals.model_cost_usd).toBe(0.05);
+    expect(receipt.totals.total_cost_usd).toBe(0.05);
   });
 
   it("policy re-evaluation denies an over-budget spec", async () => {

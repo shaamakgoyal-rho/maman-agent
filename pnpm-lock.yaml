@@ -32,6 +32,9 @@ importers:
       '@fastify/swagger':
         specifier: ^9.4.0
         version: 9.8.1
+      '@maman/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
       '@maman/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -44,6 +47,12 @@ importers:
       '@maman/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@maman/model-provider':
+        specifier: workspace:*
+        version: link:../../packages/model-provider
+      '@maman/policy-engine':
+        specifier: workspace:*
+        version: link:../../packages/policy-engine
       '@maman/roi-engine':
         specifier: workspace:*
         version: link:../../packages/roi-engine
@@ -66,12 +75,6 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
-      '@maman/agent-runtime':
-        specifier: workspace:*
-        version: link:../../packages/agent-runtime
-      '@maman/policy-engine':
-        specifier: workspace:*
-        version: link:../../packages/policy-engine
       '@maman/tsconfig':
         specifier: workspace:*
         version: link:../../packages/tsconfig

@@ -12,6 +12,7 @@ export {
 } from "./provider.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
+export { modelCostUsd, sumUsage, DEFAULT_MODEL_PRICES, type ModelPrice } from "./pricing.js";
 
 import { DemoModelProvider } from "./demo.js";
 import { AnthropicModelProvider } from "./anthropic.js";
@@ -19,10 +20,10 @@ import type { ModelProvider } from "./provider.js";
 
 /** Factory honoring MODEL_PROVIDER config; falls back to demo when unconfigured. */
 export function createModelProvider(env: {
-  MODEL_PROVIDER?: string;
-  ANTHROPIC_API_KEY?: string;
-  ANTHROPIC_CLASSIFIER_MODEL?: string;
-  ANTHROPIC_COMPILER_MODEL?: string;
+  MODEL_PROVIDER?: string | undefined;
+  ANTHROPIC_API_KEY?: string | undefined;
+  ANTHROPIC_CLASSIFIER_MODEL?: string | undefined;
+  ANTHROPIC_COMPILER_MODEL?: string | undefined;
 }): ModelProvider {
   if (env.MODEL_PROVIDER === "anthropic" && env.ANTHROPIC_API_KEY) {
     return new AnthropicModelProvider({

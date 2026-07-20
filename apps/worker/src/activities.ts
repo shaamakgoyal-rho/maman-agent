@@ -215,7 +215,15 @@ export function createActivities(deps: ActivityDeps): RunActivities {
       await deps.sink.stepResult(run.run_id, summary, result);
     },
 
-    async finalizeRun({ run, spec, status, steps, intervention_ms, total_cost_usd }) {
+    async finalizeRun({
+      run,
+      spec,
+      status,
+      steps,
+      intervention_ms,
+      total_cost_usd,
+      model_cost_usd,
+    }) {
       const receipt = buildReceipt({
         run,
         spec,
@@ -223,6 +231,7 @@ export function createActivities(deps: ActivityDeps): RunActivities {
         steps,
         intervention_ms,
         total_cost_usd,
+        model_cost_usd,
         entry: getRun(run),
         now: deps.now(),
       });
@@ -256,10 +265,11 @@ function buildReceipt(input: {
   steps: RunStepSummary[];
   intervention_ms: number;
   total_cost_usd: number;
+  model_cost_usd: number;
   entry: { state: RunState; startedAt: number };
   now: Date;
 }): unknown {
-  const { run, spec, steps, intervention_ms, total_cost_usd, now } = input;
+  const { run, spec, steps, intervention_ms, total_cost_usd, model_cost_usd, now } = input;
   const completedWrites = steps.filter(
     (s) => s.mode === "write" && s.status === "completed",
   ).length;
@@ -313,9 +323,11 @@ function buildReceipt(input: {
       duration_ms: durationMs,
       model_input_tokens: 0,
       model_output_tokens: 0,
-      model_cost_usd: 0,
+      // The run itself is deterministic (no model at run time); this line
+      // carries the one-time model cost of compiling the version it ran.
+      model_cost_usd: model_cost_usd,
       provider_cost_usd: total_cost_usd,
-      total_cost_usd,
+      total_cost_usd: total_cost_usd + model_cost_usd,
     },
     roi,
     outcome:

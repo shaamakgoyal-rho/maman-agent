@@ -6,7 +6,13 @@ import {
   type PatternCandidate,
   type PolicyDecision,
 } from "@maman/contracts";
-import type { ModelProvider } from "@maman/model-provider";
+import {
+  modelCostUsd,
+  sumUsage,
+  type ModelProvider,
+  type ModelUsage,
+  type NamingInput,
+} from "@maman/model-provider";
 import { evaluateSpec, type EvaluationContext, type OrgPolicy } from "@maman/policy-engine";
 import { validateAgentSpec, type ValidationIssue } from "./validator.js";
 
@@ -40,8 +46,15 @@ export type CompileResult =
       policy_decision: PolicyDecision;
       warnings: string[];
       compiled_by: "recipe" | "model";
+      /** Model usage across naming + drafting for this compile (null if none). */
+      model_usage: ModelUsage | null;
+      /** Priced compile cost from the usage above ($0 in demo mode). */
+      model_cost_usd: number;
     }
   | { status: "blocked"; issues: ValidationIssue[]; message: string };
+
+/** Copy the model may set (title/summary only); deterministic values win. */
+type NameCopy = { title: string; summary: string } | null;
 
 // ---- deterministic recipes ----
 
@@ -202,31 +215,73 @@ const RECONCILIATION_RECIPE: Recipe = {
 
 const RECIPES: Recipe[] = [RECONCILIATION_RECIPE];
 
+function allowedCapabilityIds(req: CompileRequest): string[] {
+  return req.candidate.canonical_sequence
+    .flatMap((token) => capabilitiesForToken(token))
+    .filter((v, i, a) => a.indexOf(v) === i);
+}
+
+/** Redacted, identity-safe naming input built from the candidate. */
+function namingInputFor(req: CompileRequest, allowed: string[]): NamingInput {
+  return {
+    generalized_intent: req.generalized_intent,
+    app_categories: [],
+    object_type: "record",
+    occurrence_count: req.candidate.occurrence_count,
+    distinct_day_count: req.candidate.distinct_day_count,
+    median_duration_minutes: Math.round(req.candidate.median_duration_ms / 60000),
+    redacted_steps: req.candidate.canonical_sequence.map((token, i) => ({
+      order: i + 1,
+      app: "app",
+      action: token,
+    })),
+    allowed_capability_ids: allowed,
+  };
+}
+
 export async function compileAgentSpec(req: CompileRequest): Promise<CompileResult> {
-  const recipe = RECIPES.find((r) => r.intent === req.generalized_intent);
-  if (recipe) {
-    return finalize(req, recipe.build(req), "recipe", []);
+  const allowed = allowedCapabilityIds(req);
+  const usages: ModelUsage[] = [];
+  const budget = req.budgets.max_cost_usd;
+  let nameCopy: NameCopy = null;
+
+  // Semantic naming (COPY only) — best effort. Deterministic values remain
+  // authoritative; a failed/over-budget naming call keeps the deterministic
+  // title/summary. The model may never introduce a capability id here either.
+  if (req.model) {
+    const naming = await req.model.nameRecommendation(namingInputFor(req, allowed));
+    if (naming.ok && modelCostUsd(sumUsage([...usages, naming.usage])) <= budget) {
+      usages.push(naming.usage);
+      nameCopy = { title: naming.value.title, summary: naming.value.summary };
+    }
   }
 
-  // No recipe: constrained model generation, tried twice, fully validated.
+  // 1. Deterministic recipe when the intent maps to a known shape.
+  const recipe = RECIPES.find((r) => r.intent === req.generalized_intent);
+  if (recipe) {
+    return finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
+  }
+
+  // 2. Constrained model draft (twice), fully validated. Budget-capped: a draft
+  //    whose priced cost would exceed the compile budget is dropped and we fall
+  //    through to "blocked" rather than compiling an over-budget helper.
   if (req.model) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const draft = await req.model.draftAgentPlan({
         generalized_intent: req.generalized_intent,
         desired_outcome: req.desired_outcome,
         canonical_steps: req.candidate.canonical_sequence,
-        allowed_capability_ids: req.candidate.canonical_sequence
-          .flatMap((token) => capabilitiesForToken(token))
-          .filter((v, i, a) => a.indexOf(v) === i),
+        allowed_capability_ids: allowed,
         budgets: {
           max_cost_usd: req.budgets.max_cost_usd,
           max_records_written: req.budgets.max_records_written,
         },
       });
       if (!draft.ok) continue;
+      if (modelCostUsd(sumUsage([...usages, draft.usage])) > budget) break; // over budget → stop
       const built = planToSpecParts(draft.value);
       if (!built) continue;
-      const result = finalize(req, built, "model", []);
+      const result = finalize(req, built, "model", [], [...usages, draft.usage], nameCopy);
       if (result.status === "valid") return result;
     }
   }
@@ -280,8 +335,14 @@ function finalize(
   parts: { steps: AgentStep[]; inputs: AgentSpec["inputs"]; assertions: AgentSpec["assertions"] },
   compiled_by: "recipe" | "model",
   warnings: string[],
+  usages: ModelUsage[],
+  nameCopy: NameCopy,
 ): CompileResult {
   const now = req.now();
+  const deterministicName =
+    req.generalized_intent === "reconcile_account_list"
+      ? "Reconcile account lists with Salesforce"
+      : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`;
   const spec: AgentSpec = {
     schema_version: 1,
     agent_id: uuidv7({ timestampMs: now.getTime(), random: seeded(req.candidate.pattern_id) }),
@@ -291,11 +352,9 @@ function finalize(
     }),
     organization_id: req.organization_id,
     owner_user_id: req.owner_user_id,
-    name:
-      req.generalized_intent === "reconcile_account_list"
-        ? "Reconcile account lists with Salesforce"
-        : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`,
-    description: req.desired_outcome,
+    // Model may supply the title as COPY; deterministic name is the fallback.
+    name: nameCopy?.title ?? deterministicName,
+    description: nameCopy?.summary ?? req.desired_outcome,
     generalized_intent: req.generalized_intent,
     source_pattern_id: req.candidate.pattern_id,
     state: "draft",
@@ -336,6 +395,7 @@ function finalize(
     };
   }
 
+  const model_usage = usages.length > 0 ? sumUsage(usages) : null;
   return {
     status: "valid",
     spec: validation.spec,
@@ -343,6 +403,8 @@ function finalize(
     policy_decision: decision,
     warnings,
     compiled_by,
+    model_usage,
+    model_cost_usd: model_usage ? modelCostUsd(model_usage) : 0,
   };
 }
 

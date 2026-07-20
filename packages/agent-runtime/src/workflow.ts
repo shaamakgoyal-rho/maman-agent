@@ -77,6 +77,8 @@ export interface RunActivities {
     steps: RunStepSummary[];
     intervention_ms: number;
     total_cost_usd: number;
+    /** One-time model cost of compiling the running version (receipt line). */
+    model_cost_usd: number;
   }): Promise<void>;
 }
 
@@ -129,6 +131,8 @@ export type AgentRunWorkflowInput = {
   run: AgentRunInput;
   /** Immutable spec version snapshot (loaded by the API before start). */
   spec: AgentSpec;
+  /** Model cost of compiling this version, attributed to the run's receipt. */
+  model_cost_usd?: number;
 };
 
 export type AgentRunWorkflowResult = {
@@ -187,6 +191,7 @@ export async function agentRunWorkflow(
       steps: stepSummaries,
       intervention_ms: interventionMs,
       total_cost_usd: totalCost,
+      model_cost_usd: input.model_cost_usd ?? 0,
     });
     return {
       status: finalStatus,
