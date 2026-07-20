@@ -6,6 +6,7 @@ export {
   buildAuthorizationUrl,
   exchangeCode,
   refreshTokens,
+  createConnectorTokenTransport,
   OAUTH_STATE_TTL_MS,
   type OAuthStatePayload,
   type StateVerification,

@@ -102,6 +102,22 @@ export type TokenTransport = (
   form: Record<string, string>,
 ) => Promise<{ status: number; body: unknown }>;
 
+/** Production token transport: form-urlencoded POST over global fetch. */
+export function createConnectorTokenTransport(): TokenTransport {
+  return async (tokenEndpoint, form) => {
+    const res = await fetch(tokenEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+      body: new URLSearchParams(form).toString(),
+    });
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, body };
+  };
+}
+
 const tokenResponseSchema = z
   .object({
     access_token: z.string().min(1),

@@ -27,7 +27,8 @@
     "@temporalio/worker": "^1.11.5",
     "@temporalio/workflow": "^1.11.5",
     "postgres": "^3.4.5",
-    "zod": "^3.24.1"
+    "zod": "^3.24.1",
+    "@maman/connector-adapters": "workspace:*"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",
@@ -37,6 +38,8 @@
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "@testcontainers/postgresql": "^10.16.0",
+    "@maman/demo-fixtures": "workspace:*"
   }
 }

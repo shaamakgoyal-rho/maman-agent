@@ -122,13 +122,13 @@ export class DemoSalesforceWorld {
   }
 }
 
-type MatchResult = {
-  matches: Array<{ row: CsvAccountRow; account_id: string }>;
+export type MatchResult = {
+  matches: Array<{ row: CsvAccountRow; account_id: string; account: SfAccount }>;
   ambiguous: CsvAccountRow[];
   missing: CsvAccountRow[];
 };
 
-function normalizeDomain(domain: string): string {
+export function normalizeDomain(domain: string): string {
   return domain
     .toLowerCase()
     .replace(/^https?:\/\//, "")
@@ -136,7 +136,68 @@ function normalizeDomain(domain: string): string {
     .split("/")[0]!;
 }
 
-export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, CapabilityAdapter> {
+/**
+ * Pure field-diff for the reconciliation recipe. Each matched entry carries the
+ * current Salesforce record, so this is provider-agnostic (no live world / no
+ * extra query): both the demo world and the real Salesforce adapter feed it the
+ * matched account and the desired row.
+ */
+export function proposeFieldUpdatesFromMatches(match: MatchResult): ProposedDiff {
+  const changes: ProposedFieldChange[] = [];
+  for (const { row, account_id, account } of match.matches) {
+    for (const field of COMPARED_FIELDS) {
+      const oldValue = String(account[field]);
+      const newValue = String(row[field === "employee_count" ? "employee_count" : field]);
+      if (oldValue !== newValue) {
+        changes.push({
+          account_id,
+          account_name: account.name,
+          field,
+          old_value: oldValue,
+          new_value: newValue,
+        });
+      }
+    }
+  }
+  return {
+    summary: {
+      input_rows: match.matches.length + match.ambiguous.length + match.missing.length,
+      confident_matches: match.matches.length,
+      ambiguous_skipped: match.ambiguous.length,
+      missing: match.missing.length,
+      change_count: changes.length,
+      accounts_affected: new Set(changes.map((c) => c.account_id)).size,
+    },
+    changes,
+  };
+}
+
+/** Deterministic domain-keyed matching, provider-agnostic. */
+export function matchAccounts(rows: CsvAccountRow[], accounts: SfAccount[]): MatchResult {
+  const result: MatchResult = { matches: [], ambiguous: [], missing: [] };
+  for (const row of rows) {
+    const domain = normalizeDomain(row.domain);
+    const candidates = accounts.filter((a) => normalizeDomain(a.domain) === domain);
+    if (candidates.length === 0) {
+      result.missing.push(row);
+    } else if (candidates.length > 1) {
+      result.ambiguous.push(row); // duplicate accounts → never guess
+    } else if (candidates[0]!.name !== row.company) {
+      result.ambiguous.push(row); // name mismatch → never guess
+    } else {
+      result.matches.push({ row, account_id: candidates[0]!.id, account: candidates[0]! });
+    }
+  }
+  return result;
+}
+
+/**
+ * Provider-agnostic reconciliation steps that touch no live connector: CSV
+ * parse/transform, domain matching, the field diff, and the report. Both the
+ * demo registry and the real connector registry compose these; only
+ * query_records / update_fields differ by provider.
+ */
+export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
   const registry = new Map<string, CapabilityAdapter>();
 
   registry.set("local.parse_csv", {
@@ -152,6 +213,37 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
     },
   });
 
+  registry.set("local.match_records", {
+    id: "local.match_records",
+    read: async (inputs) =>
+      matchAccounts(
+        (inputs["left"] as CsvAccountRow[]) ?? [],
+        (inputs["right"] as SfAccount[]) ?? [],
+      ),
+  });
+
+  registry.set("local.generate_csv", {
+    id: "local.generate_csv",
+    read: async (inputs) => {
+      const updates = inputs["updates"] as { applied?: number } | undefined;
+      const match = inputs["matches"] as MatchResult | undefined;
+      return {
+        report: "reconciliation.csv",
+        rows:
+          (match?.matches.length ?? 0) +
+          (match?.ambiguous.length ?? 0) +
+          (match?.missing.length ?? 0),
+        applied_changes: updates?.applied ?? 0,
+      };
+    },
+  });
+
+  return registry;
+}
+
+export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, CapabilityAdapter> {
+  const registry = pureReconciliationAdapters();
+
   registry.set("salesforce.query_records", {
     id: "salesforce.query_records",
     read: async (inputs) => {
@@ -162,65 +254,11 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
     },
   });
 
-  registry.set("local.match_records", {
-    id: "local.match_records",
-    read: async (inputs) => {
-      const rows = (inputs["left"] as CsvAccountRow[]) ?? [];
-      const accounts = (inputs["right"] as SfAccount[]) ?? [];
-      const result: MatchResult = { matches: [], ambiguous: [], missing: [] };
-      for (const row of rows) {
-        const domain = normalizeDomain(row.domain);
-        const candidates = accounts.filter((a) => normalizeDomain(a.domain) === domain);
-        if (candidates.length === 0) {
-          result.missing.push(row);
-        } else if (candidates.length > 1) {
-          result.ambiguous.push(row); // duplicate accounts → never guess
-        } else if (candidates[0]!.name !== row.company) {
-          result.ambiguous.push(row); // name mismatch → never guess
-        } else {
-          result.matches.push({ row, account_id: candidates[0]!.id });
-        }
-      }
-      return result;
-    },
-  });
-
   registry.set("salesforce.propose_field_updates", {
     id: "salesforce.propose_field_updates",
     proposeWrite: async (inputs) => {
       await world.guard("salesforce.propose_field_updates");
-      const match = inputs["matches"] as MatchResult;
-      const changes: ProposedFieldChange[] = [];
-      for (const { row, account_id } of match.matches) {
-        const account = world.accounts.find((a) => a.id === account_id)!;
-        for (const field of COMPARED_FIELDS) {
-          const oldValue = String(account[field]);
-          const newValue = String(row[field === "employee_count" ? "employee_count" : field]);
-          if (oldValue !== newValue) {
-            changes.push({
-              account_id,
-              account_name: account.name,
-              field,
-              old_value: oldValue,
-              new_value: newValue,
-            });
-          }
-        }
-      }
-      return {
-        summary: {
-          input_rows:
-            (inputs["matches"] as MatchResult).matches.length +
-            match.ambiguous.length +
-            match.missing.length,
-          confident_matches: match.matches.length,
-          ambiguous_skipped: match.ambiguous.length,
-          missing: match.missing.length,
-          change_count: changes.length,
-          accounts_affected: new Set(changes.map((c) => c.account_id)).size,
-        },
-        changes,
-      };
+      return proposeFieldUpdatesFromMatches(inputs["matches"] as MatchResult);
     },
   });
 
@@ -262,22 +300,6 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
       return {
         verified,
         detail: `independent read confirmed ${confirmed}/${changes.length} field change(s)`,
-      };
-    },
-  });
-
-  registry.set("local.generate_csv", {
-    id: "local.generate_csv",
-    read: async (inputs) => {
-      const updates = inputs["updates"] as { applied?: number } | undefined;
-      const match = inputs["matches"] as MatchResult | undefined;
-      return {
-        report: "reconciliation.csv",
-        rows:
-          (match?.matches.length ?? 0) +
-          (match?.ambiguous.length ?? 0) +
-          (match?.missing.length ?? 0),
-        applied_changes: updates?.applied ?? 0,
       };
     },
   });

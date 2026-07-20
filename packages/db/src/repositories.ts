@@ -497,6 +497,33 @@ export async function getConnectorSecret(
   });
 }
 
+/** Persists a refreshed, re-encrypted token for an org+provider connector. */
+export async function updateConnectorTokens(
+  sql: Sql,
+  ctx: TenantContext,
+  input: {
+    provider: string;
+    ciphertext: Buffer;
+    encrypted_data_key: Buffer;
+    key_version: number;
+    expires_at: string | null;
+  },
+): Promise<void> {
+  await withTenant(sql, ctx, async (tx) => {
+    await tx`
+      UPDATE connector_accounts
+      SET encrypted_token_ciphertext = ${input.ciphertext},
+          encrypted_data_key = ${input.encrypted_data_key},
+          token_key_version = ${input.key_version},
+          expires_at = ${input.expires_at},
+          last_verified_at = now(),
+          updated_at = now(),
+          status = 'connected'
+      WHERE organization_id = ${ctx.organizationId} AND provider = ${input.provider}
+    `;
+  });
+}
+
 /**
  * Disconnects a connector and PAUSES dependent agents in one transaction:
  * any active/supervised agent whose current version references a capability of

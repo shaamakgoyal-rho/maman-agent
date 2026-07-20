@@ -14,19 +14,25 @@
         --line: #e7e2da;
         --accent: #0f9f8f;
       }
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+      }
       body {
         margin: 0;
         min-height: 100vh;
         background: radial-gradient(1200px 600px at 50% -10%, #fff 0%, var(--bg) 55%);
         color: var(--ink);
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
         display: flex;
         align-items: center;
         justify-content: center;
         padding: 32px;
       }
-      .wrap { max-width: 760px; width: 100%; }
+      .wrap {
+        max-width: 760px;
+        width: 100%;
+      }
       .badge {
         display: inline-block;
         font-size: 12px;
@@ -38,9 +44,23 @@
         padding: 4px 10px;
         border-radius: 999px;
       }
-      h1 { font-size: 40px; margin: 16px 0 8px; letter-spacing: -0.02em; }
-      .lede { font-size: 17px; color: var(--muted); line-height: 1.5; margin: 0 0 28px; max-width: 620px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
+      h1 {
+        font-size: 40px;
+        margin: 16px 0 8px;
+        letter-spacing: -0.02em;
+      }
+      .lede {
+        font-size: 17px;
+        color: var(--muted);
+        line-height: 1.5;
+        margin: 0 0 28px;
+        max-width: 620px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 16px;
+      }
       a.card {
         display: block;
         text-decoration: none;
@@ -49,16 +69,30 @@
         border: 1px solid var(--line);
         border-radius: 14px;
         padding: 20px;
-        transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+        transition:
+          transform 0.12s ease,
+          box-shadow 0.12s ease,
+          border-color 0.12s ease;
       }
       a.card:hover {
         transform: translateY(-2px);
         box-shadow: 0 10px 30px rgba(32, 36, 42, 0.08);
         border-color: var(--primary);
       }
-      a.card h3 { margin: 0 0 6px; font-size: 17px; }
-      a.card p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
-      .arrow { color: var(--primary); font-weight: 700; }
+      a.card h3 {
+        margin: 0 0 6px;
+        font-size: 17px;
+      }
+      a.card p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+      .arrow {
+        color: var(--primary);
+        font-weight: 700;
+      }
       .note {
         margin-top: 28px;
         font-size: 13px;
@@ -67,7 +101,9 @@
         border-top: 1px solid var(--line);
         padding-top: 16px;
       }
-      .note b { color: var(--ink); }
+      .note b {
+        color: var(--ink);
+      }
       code {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
@@ -76,8 +112,16 @@
         border-radius: 5px;
       }
       @media (prefers-color-scheme: dark) {
-        :root { --bg: #16181d; --panel: #1e2127; --ink: #edeef1; --muted: #9aa2b1; --line: #2b2f38; }
-        body { background: radial-gradient(1200px 600px at 50% -10%, #22252c 0%, var(--bg) 55%); }
+        :root {
+          --bg: #16181d;
+          --panel: #1e2127;
+          --ink: #edeef1;
+          --muted: #9aa2b1;
+          --line: #2b2f38;
+        }
+        body {
+          background: radial-gradient(1200px 600px at 50% -10%, #22252c 0%, var(--bg) 55%);
+        }
       }
     </style>
   </head>
@@ -95,11 +139,17 @@
       <div class="grid">
         <a class="card" href="/pet.html">
           <h3>The pet <span class="arrow">→</span></h3>
-          <p>The pixel-art companion: idle, working, reviewing, and 16-direction gaze. Move your cursor near it.</p>
+          <p>
+            The pixel-art companion: idle, working, reviewing, and 16-direction gaze. Move your
+            cursor near it.
+          </p>
         </a>
         <a class="card" href="/panel.html">
           <h3>Full app <span class="arrow">→</span></h3>
-          <p>Onboarding → run the demo workflow → accept a suggestion → create an agent → run supervised → approve the diff → see the ROI receipt.</p>
+          <p>
+            Onboarding → run the demo workflow → accept a suggestion → create an agent → run
+            supervised → approve the diff → see the ROI receipt.
+          </p>
         </a>
         <a class="card" href="/lab.html">
           <h3>Pet Lab <span class="arrow">→</span></h3>
@@ -109,10 +159,10 @@
 
       <p class="note">
         <b>Try the whole loop</b> in <a href="/panel.html">Full app</a>: complete the short consent
-        flow, click <code>Run demo workflow</code>, open <b>Suggestions</b> → <code>Create agent</code>,
-        then <b>Agents</b> → <code>Run supervised</code>, approve the proposed diff, and read the
-        pet's receipt (“Updated 4 records. Saved approximately 10 minutes…”). Everything is
-        deterministic and runs locally in the tab.
+        flow, click <code>Run demo workflow</code>, open <b>Suggestions</b> →
+        <code>Create agent</code>, then <b>Agents</b> → <code>Run supervised</code>, approve the
+        proposed diff, and read the pet's receipt (“Updated 4 records. Saved approximately 10
+        minutes…”). Everything is deterministic and runs locally in the tab.
       </p>
     </div>
   </body>

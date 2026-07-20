@@ -4,6 +4,7 @@ import { executionReceiptSchema, uuidv7 } from "@maman/contracts";
 import {
   demoAdapterRegistry,
   executeStep,
+  type CapabilityAdapter,
   type CapabilityContext,
   type DemoSalesforceWorld,
   type ProposedDiff,
@@ -41,7 +42,10 @@ export type PersistenceSink = {
 };
 
 export type ActivityDeps = {
-  world: DemoSalesforceWorld;
+  /** Prebuilt capability registry (real mode). Takes precedence over `world`. */
+  registry?: Map<string, CapabilityAdapter>;
+  /** Demo world used to build the demo registry when `registry` is absent. */
+  world?: DemoSalesforceWorld;
   sink: PersistenceSink;
   now: () => Date;
 };
@@ -75,7 +79,14 @@ function getRun(run: AgentRunInput) {
 }
 
 export function createActivities(deps: ActivityDeps): RunActivities {
-  const registry = demoAdapterRegistry(deps.world);
+  const registry =
+    deps.registry ??
+    demoAdapterRegistry(
+      deps.world ??
+        (() => {
+          throw new Error("createActivities requires either `registry` or `world`");
+        })(),
+    );
 
   return {
     async evaluateRunPolicy({ spec, policy_version_id }) {

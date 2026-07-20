@@ -40,6 +40,10 @@ export {
 } from "./shadow.js";
 export {
   demoAdapterRegistry,
+  pureReconciliationAdapters,
+  proposeFieldUpdatesFromMatches,
+  matchAccounts,
+  normalizeDomain,
   DemoSalesforceWorld,
   diffSha256,
   TransientAdapterError,
@@ -48,5 +52,6 @@ export {
   type CapabilityContext,
   type ProposedDiff,
   type AdapterFaults,
+  type MatchResult,
 } from "./adapters.js";
 export { executeStep, resolveStepInputs, type StepExecution, type RunState } from "./run-engine.js";

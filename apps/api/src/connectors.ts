@@ -145,8 +145,17 @@ export function registerConnectorRoutes(
     }
 
     // Envelope-encrypt and store; the plaintext token dies with this scope.
+    // Salesforce returns a per-org `instance_url` alongside the token (the token
+    // response schema is passthrough, so it survives on the parsed object); it
+    // is required for every subsequent REST call and is stored encrypted too.
+    const rawTokens = result.tokens as typeof result.tokens & { instance_url?: string };
     const envelope = envelopeEncrypt(
-      { access_token: result.tokens.access_token, refresh_token: result.tokens.refresh_token },
+      {
+        access_token: result.tokens.access_token,
+        refresh_token: result.tokens.refresh_token,
+        ...(rawTokens.instance_url ? { instance_url: rawTokens.instance_url } : {}),
+        ...(result.tokens.scope ? { scope: result.tokens.scope } : {}),
+      },
       master,
       { organization_id: payload.organization_id, provider },
     );
