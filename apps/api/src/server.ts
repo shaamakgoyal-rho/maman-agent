@@ -35,14 +35,19 @@ import { authorize } from "./authorization.js";
 import { adminAudit, adminOverview, engageKillSwitch, getAgentById } from "./admin.js";
 import {
   createDeviceSession,
+  createRun,
   deviceSessionActive,
+  getCurrentAgentSpec,
+  getRun,
   ingestSyncedEvents,
   persistCompiledAgent,
   revokeDeviceSessionByToken,
+  updateRunStatus,
   upsertDevice,
 } from "@maman/db";
 import { DEVICE_TOKEN_TTL_MS, signDeviceToken } from "./device-token.js";
 import { registerConnectorRoutes } from "./connectors.js";
+import type { RunOrchestrator } from "./orchestrator.js";
 import type { TokenTransport } from "@maman/connector-auth";
 
 const SYNC_MIN_INTERVAL_SECONDS = 30;
@@ -54,6 +59,8 @@ export type ServerDeps = {
   authenticator?: Authenticator;
   /** Injectable OAuth token transport (tests supply a mock provider). */
   connectorTransport?: TokenTransport;
+  /** Durable-run orchestrator (Temporal). Absent → run routes return 503. */
+  orchestrator?: RunOrchestrator;
 };
 
 declare module "fastify" {
@@ -290,6 +297,169 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       },
     );
     return result;
+  });
+
+  // Trigger a run: starts the durable workflow for the agent's current version.
+  // A repeated trigger_idempotency_key returns the existing run (no second run).
+  app.post("/v1/agents/:id/runs", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.write_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to trigger runs.");
+    }
+    if (!deps.sql || !deps.orchestrator) return reply.status(503).send({ status: 503 });
+    const agentId = (req.params as { id: string }).id;
+    const body = z
+      .object({
+        mode: z.enum(["shadow", "supervised", "active"]),
+        trigger_idempotency_key: z.string().min(1),
+      })
+      .safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+
+    const ctx = { organizationId: principal.organization_id };
+    const agent = await getCurrentAgentSpec(deps.sql, ctx, agentId);
+    if (!agent) {
+      // Missing or cross-tenant — 404, never 403 (no existence leak).
+      return reply.status(404).send({ status: 404, title: "Not Found" });
+    }
+    const runId = uuidv7();
+    const workflowId = `run-${runId}`;
+    const created = await createRun(deps.sql, ctx, {
+      run_id: runId,
+      owner_user_id: agent.owner_user_id,
+      agent_id: agentId,
+      agent_version_id: agent.agent_version_id,
+      temporal_workflow_id: workflowId,
+      trigger_idempotency_key: body.data.trigger_idempotency_key,
+      mode: body.data.mode,
+      policy_version_id: agent.policy_version_id,
+      requested_at: new Date().toISOString(),
+    });
+    if (!created.created) {
+      // Duplicate trigger → return the existing run, do not start another workflow.
+      return { run_id: created.run_id, workflow_id: created.temporal_workflow_id, duplicate: true };
+    }
+    const run = {
+      run_id: created.run_id,
+      agent_id: agentId,
+      agent_version_id: agent.agent_version_id,
+      organization_id: principal.organization_id,
+      owner_user_id: agent.owner_user_id,
+      mode: body.data.mode,
+      trigger: { type: "manual" as const, idempotency_key: body.data.trigger_idempotency_key },
+      agent_inputs: {},
+      policy_version_id: agent.policy_version_id,
+      requested_at: new Date().toISOString(),
+    };
+    await deps.orchestrator.startRun({ workflowId, run, spec: agent.spec });
+    return { run_id: created.run_id, workflow_id: workflowId, duplicate: false };
+  });
+
+  // Owner-scoped helper: loads a run the caller owns, or replies 404.
+  const loadOwnRun = async (req: FastifyRequest, reply: FastifyReply, principal: Principal) => {
+    if (!deps.sql || !deps.orchestrator) {
+      await reply.status(503).send({ status: 503 });
+      return null;
+    }
+    const runId = (req.params as { id: string }).id;
+    const run = await getRun(deps.sql, { organizationId: principal.organization_id }, runId);
+    if (!run || run.owner_user_id !== principal.user_id) {
+      await reply.status(404).send({ status: 404, title: "Not Found" });
+      return null;
+    }
+    return run;
+  };
+
+  app.get("/v1/runs/:id", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.read_own").allowed) return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const status = await deps
+      .orchestrator!.getStatus(run.temporal_workflow_id)
+      .catch(() => run.status);
+    return { run_id: run.id, status };
+  });
+
+  app.get("/v1/runs/:id/pending-approval", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.read_own").allowed) return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const pending = await deps.orchestrator!.getPendingApproval(run.temporal_workflow_id);
+    return { pending };
+  });
+
+  // Approve a pending write. The approval is bound to the step AND the diff
+  // hash: the workflow's signal handler ignores an approval whose diff_hash does
+  // not match the diff it is waiting on, so a stale/forged hash cannot approve.
+  app.post("/v1/runs/:id/approve", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.approve_own").allowed) {
+      return forbid(req, reply, "Role is not permitted to approve runs.");
+    }
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const body = z
+      .object({ step_id: z.string().min(1), diff_hash: z.string().min(1) })
+      .safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+    const pending = await deps.orchestrator!.getPendingApproval(run.temporal_workflow_id);
+    if (
+      !pending ||
+      pending.step_id !== body.data.step_id ||
+      pending.diff_sha256 !== body.data.diff_hash
+    ) {
+      return reply.status(409).send({ status: 409, title: "No matching pending approval" });
+    }
+    await deps.orchestrator!.approve(run.temporal_workflow_id, {
+      step_id: body.data.step_id,
+      diff_hash: body.data.diff_hash,
+      approver_user_id: principal.user_id,
+    });
+    return { approved: true };
+  });
+
+  app.post("/v1/runs/:id/reject", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.approve_own").allowed)
+      return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const body = z
+      .object({ step_id: z.string().min(1), reason: z.string().default("rejected") })
+      .safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ status: 400, title: "Bad Request" });
+    await deps.orchestrator!.reject(run.temporal_workflow_id, {
+      step_id: body.data.step_id,
+      reason: body.data.reason,
+    });
+    return { rejected: true };
+  });
+
+  app.post("/v1/runs/:id/cancel", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.write_own").allowed)
+      return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    await deps.orchestrator!.cancel(run.temporal_workflow_id, {
+      actor_user_id: principal.user_id,
+      reason: "user_cancelled",
+    });
+    await updateRunStatus(
+      deps.sql!,
+      { organizationId: principal.organization_id },
+      run.id,
+      "cancelled",
+    );
+    return { cancelled: true };
   });
 
   // Kill switch: any org member can halt everything for their org; an admin

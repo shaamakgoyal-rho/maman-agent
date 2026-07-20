@@ -26,7 +26,8 @@
     "postgres": "^3.4.5",
     "zod": "^3.24.1",
     "@maman/roi-engine": "workspace:*",
-    "@maman/connector-auth": "workspace:*"
+    "@maman/connector-auth": "workspace:*",
+    "@temporalio/client": "^1.11.5"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",
@@ -40,6 +41,9 @@
     "@maman/db": "workspace:*",
     "@maman/config": "workspace:*",
     "@maman/agent-runtime": "workspace:*",
-    "@maman/policy-engine": "workspace:*"
+    "@maman/policy-engine": "workspace:*",
+    "@temporalio/testing": "^1.11.5",
+    "@temporalio/worker": "^1.11.5",
+    "@maman/worker": "workspace:*"
   }
 }

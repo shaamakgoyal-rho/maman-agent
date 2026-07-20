@@ -413,6 +413,132 @@ export async function persistCompiledAgent(
   });
 }
 
+/** Loads an agent's current version spec + version/policy ids for a run. */
+export async function getCurrentAgentSpec(
+  sql: Sql,
+  ctx: TenantContext,
+  agentId: string,
+): Promise<{
+  spec: AgentSpec;
+  agent_version_id: string;
+  policy_version_id: string;
+  owner_user_id: string;
+} | null> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<
+      { spec: AgentSpec; id: string; policy_version_id: string; owner_user_id: string }[]
+    >`
+      SELECT av.spec AS spec, av.id AS id, av.policy_version_id AS policy_version_id,
+             a.owner_user_id AS owner_user_id
+      FROM agents a
+      JOIN agent_versions av ON av.id = a.current_version_id
+      WHERE a.organization_id = ${ctx.organizationId} AND a.id = ${agentId}
+      LIMIT 1
+    `;
+    if (rows.length === 0) return null;
+    // jsonb may arrive parsed (object) or as text depending on the driver path;
+    // normalize to an object so the spec is always usable downstream.
+    const rawSpec = rows[0]!.spec as unknown;
+    const spec = (typeof rawSpec === "string" ? JSON.parse(rawSpec) : rawSpec) as AgentSpec;
+    return {
+      spec,
+      agent_version_id: rows[0]!.id,
+      policy_version_id: rows[0]!.policy_version_id,
+      owner_user_id: rows[0]!.owner_user_id,
+    };
+  });
+}
+
+/**
+ * Creates a run row, deduped on (org, trigger_idempotency_key): a repeated
+ * trigger returns the existing run instead of starting a second workflow.
+ */
+export async function createRun(
+  sql: Sql,
+  ctx: TenantContext,
+  input: {
+    run_id: string;
+    owner_user_id: string;
+    agent_id: string;
+    agent_version_id: string;
+    temporal_workflow_id: string;
+    trigger_idempotency_key: string;
+    mode: string;
+    policy_version_id: string;
+    requested_at: string;
+  },
+): Promise<{ run_id: string; temporal_workflow_id: string; created: boolean }> {
+  return withTenant(sql, ctx, async (tx) => {
+    const inserted = await tx<{ id: string; temporal_workflow_id: string }[]>`
+      INSERT INTO agent_runs (
+        id, organization_id, owner_user_id, agent_id, agent_version_id,
+        temporal_workflow_id, trigger_type, trigger_idempotency_key, mode, status,
+        policy_version_id, requested_at
+      ) VALUES (
+        ${input.run_id}, ${ctx.organizationId}, ${input.owner_user_id}, ${input.agent_id},
+        ${input.agent_version_id}, ${input.temporal_workflow_id}, 'manual',
+        ${input.trigger_idempotency_key}, ${input.mode}, 'queued',
+        ${input.policy_version_id}, ${input.requested_at}
+      )
+      ON CONFLICT (organization_id, trigger_idempotency_key) DO NOTHING
+      RETURNING id, temporal_workflow_id
+    `;
+    if (inserted.length > 0) {
+      return {
+        run_id: inserted[0]!.id,
+        temporal_workflow_id: inserted[0]!.temporal_workflow_id,
+        created: true,
+      };
+    }
+    const [existing] = await tx<{ id: string; temporal_workflow_id: string }[]>`
+      SELECT id, temporal_workflow_id FROM agent_runs
+      WHERE organization_id = ${ctx.organizationId}
+        AND trigger_idempotency_key = ${input.trigger_idempotency_key}
+    `;
+    return {
+      run_id: existing!.id,
+      temporal_workflow_id: existing!.temporal_workflow_id,
+      created: false,
+    };
+  });
+}
+
+export async function getRun(
+  sql: Sql,
+  ctx: TenantContext,
+  runId: string,
+): Promise<{
+  id: string;
+  temporal_workflow_id: string;
+  status: string;
+  owner_user_id: string;
+} | null> {
+  return withTenant(sql, ctx, async (tx) => {
+    const rows = await tx<
+      { id: string; temporal_workflow_id: string; status: string; owner_user_id: string }[]
+    >`
+      SELECT id, temporal_workflow_id, status, owner_user_id FROM agent_runs
+      WHERE organization_id = ${ctx.organizationId} AND id = ${runId} LIMIT 1
+    `;
+    return rows[0] ?? null;
+  });
+}
+
+/** Updates a run's status (worker/API progress). */
+export async function updateRunStatus(
+  sql: Sql,
+  ctx: TenantContext,
+  runId: string,
+  status: string,
+): Promise<void> {
+  await withTenant(sql, ctx, async (tx) => {
+    await tx`
+      UPDATE agent_runs SET status = ${status}
+      WHERE organization_id = ${ctx.organizationId} AND id = ${runId}
+    `;
+  });
+}
+
 // ---------- kill switch (org-wide agent halt) ----------
 
 /**
