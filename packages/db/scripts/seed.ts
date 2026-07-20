@@ -69,6 +69,16 @@ try {
   // Seed a demo agent + verified ROI measurements for all six users so the
   // admin overview has an aggregate above the five-person cohort minimum.
   await withTenant(sql, { organizationId: orgId }, async (tx) => {
+    // Idempotent: the derived agent/run/ROI rows use fresh UUIDs each run, so
+    // only seed them when the org has none yet. A re-run (or `pnpm demo` on an
+    // already-seeded database) is a no-op here. `db:reset-demo` clears first.
+    const [existing] = await tx<{ n: string }[]>`
+      SELECT COUNT(*) AS n FROM agent_runs WHERE organization_id = ${orgId}
+    `;
+    if (Number(existing?.n ?? 0) > 0) {
+      console.log("demo ROI already seeded — skipping");
+      return;
+    }
     const members = await tx<{ user_id: string }[]>`
       SELECT user_id FROM memberships WHERE organization_id = ${orgId}
     `;
