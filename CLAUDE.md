@@ -45,10 +45,15 @@ Package boundaries (lint-enforced — packages must not import from apps):
   Seedy; authorization given 2026-07-20, superseding the earlier
   "original-character / never bundle Seedy" rule). The authoritative source is
   committed under `apps/desktop/src/pet/assets/seedy-source/` (spritesheet +
-  `pet.json` + `character-brief.md` + `README.md` + contact sheet);
-  `scripts/generate-spritesheet.ts` reproduces the rendered atlas by copying that
-  vendored source, so provenance stays auditable. The atlas contract (row layout)
-  is unchanged, so the scheduler/renderer/gaze are unaffected.
+  `pet.json` + `character-brief.md` + `look-mechanics.md` + `README.md` + contact
+  sheet + generation artifacts: `canonical-base.png`, `look-row-10-registration.json`,
+  `pet-request.json`); `apps/desktop/scripts/generate-spritesheet.ts` reproduces
+  the rendered atlas by copying that vendored source (committed
+  `maman-atlas.webp` is sha256-identical to the source `spritesheet.webp`), so
+  provenance stays auditable. `look-row-10-registration.json` (`scale: 0.684`) is
+  a generation-time calibration already baked into the committed atlas — the
+  renderer applies NO per-row scale. The atlas contract (row layout) is unchanged,
+  so the scheduler/renderer/gaze are unaffected.
 - Animation rows/timings are locked in `apps/desktop/src/pet/atlas.ts`. No CSS
   keyframes for sprite animation — the deterministic `FrameScheduler` owns timing.
 - Idle plays at 6× slow timing; transients play 3 cycles then slow idle; state

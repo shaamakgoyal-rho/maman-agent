@@ -35,6 +35,17 @@ That copies the two package files to `~/.codex/pets/seedy/`.
 - `source/generation/` preserves the supplied style reference, canonical character base, character brief, look mechanics, and every visual-generation prompt. Image generation is probabilistic; rerunning prompts creates a close new interpretation, while rebuilding from `source/frames/` is exact.
 - `qa/` contains the final contact sheet, animated previews, direction checks, and validation evidence.
 
+### Vendored generation artifacts (in this folder)
+
+For an auditable in-repo record, the key generation artifacts are vendored here alongside the finished `spritesheet.webp`:
+
+- `canonical-base.png` — the canonical front-facing base pose the whole atlas is registered against.
+- `character-brief.md`, `look-mechanics.md` — the authoritative style + 16-direction look specification.
+- `look-row-10-registration.json` — the row-10 (look directions 180°–337.5°) registration scale (`0.684`) applied during generation so the sprout-bend poses land at the same on-cell scale as the rest of the atlas. It is a generation-time calibration record, not a runtime value: the committed `spritesheet.webp` already has this registration baked in (row-10 content measures ≈0.93 of the neutral pose, matching row 9), so the renderer needs no per-row correction.
+- `pet-request.json` — the generation request that produced this run.
+
+The committed atlas `../maman-atlas.webp` is byte-identical to `dist/seedy/spritesheet.webp` from this source run (verified by sha256), and `generate-spritesheet.ts` reproduces it by copying `spritesheet.webp`.
+
 ## Atlas contract
 
 | Row | State                                 |                                  Frames |
