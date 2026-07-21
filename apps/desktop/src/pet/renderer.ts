@@ -3,9 +3,8 @@ import type { PetStateName } from "./machine.js";
 import type { MamanAnimationState } from "./atlas.js";
 
 /**
- * Pet rendering is centralized behind this interface. The production renderer
- * is the pixel-art SpritesheetPetRenderer (spriteVersionNumber 2); the SVG
- * renderer remains registered as a fallback if the atlas fails to load.
+ * Pet rendering is centralized behind this interface. The sole renderer is the
+ * pixel-art SpritesheetPetRenderer (Seedy, spriteVersionNumber 2).
  */
 export type PetRenderProps = {
   /** Product state, plus renderer-level movement states while dragging. */

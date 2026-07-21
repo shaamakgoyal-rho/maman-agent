@@ -16,14 +16,8 @@ export const colors = {
   focusRing: "#7C83FF",
 } as const;
 
-/** Pet body palette: indigo-to-lavender with cream face accents. */
-export const petPalette = {
-  bodyFrom: "#4F46E5",
-  bodyTo: "#A5A6F6",
-  face: "#FFF7EA",
-  accent: "#0F9F8F",
-  blush: "#F2B8B5",
-} as const;
+// The pet is the Seedy pixel-art spritesheet — its colors live in the atlas
+// artwork, not in a token palette, so there is no `petPalette` here anymore.
 
 export const radii = {
   panel: "12px",
