@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { product } from "@maman/config";
 import { useSettings } from "../../state/settings.js";
+import { useEnrollment } from "../../state/enrollment.js";
 import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle, Toggle } from "../ui.js";
 
@@ -15,10 +16,15 @@ const OBSERVER_STATUS_LABEL: Record<string, string> = {
 
 export function Settings() {
   const { settings, update } = useSettings();
+  const enrollment = useEnrollment();
   const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [observerStatus, setObserverStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    void useEnrollment.getState().refresh();
+  }, []);
 
   // Poll the native observer status so the panel reflects it honestly.
   useEffect(() => {
@@ -157,6 +163,67 @@ export function Settings() {
           Hold Maman for a moment to drag it anywhere; it snaps near screen edges and remembers its
           spot per display.
         </Muted>
+      </Card>
+
+      <Card>
+        <SectionTitle>Connect to Maman server</SectionTitle>
+        {!isTauri() ? (
+          <Muted>
+            Enrollment runs in the desktop app (the device token lives in the macOS keychain, never
+            in a browser). The web preview always runs local demo runs.
+          </Muted>
+        ) : (
+          <>
+            <Muted>
+              Optional. Enroll this device to run helpers on the Maman server (durable runs,
+              server-side model, connector vault) and sync redacted activity. Your device token is
+              stored in the macOS keychain and never reaches this window. Local-only mode keeps
+              working exactly as before.
+            </Muted>
+            <div className="mt-2">
+              {enrollment.phase === "enrolled" || enrollment.phase === "syncing" ? (
+                <div className="space-y-1.5">
+                  <p className="text-sm">Enrolled ✓</p>
+                  <p className="text-[11px] text-muted tabular-nums break-all">
+                    device {enrollment.deviceId ?? "—"}
+                    {enrollment.tokenExpiresAt
+                      ? ` · token valid until ${new Date(enrollment.tokenExpiresAt).toLocaleString()}`
+                      : ""}
+                  </p>
+                  <p className="text-[11px] text-muted">
+                    {enrollment.lastSync
+                      ? `Last sync: uploaded ${enrollment.lastSync.uploaded}, ${enrollment.lastSync.remaining} queued`
+                      : enrollment.lastSyncAt
+                        ? `Last sync ${new Date(enrollment.lastSyncAt).toLocaleString()}`
+                        : "Not synced yet — auto-sync runs about once a minute."}
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="secondary"
+                      disabled={enrollment.phase === "syncing"}
+                      onClick={() => void enrollment.syncNow()}
+                    >
+                      {enrollment.phase === "syncing" ? "Syncing…" : "Sync now"}
+                    </Button>
+                    <Button variant="ghost" onClick={() => void enrollment.unenroll()}>
+                      Disconnect
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  disabled={enrollment.phase === "enrolling"}
+                  onClick={() => void enrollment.enroll()}
+                >
+                  {enrollment.phase === "enrolling" ? "Enrolling…" : "Enroll this device"}
+                </Button>
+              )}
+              {enrollment.error && (
+                <p className="mt-2 text-xs text-danger">Enrollment problem: {enrollment.error}</p>
+              )}
+            </div>
+          </>
+        )}
       </Card>
 
       <Card>

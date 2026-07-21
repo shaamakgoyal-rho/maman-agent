@@ -56,13 +56,52 @@ export const serverEnvSchema = z
           message: "WORKOS_API_KEY and WORKOS_CLIENT_ID are required when AUTH_MODE=workos.",
         });
       }
-      if (env.MODEL_PROVIDER === "anthropic" && !env.ANTHROPIC_API_KEY) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["ANTHROPIC_API_KEY"],
-          message: "ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic.",
-        });
-      }
+    }
+
+    // These run in every environment so a local trial fails fast with an
+    // actionable message rather than misbehaving at run time.
+    if (env.MODEL_PROVIDER === "anthropic" && !env.ANTHROPIC_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ANTHROPIC_API_KEY"],
+        message:
+          "ANTHROPIC_API_KEY is required when MODEL_PROVIDER=anthropic. Set the key or use MODEL_PROVIDER=demo.",
+      });
+    }
+
+    // Real connectors need a COMPLETE Salesforce Connected App triple. A
+    // half-set triple is a configuration bug — fail rather than silently skip.
+    const sf = {
+      id: env.SALESFORCE_CLIENT_ID,
+      secret: env.SALESFORCE_CLIENT_SECRET,
+      redirect: env.SALESFORCE_REDIRECT_URI,
+    };
+    const sfSet = [sf.id, sf.secret, sf.redirect].filter(Boolean).length;
+    if (env.CONNECTOR_MODE === "real" && sfSet === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SALESFORCE_CLIENT_ID"],
+        message:
+          "CONNECTOR_MODE=real needs a Salesforce Connected App: set SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET, and SALESFORCE_REDIRECT_URI (or use CONNECTOR_MODE=demo).",
+      });
+    } else if (sfSet > 0 && sfSet < 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SALESFORCE_CLIENT_SECRET"],
+        message:
+          "Salesforce credentials are half-set: SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET, and SALESFORCE_REDIRECT_URI must all be present together.",
+      });
+    }
+
+    // Google OAuth client id + secret must be set together (or neither).
+    const googleSet = [env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET].filter(Boolean).length;
+    if (googleSet === 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["GOOGLE_CLIENT_SECRET"],
+        message:
+          "Google credentials are half-set: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must both be present.",
+      });
     }
   });
 

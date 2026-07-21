@@ -185,6 +185,101 @@ impl<T: HttpTransport> SyncClient<T> {
             deduped: res.body.get("deduped").and_then(|v| v.as_u64()).unwrap_or(0),
         })
     }
+
+    // ---- server-backed agent lifecycle (all bound to the device token) ----
+    //
+    // Every method below attaches the device token as a Bearer header and
+    // returns the raw JSON response body. The webview never holds the token; it
+    // receives only these non-secret projections (specs, diffs, receipts —
+    // token material is guaranteed absent by the server's redaction invariants).
+
+    /// Issues an authenticated GET/POST against the server with the device token.
+    async fn authed(
+        &self,
+        method: &'static str,
+        path: &str,
+        device_token: &str,
+        body: Option<Value>,
+    ) -> Result<Value, SyncError> {
+        let res = self
+            .transport
+            .send(HttpRequest {
+                method,
+                url: format!("{}{}", self.base_url, path),
+                headers: bearer(device_token),
+                body,
+            })
+            .await?;
+        check_status(res.status)?;
+        Ok(res.body)
+    }
+
+    /// Compiles an accepted PatternCandidate into an AgentSpec (server-side, so
+    /// the configured model provider runs on the server, not the device).
+    pub async fn compile_agent(&self, device_token: &str, body: Value) -> Result<Value, SyncError> {
+        self.authed("POST", "/v1/agents/compile", device_token, Some(body)).await
+    }
+
+    /// Persists a compiled AgentSpec (agent + immutable version) server-side.
+    pub async fn create_agent(&self, device_token: &str, body: Value) -> Result<Value, SyncError> {
+        self.authed("POST", "/v1/agents", device_token, Some(body)).await
+    }
+
+    /// Starts a run (shadow/supervised) via the API→Temporal path.
+    pub async fn start_run(
+        &self,
+        device_token: &str,
+        agent_id: &str,
+        body: Value,
+    ) -> Result<Value, SyncError> {
+        self.authed("POST", &format!("/v1/agents/{agent_id}/runs"), device_token, Some(body))
+            .await
+    }
+
+    /// The run's current durable status.
+    pub async fn run_status(&self, device_token: &str, run_id: &str) -> Result<Value, SyncError> {
+        self.authed("GET", &format!("/v1/runs/{run_id}"), device_token, None).await
+    }
+
+    /// The pending approval (step id + diff hash), or null.
+    pub async fn pending_approval(
+        &self,
+        device_token: &str,
+        run_id: &str,
+    ) -> Result<Value, SyncError> {
+        self.authed("GET", &format!("/v1/runs/{run_id}/pending-approval"), device_token, None)
+            .await
+    }
+
+    /// The proposed diff the run is waiting on (rendered exactly like local).
+    pub async fn proposal(&self, device_token: &str, run_id: &str) -> Result<Value, SyncError> {
+        self.authed("GET", &format!("/v1/runs/{run_id}/proposal"), device_token, None).await
+    }
+
+    /// The immutable ExecutionReceipt (null until the run finalizes).
+    pub async fn receipt(&self, device_token: &str, run_id: &str) -> Result<Value, SyncError> {
+        self.authed("GET", &format!("/v1/runs/{run_id}/receipt"), device_token, None).await
+    }
+
+    /// Approves a pending write (bound to step id + diff hash server-side).
+    pub async fn approve_run(
+        &self,
+        device_token: &str,
+        run_id: &str,
+        body: Value,
+    ) -> Result<Value, SyncError> {
+        self.authed("POST", &format!("/v1/runs/{run_id}/approve"), device_token, Some(body)).await
+    }
+
+    /// Rejects a pending write.
+    pub async fn reject_run(
+        &self,
+        device_token: &str,
+        run_id: &str,
+        body: Value,
+    ) -> Result<Value, SyncError> {
+        self.authed("POST", &format!("/v1/runs/{run_id}/reject"), device_token, Some(body)).await
+    }
 }
 
 fn bearer(token: &str) -> Vec<(String, String)> {
@@ -325,6 +420,62 @@ mod tests {
         let client = SyncClient::new(mock, "http://localhost:4000/");
         let result = client.enroll(vec![], json!({})).await.unwrap();
         assert_eq!(result.device_token, "d1.body.mac");
+    }
+
+    #[tokio::test]
+    async fn server_agent_calls_attach_bearer_and_hit_the_right_paths() {
+        // compile → create → start_run → pending → proposal → approve → receipt.
+        let mock = MockTransport::new(vec![
+            (200, json!({ "spec": {}, "model_cost_usd": 0 })),
+            (200, json!({ "agent_id": "a1", "agent_version_id": "v1" })),
+            (200, json!({ "run_id": "r1", "workflow_id": "run-r1", "duplicate": false })),
+            (200, json!({ "pending": { "step_id": "s1", "diff_sha256": "abc" } })),
+            (200, json!({ "diff": { "summary": { "change_count": 4 } } })),
+            (200, json!({ "approved": true })),
+            (200, json!({ "receipt": { "run_id": "r1" } })),
+        ]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let tok = "d1.DEVICE_TOKEN";
+
+        client.compile_agent(tok, json!({ "candidate": {} })).await.unwrap();
+        client.create_agent(tok, json!({ "spec": {} })).await.unwrap();
+        let run = client
+            .start_run(tok, "a1", json!({ "mode": "supervised", "trigger_idempotency_key": "k" }))
+            .await
+            .unwrap();
+        assert_eq!(run.get("run_id").unwrap(), "r1");
+        let pending = client.pending_approval(tok, "r1").await.unwrap();
+        assert_eq!(pending.pointer("/pending/diff_sha256").unwrap(), "abc");
+        let proposal = client.proposal(tok, "r1").await.unwrap();
+        assert_eq!(proposal.pointer("/diff/summary/change_count").unwrap(), 4);
+        client
+            .approve_run(tok, "r1", json!({ "step_id": "s1", "diff_hash": "abc" }))
+            .await
+            .unwrap();
+        client.receipt(tok, "r1").await.unwrap();
+
+        // Every request carried the device token as a Bearer header, and the
+        // right paths were hit in order.
+        let seen = client.transport.seen.borrow();
+        assert!(seen
+            .iter()
+            .all(|r| r.headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer d1.DEVICE_TOKEN")));
+        let paths: Vec<&str> = seen.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(paths[0], "http://localhost:4000/v1/agents/compile");
+        assert_eq!(paths[1], "http://localhost:4000/v1/agents");
+        assert_eq!(paths[2], "http://localhost:4000/v1/agents/a1/runs");
+        assert_eq!(paths[3], "http://localhost:4000/v1/runs/r1/pending-approval");
+        assert_eq!(paths[4], "http://localhost:4000/v1/runs/r1/proposal");
+        assert_eq!(paths[5], "http://localhost:4000/v1/runs/r1/approve");
+        assert_eq!(paths[6], "http://localhost:4000/v1/runs/r1/receipt");
+    }
+
+    #[tokio::test]
+    async fn server_agent_call_maps_401_to_unauthorized() {
+        let mock = MockTransport::new(vec![(401, Value::Null)]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let err = client.run_status("d1.tok", "r1").await.unwrap_err();
+        assert!(matches!(err, SyncError::Unauthorized));
     }
 
     #[tokio::test]

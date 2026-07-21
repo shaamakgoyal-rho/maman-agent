@@ -75,7 +75,11 @@ export interface RunActivities {
     mode: string;
     result: StepActivityResult;
   }): Promise<void>;
-  /** Builds + persists the immutable execution receipt and final run row. */
+  /**
+   * Builds + persists the immutable execution receipt and final run row, and
+   * returns the receipt so the workflow can surface it to `get_receipt` queries
+   * (the panel renders the server receipt exactly as the local flow does).
+   */
   finalizeRun(input: {
     run: AgentRunInput;
     spec: AgentSpec;
@@ -85,7 +89,7 @@ export interface RunActivities {
     total_cost_usd: number;
     /** One-time model cost of compiling the running version (receipt line). */
     model_cost_usd: number;
-  }): Promise<void>;
+  }): Promise<unknown>;
 }
 
 // Reads and safe operations: exponential retry 1s → 5s → 30s, three attempts.
@@ -132,6 +136,10 @@ export const getPendingApprovalQuery = defineQuery<{
 } | null>("get_pending_approval");
 export const getCostQuery = defineQuery<{ total_cost_usd: number }>("get_cost");
 export const getStepSummariesQuery = defineQuery<RunStepSummary[]>("get_step_summaries");
+/** The proposed diff the run is currently waiting on (null until one exists). */
+export const getProposedDiffQuery = defineQuery<unknown | null>("get_proposed_diff");
+/** The immutable ExecutionReceipt, available once the run has finalized. */
+export const getReceiptQuery = defineQuery<unknown | null>("get_receipt");
 
 export type AgentRunWorkflowInput = {
   run: AgentRunInput;
@@ -166,6 +174,9 @@ export async function agentRunWorkflow(
   let proposedChanges = 0;
   let completedWrites = 0;
   let warnings = false;
+  // Surfaced to the panel via queries (server run path renders these directly).
+  let proposedDiff: unknown = null;
+  let receipt: unknown = null;
 
   setHandler(approveStepSignal, (payload) => {
     // Approval binding: must match the pending step AND its diff hash.
@@ -187,10 +198,12 @@ export async function agentRunWorkflow(
   setHandler(getPendingApprovalQuery, () => pendingApproval);
   setHandler(getCostQuery, () => ({ total_cost_usd: totalCost }));
   setHandler(getStepSummariesQuery, () => stepSummaries);
+  setHandler(getProposedDiffQuery, () => proposedDiff);
+  setHandler(getReceiptQuery, () => receipt);
 
   const finish = async (finalStatus: AgentRunWorkflowResult["status"]) => {
     status = finalStatus;
-    await bookkeeping.finalizeRun({
+    receipt = await bookkeeping.finalizeRun({
       run,
       spec,
       status: finalStatus,
@@ -269,6 +282,7 @@ export async function agentRunWorkflow(
         summary.diff_sha256 = result.diff_sha256;
         lastDiffSha = result.diff_sha256;
         lastDiff = result.diff ?? null;
+        proposedDiff = result.diff ?? null;
         proposedChanges += result.change_count ?? 0;
       }
       await bookkeeping.recordStepResult({

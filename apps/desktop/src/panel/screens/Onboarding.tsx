@@ -2,6 +2,8 @@ import { useState } from "react";
 import * as Checkbox from "@radix-ui/react-checkbox";
 import { product } from "@maman/config";
 import { ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
+import { useEnrollment } from "../../state/enrollment.js";
+import { isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle } from "../ui.js";
 
 /**
@@ -11,10 +13,14 @@ import { Button, Card, Muted, SectionTitle } from "../ui.js";
  */
 
 const STEPS = ["welcome", "boundaries", "allowlist", "permissions", "comprehension"] as const;
-type Step = (typeof STEPS)[number];
+type CoreStep = (typeof STEPS)[number];
+// "connect" is an OPTIONAL post-consent step (M18) — not part of the consent
+// gate and never required. It is reachable only via an explicit opt-in.
+type Step = CoreStep | "connect";
 
 export function Onboarding() {
   const { settings, update } = useSettings();
+  const enrollment = useEnrollment();
   const [step, setStep] = useState<Step>("welcome");
   const [selectedDomains, setSelectedDomains] = useState<string[]>(settings.allowlist_domains);
   const [confirmations, setConfirmations] = useState({
@@ -23,7 +29,8 @@ export function Onboarding() {
     writes: false,
   });
 
-  const stepIndex = STEPS.indexOf(step);
+  const coreIndex = STEPS.indexOf(step as CoreStep);
+  const stepIndex = coreIndex === -1 ? STEPS.length - 1 : coreIndex;
   const next = () => setStep(STEPS[Math.min(stepIndex + 1, STEPS.length - 1)]!);
   const back = () => setStep(STEPS[Math.max(stepIndex - 1, 0)]!);
 
@@ -222,21 +229,74 @@ export function Onboarding() {
               ))}
             </div>
           </Card>
-          <div className="mt-auto flex justify-between">
-            <Button variant="secondary" onClick={back}>
+          <div className="mt-auto flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <Button variant="secondary" onClick={back}>
+                Back
+              </Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={() => void finish(false)}
+                  disabled={!allConfirmed}
+                >
+                  Finish, stay paused
+                </Button>
+                <Button onClick={() => void finish(true)} disabled={!allConfirmed}>
+                  Finish and start observing
+                </Button>
+              </div>
+            </div>
+            {/* Optional, post-consent: never required to finish. */}
+            <button
+              type="button"
+              disabled={!allConfirmed}
+              onClick={() => setStep("connect")}
+              className="self-end text-xs text-primary underline underline-offset-2 disabled:opacity-40"
+            >
+              Run helpers on the server (optional) →
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "connect" && (
+        <>
+          <h1 className="text-lg font-semibold">Run helpers on the server (optional)</h1>
+          <Muted>
+            You can run everything locally — this is optional. Enrolling this device lets Maman run
+            approved helpers on the server (durable runs, server-side model, connector vault) and
+            sync redacted activity. Your device token is stored in the macOS keychain and never
+            reaches this window. You can enroll or disconnect anytime in Settings.
+          </Muted>
+          <Card>
+            {!isTauri() ? (
+              <Muted>
+                Enrollment needs the desktop app — the web preview runs local demo runs.
+              </Muted>
+            ) : enrollment.phase === "enrolled" ? (
+              <p className="text-sm">Enrolled ✓ — server runs are available.</p>
+            ) : (
+              <Button
+                disabled={enrollment.phase === "enrolling"}
+                onClick={() => void enrollment.enroll()}
+              >
+                {enrollment.phase === "enrolling" ? "Enrolling…" : "Enroll this device"}
+              </Button>
+            )}
+            {enrollment.error && (
+              <p className="mt-2 text-xs text-danger">Enrollment problem: {enrollment.error}</p>
+            )}
+          </Card>
+          <div className="mt-auto flex items-center justify-between">
+            <Button variant="secondary" onClick={() => setStep("comprehension")}>
               Back
             </Button>
             <div className="flex gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => void finish(false)}
-                disabled={!allConfirmed}
-              >
+              <Button variant="secondary" onClick={() => void finish(false)}>
                 Finish, stay paused
               </Button>
-              <Button onClick={() => void finish(true)} disabled={!allConfirmed}>
-                Finish and start observing
-              </Button>
+              <Button onClick={() => void finish(true)}>Finish and start observing</Button>
             </div>
           </div>
         </>

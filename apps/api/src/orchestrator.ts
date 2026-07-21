@@ -20,6 +20,10 @@ export interface RunOrchestrator {
   }): Promise<void>;
   getStatus(workflowId: string): Promise<string>;
   getPendingApproval(workflowId: string): Promise<PendingApproval>;
+  /** The proposed diff the run is waiting on (null until one exists). */
+  getProposedDiff(workflowId: string): Promise<unknown>;
+  /** The immutable ExecutionReceipt once the run has finalized (else null). */
+  getReceipt(workflowId: string): Promise<unknown>;
   approve(
     workflowId: string,
     payload: { step_id: string; diff_hash: string; approver_user_id: string },
@@ -57,6 +61,14 @@ export class TemporalRunOrchestrator implements RunOrchestrator {
 
   async getPendingApproval(workflowId: string): Promise<PendingApproval> {
     return this.client.getHandle(workflowId).query<PendingApproval>("get_pending_approval");
+  }
+
+  async getProposedDiff(workflowId: string): Promise<unknown> {
+    return this.client.getHandle(workflowId).query<unknown>("get_proposed_diff");
+  }
+
+  async getReceipt(workflowId: string): Promise<unknown> {
+    return this.client.getHandle(workflowId).query<unknown>("get_receipt");
   }
 
   async approve(

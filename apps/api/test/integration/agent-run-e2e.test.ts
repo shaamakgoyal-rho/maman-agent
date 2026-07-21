@@ -209,6 +209,17 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
       }
       expect(pending, "a write approval should be pending").not.toBeNull();
 
+      // The proposed diff is readable over the API (panel renders it) and its
+      // hash matches the pending approval — same content the write is bound to.
+      const proposal = await app.inject({
+        method: "GET",
+        url: `/v1/runs/${runId}/proposal`,
+        headers: asDevice(deviceToken),
+      });
+      expect(proposal.statusCode).toBe(200);
+      expect(proposal.json().diff, "the proposed diff is surfaced").not.toBeNull();
+      expect(proposal.json().diff.summary.change_count).toBeGreaterThan(0);
+
       // A forged diff hash is refused (bound to step + diff hash).
       const forged = await app.inject({
         method: "POST",
@@ -236,6 +247,21 @@ describe("agent-lifecycle round-trip over Temporal, approved from a device token
       };
       expect(finalStatus.status).toBe("completed");
       expect(finalStatus.completed_writes).toBe(1);
+
+      // The immutable ExecutionReceipt renders from the server (incl. model cost
+      // line) — this is what the panel shows after a server-backed run.
+      const receiptRes = await app.inject({
+        method: "GET",
+        url: `/v1/runs/${runId}/receipt`,
+        headers: asDevice(deviceToken),
+      });
+      expect(receiptRes.statusCode).toBe(200);
+      const receipt = receiptRes.json().receipt;
+      expect(receipt, "the receipt is surfaced once finalized").not.toBeNull();
+      expect(receipt.run_id).toBe(runId);
+      expect(receipt.totals).toHaveProperty("model_cost_usd");
+      // The reconciliation write step applies all proposed records (4) at once.
+      expect(receipt.totals.writes_completed).toBe(4);
       return runId;
     });
 

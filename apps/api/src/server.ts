@@ -200,6 +200,22 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       if (rows.length === 0) return reply.status(404).send({ status: 404 });
       return { organization_id: rows[0]!.id };
     });
+
+    // Resolves the seeded demo user UUID (by WorkOS id) so the desktop app can
+    // enroll with a real member identity in local dev auth. Dev-only.
+    app.get("/v1/dev/resolve-user", async (req, reply) => {
+      const workosId = (req.query as { workos_id?: string }).workos_id;
+      if (!deps.sql || !workosId) return reply.status(404).send({ status: 404 });
+      const rows = await deps.sql<{ id: string; role: string | null }[]>`
+        SELECT u.id, m.role
+        FROM users u
+        LEFT JOIN memberships m ON m.user_id = u.id
+        WHERE u.workos_user_id = ${workosId}
+        LIMIT 1
+      `;
+      if (rows.length === 0) return reply.status(404).send({ status: 404 });
+      return { user_id: rows[0]!.id, role: rows[0]!.role ?? "member" };
+    });
   }
 
   // ---- v1 ----
@@ -475,6 +491,31 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!run) return;
     const pending = await deps.orchestrator!.getPendingApproval(run.temporal_workflow_id);
     return { pending };
+  });
+
+  // The proposed diff the run is waiting on — the panel renders this exactly as
+  // the local flow does. Read-only, owner-scoped, contains no token material.
+  app.get("/v1/runs/:id/proposal", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.read_own").allowed) return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const diff = await deps
+      .orchestrator!.getProposedDiff(run.temporal_workflow_id)
+      .catch(() => null);
+    return { diff: diff ?? null };
+  });
+
+  // The immutable ExecutionReceipt once the run has finalized (null until then).
+  app.get("/v1/runs/:id/receipt", { schema: { tags: ["runs"] } }, async (req, reply) => {
+    const principal = await requirePrincipal(req, reply);
+    if (!principal) return;
+    if (!authorize(principal, "runs.read_own").allowed) return forbid(req, reply, "Not permitted.");
+    const run = await loadOwnRun(req, reply, principal);
+    if (!run) return;
+    const receipt = await deps.orchestrator!.getReceipt(run.temporal_workflow_id).catch(() => null);
+    return { receipt: receipt ?? null };
   });
 
   // Approve a pending write. The approval is bound to the step AND the diff

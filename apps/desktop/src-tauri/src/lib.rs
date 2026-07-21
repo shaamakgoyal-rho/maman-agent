@@ -876,6 +876,142 @@ async fn sync_now<R: Runtime>(
     }))
 }
 
+/// Whether this device is enrolled — true iff a device token exists in the
+/// keychain. Exposes ONLY a boolean; the token itself never reaches the webview.
+#[tauri::command]
+fn device_enrolled<R: Runtime>(window: Window<R>) -> Result<bool, String> {
+    require_panel(&window)?;
+    Ok(store::load_keychain_secret(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT).is_some())
+}
+
+/// Removes the device token from the keychain (local-only mode again). The
+/// server session is unaffected here; the user can re-enroll to get a new token.
+#[tauri::command]
+fn device_unenroll<R: Runtime>(window: Window<R>) -> Result<(), String> {
+    require_panel(&window)?;
+    store::delete_keychain_key(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT);
+    Ok(())
+}
+
+/// Loads the device token from the keychain, or errors if not enrolled.
+fn require_device_token() -> Result<String, String> {
+    store::load_keychain_secret(KEYCHAIN_SERVICE, KEYCHAIN_DEVICE_TOKEN_ACCOUNT)
+        .ok_or_else(|| "device not enrolled".to_string())
+}
+
+/// Builds a sync client against the configured API base URL.
+fn server_client() -> Result<sync::SyncClient<sync::ReqwestTransport>, String> {
+    let transport = sync::ReqwestTransport::new().map_err(|e| e.to_string())?;
+    Ok(sync::SyncClient::new(transport, api_base_url()))
+}
+
+/// Compiles an accepted PatternCandidate into an AgentSpec on the server.
+#[tauri::command]
+async fn server_compile_agent<R: Runtime>(
+    window: Window<R>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.compile_agent(&token, body).await.map_err(|e| e.to_string())
+}
+
+/// Persists a compiled AgentSpec (agent + immutable version) on the server.
+#[tauri::command]
+async fn server_create_agent<R: Runtime>(
+    window: Window<R>,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.create_agent(&token, body).await.map_err(|e| e.to_string())
+}
+
+/// Starts a run (shadow/supervised) via the API→Temporal path.
+#[tauri::command]
+async fn server_start_run<R: Runtime>(
+    window: Window<R>,
+    agent_id: String,
+    mode: String,
+    idempotency_key: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    if mode != "shadow" && mode != "supervised" && mode != "active" {
+        return Err("invalid run mode".into());
+    }
+    let token = require_device_token()?;
+    let body = serde_json::json!({ "mode": mode, "trigger_idempotency_key": idempotency_key });
+    server_client()?.start_run(&token, &agent_id, body).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn server_run_status<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.run_status(&token, &run_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn server_pending_approval<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.pending_approval(&token, &run_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn server_proposal<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.proposal(&token, &run_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn server_receipt<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    server_client()?.receipt(&token, &run_id).await.map_err(|e| e.to_string())
+}
+
+/// Approves a pending write. The approval is bound to step id + diff hash
+/// server-side (the workflow re-checks the hash); this command only relays.
+#[tauri::command]
+async fn server_approve_run<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+    step_id: String,
+    diff_hash: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    let body = serde_json::json!({ "step_id": step_id, "diff_hash": diff_hash });
+    server_client()?.approve_run(&token, &run_id, body).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn server_reject_run<R: Runtime>(
+    window: Window<R>,
+    run_id: String,
+    step_id: String,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let token = require_device_token()?;
+    let body = serde_json::json!({ "step_id": step_id, "reason": reason });
+    server_client()?.reject_run(&token, &run_id, body).await.map_err(|e| e.to_string())
+}
+
 /// Background sync loop: periodically drains the outbox when a device is
 /// enrolled. Best-effort — failures defer the batch and are retried next tick.
 fn start_sync_loop<R: Runtime>(app: AppHandle<R>) {
@@ -1131,6 +1267,17 @@ pub fn run() {
             pairing_begin,
             device_enroll,
             sync_now,
+            device_enrolled,
+            device_unenroll,
+            server_compile_agent,
+            server_create_agent,
+            server_start_run,
+            server_run_status,
+            server_pending_approval,
+            server_proposal,
+            server_receipt,
+            server_approve_run,
+            server_reject_run,
             observer_status,
             open_accessibility_settings
         ])

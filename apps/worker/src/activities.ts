@@ -250,6 +250,8 @@ export function createActivities(deps: ActivityDeps): RunActivities {
       });
       await deps.sink.receipt(receipt);
       runState.delete(run.run_id);
+      // Returned so the workflow can surface it to `get_receipt` queries.
+      return receipt;
     },
   };
 }

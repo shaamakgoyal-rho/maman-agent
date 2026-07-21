@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
 import { useRuns } from "../../lib/runs.js";
+import { useServerRuns } from "../../lib/serverRuns.js";
+import { isTauri } from "../../lib/bridge.js";
+import { useEnrollment } from "../../state/enrollment.js";
+import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
 
 /** Minimal candidate for the reconciliation recipe (keys off intent). */
@@ -166,22 +170,57 @@ export function Agents() {
 }
 
 function RunPanel({ agent }: { agent: AgentRecord }) {
-  const runs = useRuns();
+  const localRuns = useRuns();
+  const serverRuns = useServerRuns();
+  const enrollment = useEnrollment();
+  const { settings } = useSettings();
+  const { registerOnServer } = useAgents();
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  // Enrolled + server enabled → runs go through the durable server path.
+  // Otherwise the local executor runs an explicit "local demo run".
+  const serverMode = isTauri() && settings.server_enabled && enrollment.phase === "enrolled";
+  const runs = serverMode ? serverRuns : localRuns;
   const diff = runs.diff;
+
+  const start = async (mode: "shadow" | "supervised") => {
+    setStartError(null);
+    if (!serverMode) {
+      if (mode === "shadow") await localRuns.startShadow(candidateFor(agent));
+      else await localRuns.startSupervised(candidateFor(agent));
+      return;
+    }
+    setStarting(true);
+    const reg = await registerOnServer(agent.agent_id, candidateFor(agent));
+    setStarting(false);
+    if (!reg.ok) {
+      setStartError(reg.message);
+      return;
+    }
+    if (mode === "shadow") await serverRuns.startShadow(reg.server_agent_id);
+    else await serverRuns.startSupervised(reg.server_agent_id);
+  };
 
   return (
     <div className="mt-3 border-t border-line pt-3">
+      <p className="mb-2 text-[11px] text-muted">
+        {serverMode
+          ? "Runs on the Maman server — durable, approval bound to step + diff hash."
+          : "local demo run — runs in-app with the same safety semantics (no server)."}
+      </p>
       {runs.phase === "idle" && (
         <div className="flex gap-2">
-          <Button onClick={() => void runs.startShadow(candidateFor(agent))}>Run shadow</Button>
-          <Button
-            variant="secondary"
-            onClick={() => void runs.startSupervised(candidateFor(agent))}
-          >
+          <Button disabled={starting} onClick={() => void start("shadow")}>
+            Run shadow
+          </Button>
+          <Button variant="secondary" disabled={starting} onClick={() => void start("supervised")}>
             Run supervised
           </Button>
         </div>
       )}
+      {starting && <Muted>Registering this agent on the server…</Muted>}
+      {startError && <p className="mt-1 text-xs text-danger">Could not start: {startError}</p>}
 
       {["running_read", "preparing_diff", "applying_write", "verifying"].includes(runs.phase) && (
         <Muted>

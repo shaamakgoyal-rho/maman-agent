@@ -75,4 +75,40 @@ describe("loadServerEnv", () => {
     const { DATABASE_URL: _omitted, ...rest } = validDev;
     expect(() => loadServerEnv(rest)).toThrow(EnvValidationError);
   });
+
+  // M18: the four-edit live trial fails fast on a half-set pair (any env).
+  it("rejects MODEL_PROVIDER=anthropic without a key even in development", () => {
+    expect(() => loadServerEnv({ ...validDev, MODEL_PROVIDER: "anthropic" })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it("accepts CONNECTOR_MODE=real with a complete Salesforce triple", () => {
+    const env = loadServerEnv({
+      ...validDev,
+      CONNECTOR_MODE: "real",
+      SALESFORCE_CLIENT_ID: "sf_id",
+      SALESFORCE_CLIENT_SECRET: "sf_secret",
+      SALESFORCE_REDIRECT_URI: "http://localhost:4000/v1/connectors/salesforce/callback",
+    });
+    expect(env.CONNECTOR_MODE).toBe("real");
+  });
+
+  it("rejects CONNECTOR_MODE=real with no Salesforce credentials", () => {
+    expect(() => loadServerEnv({ ...validDev, CONNECTOR_MODE: "real" })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it("rejects a half-set Salesforce triple", () => {
+    expect(() =>
+      loadServerEnv({ ...validDev, CONNECTOR_MODE: "real", SALESFORCE_CLIENT_ID: "only_id" }),
+    ).toThrow(EnvValidationError);
+  });
+
+  it("rejects half-set Google credentials", () => {
+    expect(() => loadServerEnv({ ...validDev, GOOGLE_CLIENT_ID: "only_id" })).toThrow(
+      EnvValidationError,
+    );
+  });
 });

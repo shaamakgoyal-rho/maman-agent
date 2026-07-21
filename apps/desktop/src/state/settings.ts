@@ -23,6 +23,15 @@ export const localSettingsSchema = z
     quiet_hours_end: z.string().default("08:30"),
     reduced_motion: z.enum(["system", "on", "off"]).default("system"),
     global_shortcut: z.string().default("Control+Alt+P"),
+    // Maman server enrollment (display only — the device TOKEN never reaches the
+    // webview; it lives in the OS keychain and is attached by the Rust core).
+    server_enabled: z.boolean().default(false),
+    // Stable per-device public id (UUID) for enrollment idempotency — generated
+    // once on first enroll so re-enrolling reuses the same device row.
+    server_device_public_id: z.string().nullable().default(null),
+    server_device_id: z.string().nullable().default(null),
+    server_token_expires_at: z.string().nullable().default(null),
+    server_last_sync_at: z.string().nullable().default(null),
   })
   .strict();
 

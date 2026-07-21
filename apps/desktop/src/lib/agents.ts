@@ -44,6 +44,12 @@ const agentRecordSchema = z
     ]),
     versions: z.array(versionSchema).min(1),
     created_at: z.string(),
+    // M18: once registered on the Maman server, the server-side agent id so
+    // runs can target the durable server path. Null in local-only mode.
+    server_agent_id: z.string().nullable().default(null),
+    // Compile inputs, kept so the agent can be (re)compiled server-side.
+    generalized_intent: z.string().default("reconcile_account_list"),
+    desired_outcome: z.string().default("Reconcile the account list with Salesforce."),
   })
   .strict();
 
@@ -84,6 +90,17 @@ type AgentsStore = {
   /** Material edit: new immutable version; agent returns to shadow. */
   editDescription: (agentId: string, description: string) => Promise<boolean>;
   setState: (agentId: string, state: AgentRecord["state"]) => Promise<void>;
+  /**
+   * Registers the agent on the Maman server (M18): compiles the candidate
+   * server-side (so the configured model provider runs on the server) and
+   * persists the spec. Returns the server agent id. Idempotent per candidate —
+   * a repeat call reuses the stored server agent id. All HTTP originates in the
+   * Rust core with the keychain device token.
+   */
+  registerOnServer: (
+    agentId: string,
+    candidate: PatternCandidate,
+  ) => Promise<{ ok: true; server_agent_id: string } | { ok: false; message: string }>;
 };
 
 export const useAgents = create<AgentsStore>((set, get) => ({
@@ -145,6 +162,9 @@ export const useAgents = create<AgentsStore>((set, get) => ({
         },
       ],
       created_at: result.spec.created_at,
+      server_agent_id: null,
+      generalized_intent: generalizedIntent,
+      desired_outcome: desiredOutcome,
     };
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
     await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
@@ -194,5 +214,50 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = get().agents.map((a) => (a.agent_id === agentId ? { ...a, state } : a));
     await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
     set({ agents });
+  },
+
+  registerOnServer: async (agentId, candidate) => {
+    const agent = get().agents.find((a) => a.agent_id === agentId);
+    if (!agent) return { ok: false, message: "agent not found" };
+    if (agent.server_agent_id) return { ok: true, server_agent_id: agent.server_agent_id };
+    if (!isTauri()) {
+      return { ok: false, message: "Server runs require the desktop app." };
+    }
+    try {
+      // 1. Compile on the server (the configured model provider runs there; the
+      //    server binds org/owner from the device principal, not the client).
+      const compiled = await invokeCommand<{
+        spec: AgentSpec;
+        model_usage?: { input_tokens: number; output_tokens: number; model_alias: string };
+        model_cost_usd?: number;
+      }>("server_compile_agent", {
+        body: {
+          candidate,
+          generalized_intent: agent.generalized_intent,
+          desired_outcome: agent.desired_outcome,
+        },
+      });
+      // 2. Persist the compiled spec (agent + immutable version).
+      const created = await invokeCommand<{ agent_id: string; agent_version_id: string }>(
+        "server_create_agent",
+        {
+          body: {
+            spec: compiled.spec,
+            ...(compiled.model_usage ? { model_usage: compiled.model_usage } : {}),
+            ...(compiled.model_cost_usd !== undefined
+              ? { model_cost_usd: compiled.model_cost_usd }
+              : {}),
+          },
+        },
+      );
+      const agents = get().agents.map((a) =>
+        a.agent_id === agentId ? { ...a, server_agent_id: created.agent_id } : a,
+      );
+      await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+      set({ agents });
+      return { ok: true, server_agent_id: created.agent_id };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
   },
 }));
