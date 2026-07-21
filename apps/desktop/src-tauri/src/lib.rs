@@ -33,6 +33,11 @@ const KEYCHAIN_ACCOUNT: &str = "local-store-key";
 const KEYCHAIN_DEVICE_TOKEN_ACCOUNT: &str = "device-token";
 const SYNC_INTERVAL_SECS: u64 = 60;
 
+/// Seeded demo identity (dev auth). These are WorkOS ids, not secrets; they live
+/// here as the single source of truth so the webview never hardcodes them.
+const DEMO_ORG_WORKOS_ID: &str = "org_demo_acme_sales";
+const DEMO_USER_WORKOS_ID: &str = "user_demo_alex";
+
 /// API base URL for device→server calls. Overridable for local/hosted targets.
 fn api_base_url() -> String {
     std::env::var("MAMAN_API_BASE_URL").unwrap_or_else(|_| "http://localhost:4000".to_string())
@@ -1012,6 +1017,70 @@ async fn server_reject_run<R: Runtime>(
     server_client()?.reject_run(&token, &run_id, body).await.map_err(|e| e.to_string())
 }
 
+/// Resolves the seeded demo dev identity (org + owner user + role) from the API.
+/// Runs in Rust because the webview may not reach the API directly (CSP).
+async fn resolve_demo_identity() -> Result<(String, String, String), String> {
+    let client = server_client()?;
+    let org = client.resolve_org(DEMO_ORG_WORKOS_ID).await.map_err(|e| match e {
+        sync::SyncError::Server(s) => {
+            format!("Could not resolve the demo org ({s}). Is the API running and seeded?")
+        }
+        other => other.to_string(),
+    })?;
+    let organization_id = org
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .ok_or("resolve-org returned no organization_id")?
+        .to_string();
+    let user = client.resolve_user(DEMO_USER_WORKOS_ID).await.map_err(|e| match e {
+        sync::SyncError::Server(s) => {
+            format!("Could not resolve the demo user ({s}). Is the API seeded?")
+        }
+        other => other.to_string(),
+    })?;
+    let user_id = user
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .ok_or("resolve-user returned no user_id")?
+        .to_string();
+    let role = user.get("role").and_then(|v| v.as_str()).unwrap_or("member").to_string();
+    Ok((organization_id, user_id, role))
+}
+
+/// Resolves the dev identity for local enrollment. Returns non-secret ids only
+/// (org/user/role); the webview passes these straight back to `device_enroll`.
+#[tauri::command]
+async fn resolve_dev_identity<R: Runtime>(window: Window<R>) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let (organization_id, user_id, role) = resolve_demo_identity().await?;
+    Ok(serde_json::json!({
+        "organization_id": organization_id,
+        "user_id": user_id,
+        "role": role,
+    }))
+}
+
+/// Requests an OAuth authorization URL for a connector. Resolves the dev
+/// principal, calls the API from Rust, and returns the URL for the webview to
+/// open in the SYSTEM browser. No token or client-origin HTTP touches the app.
+#[tauri::command]
+async fn connector_authorize<R: Runtime>(
+    window: Window<R>,
+    provider: String,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let (organization_id, user_id, role) = resolve_demo_identity().await?;
+    let headers = vec![
+        ("x-dev-org-id".to_string(), organization_id),
+        ("x-dev-user-id".to_string(), user_id),
+        ("x-dev-role".to_string(), role),
+    ];
+    server_client()?
+        .connector_authorize(headers, &provider)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Background sync loop: periodically drains the outbox when a device is
 /// enrolled. Best-effort — failures defer the batch and are retried next tick.
 fn start_sync_loop<R: Runtime>(app: AppHandle<R>) {
@@ -1278,6 +1347,8 @@ pub fn run() {
             server_receipt,
             server_approve_run,
             server_reject_run,
+            resolve_dev_identity,
+            connector_authorize,
             observer_status,
             open_accessibility_settings
         ])
@@ -1393,6 +1464,37 @@ mod gate_tests {
             gate_event(&settings(), &event("Google Sheets", Some("docs.google.com"), "chrome"))
                 .unwrap(),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod csp_tests {
+    //! The webview must NEVER reach the API directly — all device→server HTTP
+    //! originates in Rust. These tests fail if someone "fixes" a blocked request
+    //! by loosening the Content-Security-Policy instead of routing it through a
+    //! Tauri command (see M18.1).
+
+    fn tauri_conf() -> String {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        std::fs::read_to_string(path).expect("tauri.conf.json is readable")
+    }
+
+    #[test]
+    fn csp_does_not_allow_the_api_origin() {
+        let conf = tauri_conf();
+        assert!(
+            !conf.contains("localhost:4000"),
+            "CSP/tauri.conf must not whitelist the API origin — route HTTP through Rust instead"
+        );
+    }
+
+    #[test]
+    fn csp_connect_src_stays_locked_to_self_and_ipc() {
+        let conf = tauri_conf();
+        assert!(
+            conf.contains("connect-src 'self' ipc: http://ipc.localhost"),
+            "connect-src must stay locked to self + Tauri IPC"
         );
     }
 }

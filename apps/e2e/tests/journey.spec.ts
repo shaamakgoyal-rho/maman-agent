@@ -75,4 +75,16 @@ test("onboarding → demo workflow → suggestion → agent → shadow → super
   // 10. Receipt with measured ROI, in the pet's honest voice.
   await expect(page.getByText(/Updated 4 records\. Saved approximately/i)).toBeVisible();
   await expect(page.getByText(/ROI measured · verification passed/i)).toBeVisible();
+
+  // 11. Settings → Connect to Maman server card renders (M18.1 regression guard).
+  // The enrollment store hydrates on mount; if it threw (as the CSP-blocked
+  // webview fetch did), the card would surface an error instead of the card.
+  // NOTE: the web preview cannot exercise Tauri IPC, so it shows the honest
+  // "runs in the desktop app" state; the actual enroll IPC path is covered by
+  // the Rust unit tests + the CSP test + the manual tauri-dev verification.
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByText(/Connect to Maman server/i)).toBeVisible();
+  await expect(page.getByText(/Enrollment runs in the desktop app/i)).toBeVisible();
+  // The card must not have crashed with an enrollment error.
+  await expect(page.getByText(/Enrollment problem:/i)).toHaveCount(0);
 });

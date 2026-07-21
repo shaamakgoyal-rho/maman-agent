@@ -13,18 +13,12 @@ import { useSettings } from "./settings.js";
  * / unenroll through Tauri commands. Local-only mode keeps working with no
  * enrollment: nothing on this screen is required to use Maman.
  *
- * Dev auth (local trials): the org + owner user come from the seeded demo org,
- * resolved from the API by their WorkOS ids. The WorkOS bearer path is left for
+ * Dev auth (local trials): the org + owner user come from the seeded demo org.
+ * They are resolved by the RUST core (the `resolve_dev_identity` command) — the
+ * webview never talks HTTP to the API (the Tauri CSP forbids it; all
+ * device→server HTTP originates in Rust). The WorkOS bearer path is left for
  * hosted deployments.
  */
-
-const DEMO_ORG_WORKOS_ID = "org_demo_acme_sales";
-const DEMO_USER_WORKOS_ID = "user_demo_alex";
-
-/** Where the webview resolves the seeded demo identity for dev enrollment. */
-function apiBaseUrl(): string {
-  return "http://localhost:4000";
-}
 
 export type EnrollmentDeps = {
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -43,27 +37,15 @@ export type EnrollmentDeps = {
   available: () => boolean;
 };
 
-async function resolveDevIdentityOverHttp(): Promise<{
+/** Resolves the dev identity through the Rust core (never a webview fetch). */
+async function resolveDevIdentityViaRust(): Promise<{
   organization_id: string;
   user_id: string;
   role: string;
 }> {
-  const base = apiBaseUrl();
-  const orgRes = await fetch(`${base}/v1/dev/resolve-org?workos_id=${DEMO_ORG_WORKOS_ID}`);
-  if (!orgRes.ok)
-    throw new Error(
-      `Could not resolve the demo org (${orgRes.status}). Is the API running and seeded?`,
-    );
-  const userRes = await fetch(`${base}/v1/dev/resolve-user?workos_id=${DEMO_USER_WORKOS_ID}`);
-  if (!userRes.ok)
-    throw new Error(`Could not resolve the demo user (${userRes.status}). Is the API seeded?`);
-  const org = (await orgRes.json()) as { organization_id: string };
-  const user = (await userRes.json()) as { user_id: string; role?: string };
-  return {
-    organization_id: org.organization_id,
-    user_id: user.user_id,
-    role: user.role ?? "member",
-  };
+  return invokeCommand<{ organization_id: string; user_id: string; role: string }>(
+    "resolve_dev_identity",
+  );
 }
 
 /** Reads the stable device public id from settings, generating + persisting once. */
@@ -78,7 +60,7 @@ async function stableDevicePublicId(): Promise<string> {
 
 export const defaultEnrollmentDeps: EnrollmentDeps = {
   invoke: invokeCommand,
-  resolveDevIdentity: resolveDevIdentityOverHttp,
+  resolveDevIdentity: resolveDevIdentityViaRust,
   devicePublicId: stableDevicePublicId,
   persist: (patch) => useSettings.getState().update(patch),
   available: isTauri,

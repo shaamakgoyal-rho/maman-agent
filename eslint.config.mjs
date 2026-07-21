@@ -49,6 +49,34 @@ export default tseslint.config(
     },
   },
   {
+    // The desktop webview is untrusted and CSP-locked: it must NEVER talk HTTP.
+    // All device→server HTTP originates in the Rust core and is reached via
+    // Tauri commands (invokeCommand). Direct fetch/XHR/axios is forbidden here
+    // so the enrollment/connectors CSP regression (M18.1) cannot return.
+    files: ["apps/desktop/src/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        {
+          name: "fetch",
+          message:
+            "The webview never talks HTTP (CSP-locked). Route the call through a Tauri command in src-tauri/src/lib.rs (SyncClient) and invoke it.",
+        },
+        {
+          name: "XMLHttpRequest",
+          message:
+            "The webview never talks HTTP (CSP-locked). Route the call through a Tauri command instead.",
+        },
+      ],
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [{ name: "axios", message: "The webview never talks HTTP; use a Tauri command." }],
+        },
+      ],
+    },
+  },
+  {
     // Scripts, configs, and tests may use console output.
     files: [
       "**/*.config.{ts,js,mjs}",

@@ -51,17 +51,20 @@ export function Settings() {
 
   const connect = async (provider: string) => {
     setConnectError(null);
+    if (!isTauri()) {
+      setConnectError(
+        "Connecting a tool requires the desktop app (the web preview cannot reach the API).",
+      );
+      return;
+    }
     try {
-      // The desktop asks the API for an authorization URL, then opens it in the
-      // SYSTEM browser (never an embedded webview). Tokens never return here.
-      const res = await fetch(`http://localhost:4000/v1/connectors/${provider}/authorize`, {
-        method: "POST",
-        headers: { "x-dev-role": "member" },
+      // The RUST core asks the API for an authorization URL (the webview never
+      // talks HTTP — CSP forbids it). We then open the URL in the SYSTEM browser
+      // (never an embedded webview). Tokens never return here.
+      const body = await invokeCommand<{ authorization_url?: string }>("connector_authorize", {
+        provider,
       });
-      if (!res.ok) throw new Error(`connector broker unavailable (${res.status})`);
-      const body = (await res.json()) as { authorization_url?: string };
       if (body.authorization_url) {
-        // Opens in the system browser — never an embedded login webview.
         window.open(body.authorization_url, "_blank", "noopener");
       }
     } catch (e) {

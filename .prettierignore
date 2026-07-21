@@ -9,6 +9,8 @@ pnpm-lock.yaml
 docs/api/openapi.json
 packages/contracts/schemas
 apps/desktop/src-tauri/gen
+# Vendored Seedy source — keep byte-identical to the upstream provenance package.
+apps/desktop/src/pet/assets/seedy-source
 playwright-report
 test-results
 .build

@@ -280,6 +280,64 @@ impl<T: HttpTransport> SyncClient<T> {
     ) -> Result<Value, SyncError> {
         self.authed("POST", &format!("/v1/runs/{run_id}/reject"), device_token, Some(body)).await
     }
+
+    // ---- dev identity resolution + connectors (webview never fetches HTTP) ----
+    //
+    // These originate here in Rust for the same reason as everything above: the
+    // webview is forbidden (by CSP) from reaching the API directly. The resolve
+    // endpoints are dev-only and unauthenticated; connector authorize carries a
+    // principal (dev identity headers here).
+
+    /// Resolves the seeded org UUID from its WorkOS id (dev-only endpoint).
+    pub async fn resolve_org(&self, workos_id: &str) -> Result<Value, SyncError> {
+        let res = self
+            .transport
+            .send(HttpRequest {
+                method: "GET",
+                url: format!("{}/v1/dev/resolve-org?workos_id={}", self.base_url, workos_id),
+                headers: vec![],
+                body: None,
+            })
+            .await?;
+        check_status(res.status)?;
+        Ok(res.body)
+    }
+
+    /// Resolves the seeded owner-user UUID from its WorkOS id (dev-only endpoint).
+    pub async fn resolve_user(&self, workos_id: &str) -> Result<Value, SyncError> {
+        let res = self
+            .transport
+            .send(HttpRequest {
+                method: "GET",
+                url: format!("{}/v1/dev/resolve-user?workos_id={}", self.base_url, workos_id),
+                headers: vec![],
+                body: None,
+            })
+            .await?;
+        check_status(res.status)?;
+        Ok(res.body)
+    }
+
+    /// Requests an OAuth authorization URL for a connector. The caller supplies
+    /// the principal headers (dev identity or device token); the URL is opened in
+    /// the system browser by the desktop — tokens never touch the webview.
+    pub async fn connector_authorize(
+        &self,
+        headers: Vec<(String, String)>,
+        provider: &str,
+    ) -> Result<Value, SyncError> {
+        let res = self
+            .transport
+            .send(HttpRequest {
+                method: "POST",
+                url: format!("{}/v1/connectors/{}/authorize", self.base_url, provider),
+                headers,
+                body: None,
+            })
+            .await?;
+        check_status(res.status)?;
+        Ok(res.body)
+    }
 }
 
 fn bearer(token: &str) -> Vec<(String, String)> {
@@ -468,6 +526,72 @@ mod tests {
         assert_eq!(paths[4], "http://localhost:4000/v1/runs/r1/proposal");
         assert_eq!(paths[5], "http://localhost:4000/v1/runs/r1/approve");
         assert_eq!(paths[6], "http://localhost:4000/v1/runs/r1/receipt");
+    }
+
+    #[tokio::test]
+    async fn resolve_org_and_user_parse_and_hit_dev_endpoints() {
+        let mock = MockTransport::new(vec![
+            (200, json!({ "organization_id": "org-uuid" })),
+            (200, json!({ "user_id": "user-uuid", "role": "member" })),
+        ]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let org = client.resolve_org("org_demo_acme_sales").await.unwrap();
+        assert_eq!(org.get("organization_id").unwrap(), "org-uuid");
+        let user = client.resolve_user("user_demo_alex").await.unwrap();
+        assert_eq!(user.get("user_id").unwrap(), "user-uuid");
+        let seen = client.transport.seen.borrow();
+        assert_eq!(seen[0].url, "http://localhost:4000/v1/dev/resolve-org?workos_id=org_demo_acme_sales");
+        assert_eq!(seen[1].url, "http://localhost:4000/v1/dev/resolve-user?workos_id=user_demo_alex");
+        // No auth headers on the dev-only resolve endpoints.
+        assert!(seen[0].headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_org_maps_404_to_server_error() {
+        let mock = MockTransport::new(vec![(404, Value::Null)]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let err = client.resolve_org("nope").await.unwrap_err();
+        assert!(matches!(err, SyncError::Server(404)));
+    }
+
+    #[tokio::test]
+    async fn resolve_user_maps_404_to_server_error() {
+        let mock = MockTransport::new(vec![(404, Value::Null)]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let err = client.resolve_user("nope").await.unwrap_err();
+        assert!(matches!(err, SyncError::Server(404)));
+    }
+
+    #[tokio::test]
+    async fn resolve_org_propagates_transport_error() {
+        struct DeadTransport;
+        impl HttpTransport for DeadTransport {
+            async fn send(&self, _req: HttpRequest) -> Result<HttpResponse, SyncError> {
+                Err(SyncError::Transport("connection refused".into()))
+            }
+        }
+        let client = SyncClient::new(DeadTransport, "http://localhost:4000");
+        let err = client.resolve_org("x").await.unwrap_err();
+        assert!(matches!(err, SyncError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn connector_authorize_carries_principal_headers_and_returns_url() {
+        let mock = MockTransport::new(vec![(
+            200,
+            json!({ "authorization_url": "https://login.salesforce.com/oauth", "expires_in_seconds": 600 }),
+        )]);
+        let client = SyncClient::new(mock, "http://localhost:4000");
+        let headers = vec![
+            ("x-dev-org-id".to_string(), "org-uuid".to_string()),
+            ("x-dev-user-id".to_string(), "user-uuid".to_string()),
+            ("x-dev-role".to_string(), "member".to_string()),
+        ];
+        let res = client.connector_authorize(headers, "salesforce").await.unwrap();
+        assert_eq!(res.get("authorization_url").unwrap(), "https://login.salesforce.com/oauth");
+        let seen = client.transport.seen.borrow();
+        assert_eq!(seen[0].url, "http://localhost:4000/v1/connectors/salesforce/authorize");
+        assert!(seen[0].headers.iter().any(|(k, v)| k == "x-dev-org-id" && v == "org-uuid"));
     }
 
     #[tokio::test]
