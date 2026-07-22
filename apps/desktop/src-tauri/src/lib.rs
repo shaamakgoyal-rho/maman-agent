@@ -1060,9 +1060,24 @@ async fn resolve_dev_identity<R: Runtime>(window: Window<R>) -> Result<serde_jso
     }))
 }
 
-/// Requests an OAuth authorization URL for a connector. Resolves the dev
-/// principal, calls the API from Rust, and returns the URL for the webview to
-/// open in the SYSTEM browser. No token or client-origin HTTP touches the app.
+/// Opens an http(s) URL in the user's DEFAULT system browser (Chrome, Safari,
+/// …) via `open`. Rejects any non-http(s) scheme so this can't be turned into a
+/// local-file / custom-scheme opener.
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http(s) URL".into());
+    }
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the browser: {e}"))
+}
+
+/// Requests an OAuth authorization URL for a connector and OPENS it in the
+/// system browser (the OAuth flow — and the redirect back to the API — happens
+/// entirely there, never in this webview). Resolves the dev principal and calls
+/// the API from Rust; no token or client-origin HTTP touches the app.
 #[tauri::command]
 async fn connector_authorize<R: Runtime>(
     window: Window<R>,
@@ -1075,10 +1090,16 @@ async fn connector_authorize<R: Runtime>(
         ("x-dev-user-id".to_string(), user_id),
         ("x-dev-role".to_string(), role),
     ];
-    server_client()?
+    let body = server_client()?
         .connector_authorize(headers, &provider)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let url = body
+        .get("authorization_url")
+        .and_then(|v| v.as_str())
+        .ok_or("connector authorize returned no authorization_url")?;
+    open_url_in_browser(url)?;
+    Ok(serde_json::json!({ "authorization_url": url, "opened": true }))
 }
 
 /// Background sync loop: periodically drains the outbox when a device is
@@ -1466,6 +1487,22 @@ mod gate_tests {
             None
         );
     }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::open_url_in_browser;
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        // Guard: this opener must never be usable for file:// or custom schemes.
+        assert!(open_url_in_browser("file:///etc/passwd").is_err());
+        assert!(open_url_in_browser("x-apple.systempreferences:foo").is_err());
+        assert!(open_url_in_browser("javascript:alert(1)").is_err());
+        assert!(open_url_in_browser("data:text/html,hi").is_err());
+    }
+    // The http(s) success path spawns `open`, so it is exercised by the manual
+    // connector verification, not here (a unit test must not launch a browser).
 }
 
 #[cfg(test)]

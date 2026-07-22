@@ -20,6 +20,7 @@ export function Settings() {
   const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectOpened, setConnectOpened] = useState<string | null>(null);
   const [observerStatus, setObserverStatus] = useState<string | null>(null);
 
   useEffect(() => {
@@ -51,6 +52,7 @@ export function Settings() {
 
   const connect = async (provider: string) => {
     setConnectError(null);
+    setConnectOpened(null);
     if (!isTauri()) {
       setConnectError(
         "Connecting a tool requires the desktop app (the web preview cannot reach the API).",
@@ -58,15 +60,14 @@ export function Settings() {
       return;
     }
     try {
-      // The RUST core asks the API for an authorization URL (the webview never
-      // talks HTTP — CSP forbids it). We then open the URL in the SYSTEM browser
-      // (never an embedded webview). Tokens never return here.
-      const body = await invokeCommand<{ authorization_url?: string }>("connector_authorize", {
+      // The RUST core asks the API for the OAuth URL (the webview never talks
+      // HTTP — CSP forbids it) and opens it in the SYSTEM browser, where you
+      // sign in and the redirect back to the API completes. Tokens never return
+      // here — they are stored encrypted in the server vault.
+      await invokeCommand<{ authorization_url?: string; opened?: boolean }>("connector_authorize", {
         provider,
       });
-      if (body.authorization_url) {
-        window.open(body.authorization_url, "_blank", "noopener");
-      }
+      setConnectOpened(provider);
     } catch (e) {
       setConnectError(
         e instanceof Error ? e.message : "Could not start connection. Is the API running?",
@@ -309,6 +310,11 @@ export function Settings() {
           ))}
         </ul>
         {connectError && <p className="mt-2 text-xs text-danger">{connectError}</p>}
+        {connectOpened && (
+          <p className="mt-2 text-xs text-success">
+            Opened {connectOpened} sign-in in your browser — finish there and return here.
+          </p>
+        )}
         <Muted>
           Demo mode uses in-process fixtures — real OAuth activates when credentials are set.
         </Muted>
