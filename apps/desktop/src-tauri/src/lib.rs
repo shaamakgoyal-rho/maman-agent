@@ -258,6 +258,20 @@ fn persist_and_snap_pet<R: Runtime>(app: &AppHandle<R>) {
     save_positions(app, &positions);
 }
 
+/// Makes Maman present on EVERY macOS Space (virtual desktop) and full-screen
+/// Space: the pet stays visible and observing when you swipe between desktops,
+/// and the panel opens on whichever desktop is active instead of yanking you
+/// back to the one it was created on. Observation itself already spans Spaces
+/// (the frontmost-app change that a Space switch triggers is what the observer
+/// tracks); this only fixes window presence.
+fn make_windows_visible_on_all_spaces<R: Runtime>(app: &AppHandle<R>) {
+    for label in ["pet", "panel"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_visible_on_all_workspaces(true);
+        }
+    }
+}
+
 fn restore_pet_position<R: Runtime>(app: &AppHandle<R>) {
     let Some(pet) = app.get_webview_window("pet") else { return };
     let positions = load_positions(app);
@@ -1382,6 +1396,7 @@ pub fn run() {
             open_accessibility_settings
         ])
         .setup(|app| {
+            make_windows_visible_on_all_spaces(&app.handle().clone());
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
             start_sync_loop(app.handle().clone());
