@@ -37,6 +37,7 @@ export {
   patternSignature,
   type EngineOptions,
   type EngineResult,
+  type WatchingPattern,
 } from "./engine.js";
 export { deterministicName, type NamingResult } from "./naming.js";
 export { toPatternFeature, categorizeApp } from "./projection.js";

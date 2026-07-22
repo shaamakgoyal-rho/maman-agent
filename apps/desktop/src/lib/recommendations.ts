@@ -1,5 +1,6 @@
 import type { PatternCandidate, PatternFeatureEvent, Recommendation } from "@maman/contracts";
 import { patternSignature, runPatternEngine, toPatternFeature } from "@maman/pattern-engine";
+import { patternGates, type FormingProgress } from "./forming.js";
 import { create } from "zustand";
 import { z } from "zod";
 import { invokeCommand, isTauri } from "./bridge.js";
@@ -68,9 +69,22 @@ export type RecommendationWithState = {
   entry: SuggestionEntry;
 };
 
+/** A pattern still forming — what's tracked + how close it is to a suggestion. */
+export type FormingItem = {
+  signature: string;
+  candidate: PatternCandidate;
+  title: string;
+  summary: string;
+  /** Redacted, human-readable steps Maman has observed. */
+  steps: string[];
+  progress: FormingProgress;
+};
+
 type RecommendationsStore = {
   state: SuggestionState;
   items: RecommendationWithState[];
+  /** In-progress patterns not yet surfaceable, ranked closest-first. */
+  forming: FormingItem[];
   hydrated: boolean;
   refresh: () => Promise<void>;
   act: (
@@ -92,6 +106,7 @@ const DEFAULT_STATE: SuggestionState = suggestionStateSchema.parse({});
 export const useRecommendations = create<RecommendationsStore>((set, get) => ({
   state: DEFAULT_STATE,
   items: [],
+  forming: [],
   hydrated: false,
 
   refresh: async () => {
@@ -147,9 +162,28 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
         } satisfies SuggestionEntry);
       items.push({ recommendation, candidate, signature, entry });
     }
+
+    // Forming: patterns Maman is watching that haven't crossed every bar yet.
+    // Ranked closest-first so the user sees what's about to surface.
+    const forming: FormingItem[] = result.watching
+      .map((w) => ({
+        signature: patternSignature(w.candidate.canonical_sequence),
+        candidate: w.candidate,
+        title: w.naming.title,
+        summary: w.naming.summary,
+        steps: w.naming.redacted_steps.map((s) => `${s.action} · ${s.app}`),
+        progress: patternGates(w.candidate),
+      }))
+      .filter((f) => {
+        // Hide ones the user has explicitly waved off (dismissed/never-suggest).
+        const e = state.entries[f.signature];
+        return !e || (e.status !== "dismissed" && e.status !== "accepted");
+      })
+      .sort((a, b) => b.progress.ratio - a.progress.ratio);
+
     // Keep dismissed/accepted history entries visible in their filters even
     // when the engine no longer produces them (data deleted, cooldown, …).
-    set({ state, items, hydrated: true });
+    set({ state, items, forming, hydrated: true });
   },
 
   act: async (signature, action) => {

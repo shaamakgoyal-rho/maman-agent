@@ -15,7 +15,7 @@ import {
   representativeSequence,
   scorePattern,
 } from "./scoring.js";
-import { deterministicName } from "./naming.js";
+import { deterministicName, type NamingResult } from "./naming.js";
 
 /**
  * End-to-end deterministic pattern pipeline:
@@ -35,11 +35,23 @@ export type EngineOptions = {
   suppressed_signatures?: string[];
 };
 
+/**
+ * A pattern Maman is watching form but that has NOT yet crossed every
+ * eligibility bar — surfaced (with its plain-language naming) so the UI can
+ * show the user what is being tracked and how close it is to a suggestion.
+ */
+export type WatchingPattern = {
+  candidate: PatternCandidate;
+  naming: NamingResult;
+};
+
 export type EngineResult = {
   episodes: SegmentedEpisode[];
   candidates: PatternCandidate[];
   /** Recommendations for candidates that crossed every eligibility bar. */
   recommendations: Recommendation[];
+  /** In-progress patterns (status "candidate") not yet surfaceable, with naming. */
+  watching: WatchingPattern[];
 };
 
 export function patternSignature(canonicalSequence: string[]): string {
@@ -70,6 +82,7 @@ export function runPatternEngine(
 
   const candidates: PatternCandidate[] = [];
   const recommendations: Recommendation[] = [];
+  const watching: WatchingPattern[] = [];
 
   for (const cluster of clusters) {
     const members = cluster.members.map((i) => learnable[i]!);
@@ -129,10 +142,14 @@ export function runPatternEngine(
 
     if (surfaceable) {
       recommendations.push(buildRecommendation(candidate, members, options));
+    } else if (!suppressed && !dismissedRecently) {
+      // In-progress pattern the user hasn't waved off — show it forming, with
+      // its plain-language naming, so tracking → suggestion is transparent.
+      watching.push({ candidate, naming: deterministicName(candidate, members) });
     }
   }
 
-  return { episodes, candidates, recommendations };
+  return { episodes, candidates, recommendations, watching };
 }
 
 function buildRecommendation(
