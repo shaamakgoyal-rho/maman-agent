@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
-import { Button, Card, Muted, SectionTitle, StatusPill } from "../ui.js";
+import { APP_PRESETS, ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
+import { Button, Card, Muted, SectionTitle, StatusPill, Toggle } from "../ui.js";
 
 export function Privacy() {
   const { settings, update } = useSettings();
@@ -22,6 +22,13 @@ export function Privacy() {
     setNewDomain("");
   };
 
+  const toggleApp = (bundleId: string, on: boolean) =>
+    void update({
+      allowlist_bundles: on
+        ? [...new Set([...settings.allowlist_bundles, bundleId])]
+        : settings.allowlist_bundles.filter((b) => b !== bundleId),
+    });
+
   return (
     <div className="space-y-3">
       <Card>
@@ -36,8 +43,12 @@ export function Privacy() {
             </StatusPill>
           </div>
           <div className="flex items-center justify-between">
-            <span>macOS Accessibility</span>
-            <StatusPill tone="muted">Not granted (lands with desktop observation)</StatusPill>
+            <span>Desktop app observation</span>
+            <StatusPill tone={settings.allowlist_bundles.length ? "success" : "muted"}>
+              {settings.allowlist_bundles.length
+                ? `${settings.allowlist_bundles.length} apps allowed`
+                : "No apps allowed"}
+            </StatusPill>
           </div>
           <div className="flex items-center justify-between">
             <span>Screen Recording</span>
@@ -78,6 +89,27 @@ export function Privacy() {
           <Button variant="secondary" onClick={addDomain}>
             Allow
           </Button>
+        </div>
+      </Card>
+
+      <Card>
+        <SectionTitle>Allowed apps (desktop)</SectionTitle>
+        <Muted>
+          Which native macOS apps Maman may observe via Accessibility. Nothing is on until you
+          enable it. (Websites are covered by “Allowed sites” above + the Browser Relay.) Requires
+          the macOS Accessibility permission.
+        </Muted>
+        <div className="mt-2 space-y-1">
+          {APP_PRESETS.map((app) => (
+            <Toggle
+              key={app.bundleId}
+              id={`app-${app.bundleId}`}
+              checked={settings.allowlist_bundles.includes(app.bundleId)}
+              onChange={(on) => toggleApp(app.bundleId, on)}
+              label={app.label}
+              description={app.bundleId}
+            />
+          ))}
         </div>
       </Card>
 

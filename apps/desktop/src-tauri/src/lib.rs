@@ -77,6 +77,9 @@ struct GateSettings {
     observation_paused: bool,
     private_apps: Vec<String>,
     allowlist_domains: Vec<String>,
+    /// Desktop app bundle ids the macOS AX observer may observe. Without this the
+    /// Swift observer's decideObservation drops every native-app event.
+    allowlist_bundles: Vec<String>,
 }
 
 fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
@@ -101,6 +104,11 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
             .unwrap_or_default(),
         allowlist_domains: json
             .get("allowlist_domains")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        allowlist_bundles: json
+            .get("allowlist_bundles")
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default(),
@@ -1272,7 +1280,7 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             if let Some(mut stdin) = child.stdin.take() {
                 let configure = serde_json::json!({
                     "type": "configure",
-                    "allowlist_bundles": [],
+                    "allowlist_bundles": settings.allowlist_bundles,
                     "allowlist_domains": settings.allowlist_domains,
                     "private_apps": settings.private_apps,
                 })
@@ -1434,6 +1442,7 @@ mod gate_tests {
             observation_paused: false,
             private_apps: vec!["figma".into()],
             allowlist_domains: vec!["salesforce.com".into(), "docs.google.com".into()],
+            allowlist_bundles: vec!["com.google.Chrome".into()],
         }
     }
 

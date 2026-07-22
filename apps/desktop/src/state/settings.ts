@@ -39,6 +39,23 @@ export type LocalSettings = z.infer<typeof localSettingsSchema>;
 
 export const DEFAULT_SETTINGS: LocalSettings = localSettingsSchema.parse({});
 
+/**
+ * Desktop-app presets (macOS bundle ids) the AX observer can watch. Browser
+ * bundles are included because most sales work is a browser app; the observer
+ * sees the app + window shape, while the Chrome relay adds domain-level detail.
+ * Nothing is pre-enabled — the user opts each app in (Privacy → Allowed apps).
+ */
+export const APP_PRESETS: Array<{ label: string; bundleId: string }> = [
+  { label: "Google Chrome", bundleId: "com.google.Chrome" },
+  { label: "Safari", bundleId: "com.apple.Safari" },
+  { label: "Arc", bundleId: "company.thebrowser.Browser" },
+  { label: "Microsoft Edge", bundleId: "com.microsoft.edgemac" },
+  { label: "Slack", bundleId: "com.tinyspeck.slackmacgap" },
+  { label: "Notion", bundleId: "notion.id" },
+  { label: "Microsoft Outlook", bundleId: "com.microsoft.Outlook" },
+  { label: "Apple Mail", bundleId: "com.apple.mail" },
+];
+
 /** Domain/bundle presets offered (never pre-enabled) during onboarding. */
 export const ALLOWLIST_PRESETS: Array<{ label: string; domain: string }> = [
   { label: "Salesforce", domain: "salesforce.com" },
