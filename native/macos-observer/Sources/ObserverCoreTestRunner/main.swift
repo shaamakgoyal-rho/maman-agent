@@ -57,6 +57,29 @@ check(
     ) == .drop,
     "non-allowlisted apps drop silently"
 )
+// Wildcard "*" (the user's explicit "observe every app" opt-in): any non-denied
+// app emits, but hard-denied / private / secure contexts STILL boundary out.
+check(
+    decideObservation(
+        bundleId: "com.apple.TextEdit", appName: "TextEdit", role: "AXButton", subrole: nil,
+        label: "Save", allowlistBundles: ["*"], privateApps: [], paused: false
+    ) == .emit,
+    "wildcard observes a previously non-allowlisted app"
+)
+check(
+    decideObservation(
+        bundleId: "com.1password.1password", appName: "1Password", role: nil, subrole: nil,
+        label: nil, allowlistBundles: ["*"], privateApps: [], paused: false
+    ) == .boundary(.hardDenied),
+    "wildcard still hard-denies a password manager"
+)
+check(
+    decideObservation(
+        bundleId: "com.apple.TextEdit", appName: "TextEdit", role: "AXSecureTextField",
+        subrole: nil, label: nil, allowlistBundles: ["*"], privateApps: [], paused: false
+    ) == .boundary(.secureField),
+    "wildcard still boundaries secure text fields"
+)
 check(
     decideObservation(
         bundleId: "com.google.Chrome", appName: "Chrome", role: "AXButton", subrole: nil,

@@ -80,6 +80,11 @@ struct GateSettings {
     /// Desktop app bundle ids the macOS AX observer may observe. Without this the
     /// Swift observer's decideObservation drops every native-app event.
     allowlist_bundles: Vec<String>,
+    /// The user's explicit "observe every app (except always-off ones)" opt-in.
+    /// When true the observer receives the "*" wildcard; hard-deny / private /
+    /// secure-field boundaries still apply first, so sensitive contexts are
+    /// never observed.
+    observe_all_apps: bool,
 }
 
 fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
@@ -112,6 +117,10 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default(),
+        observe_all_apps: json
+            .get("observe_all_apps")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -1290,11 +1299,18 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             };
 
             // Configure the observer with the current allowlist, then resume.
+            // "Observe every app" sends the "*" wildcard; the Swift observer's
+            // hard-deny / private / secure-field boundaries still run first.
             let settings = load_gate_settings(&app);
+            let bundles: Vec<String> = if settings.observe_all_apps {
+                vec!["*".to_string()]
+            } else {
+                settings.allowlist_bundles.clone()
+            };
             if let Some(mut stdin) = child.stdin.take() {
                 let configure = serde_json::json!({
                     "type": "configure",
-                    "allowlist_bundles": settings.allowlist_bundles,
+                    "allowlist_bundles": bundles,
                     "allowlist_domains": settings.allowlist_domains,
                     "private_apps": settings.private_apps,
                 })
@@ -1458,6 +1474,7 @@ mod gate_tests {
             private_apps: vec!["figma".into()],
             allowlist_domains: vec!["salesforce.com".into(), "docs.google.com".into()],
             allowlist_bundles: vec!["com.google.Chrome".into()],
+            observe_all_apps: false,
         }
     }
 

@@ -17,6 +17,13 @@ export const localSettingsSchema = z
     paused_until: z.string().nullable().default(null),
     allowlist_domains: z.array(z.string()).default([]),
     allowlist_bundles: z.array(z.string()).default([]),
+    /**
+     * Explicit opt-in to observe EVERY app (except always-off / private ones),
+     * instead of only the apps in allowlist_bundles. Hard-deny, user-private,
+     * and secure-field boundaries still apply, so sensitive contexts are never
+     * observed. Default off (privacy-first).
+     */
+    observe_all_apps: z.boolean().default(false),
     private_apps: z.array(z.string()).default([]),
     suggestion_budget_daily: z.number().int().min(0).max(10).default(2),
     quiet_hours_start: z.string().default("18:00"),

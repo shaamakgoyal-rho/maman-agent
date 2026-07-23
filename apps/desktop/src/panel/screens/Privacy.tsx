@@ -44,10 +44,16 @@ export function Privacy() {
           </div>
           <div className="flex items-center justify-between">
             <span>Desktop app observation</span>
-            <StatusPill tone={settings.allowlist_bundles.length ? "success" : "muted"}>
-              {settings.allowlist_bundles.length
-                ? `${settings.allowlist_bundles.length} apps allowed`
-                : "No apps allowed"}
+            <StatusPill
+              tone={
+                settings.observe_all_apps || settings.allowlist_bundles.length ? "success" : "muted"
+              }
+            >
+              {settings.observe_all_apps
+                ? "All apps (except off-limits)"
+                : settings.allowlist_bundles.length
+                  ? `${settings.allowlist_bundles.length} apps allowed`
+                  : "No apps allowed"}
             </StatusPill>
           </div>
           <div className="flex items-center justify-between">
@@ -95,22 +101,39 @@ export function Privacy() {
       <Card>
         <SectionTitle>Allowed apps (desktop)</SectionTitle>
         <Muted>
-          Which native macOS apps Maman may observe via Accessibility. Nothing is on until you
-          enable it. (Websites are covered by “Allowed sites” above + the Browser Relay.) Requires
-          the macOS Accessibility permission.
+          Which native macOS apps Maman may observe via Accessibility — the shape of your work
+          (which app, which kind of element), never keystrokes or screen pixels. Requires the macOS
+          Accessibility permission. (Websites are covered by “Allowed sites” above + the Browser
+          Relay.)
         </Muted>
-        <div className="mt-2 space-y-1">
-          {APP_PRESETS.map((app) => (
-            <Toggle
-              key={app.bundleId}
-              id={`app-${app.bundleId}`}
-              checked={settings.allowlist_bundles.includes(app.bundleId)}
-              onChange={(on) => toggleApp(app.bundleId, on)}
-              label={app.label}
-              description={app.bundleId}
-            />
-          ))}
+        <div className="mt-2">
+          <Toggle
+            id="observe-all-apps"
+            checked={settings.observe_all_apps}
+            onChange={(on) => void update({ observe_all_apps: on })}
+            label="Observe every app I use"
+            description="Track work across all your apps. Always-off apps (password managers, banking, private windows) and secure fields are still never observed."
+          />
         </div>
+        {settings.observe_all_apps ? (
+          <Muted>
+            Observing all apps except the always-off list below. Turn this off to pick specific apps
+            instead.
+          </Muted>
+        ) : (
+          <div className="mt-2 space-y-1">
+            {APP_PRESETS.map((app) => (
+              <Toggle
+                key={app.bundleId}
+                id={`app-${app.bundleId}`}
+                checked={settings.allowlist_bundles.includes(app.bundleId)}
+                onChange={(on) => toggleApp(app.bundleId, on)}
+                label={app.label}
+                description={app.bundleId}
+              />
+            ))}
+          </div>
+        )}
       </Card>
 
       <Card>

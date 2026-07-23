@@ -48,8 +48,12 @@ public enum Redaction {
         return privateApps.contains { !$0.isEmpty && hay.contains($0.lowercased()) }
     }
 
-    /// Allowlist check: nothing is observed unless the app was allowed.
+    /// Allowlist check: nothing is observed unless the app was allowed. A single
+    /// "*" entry means "observe every app" (the user's explicit opt-in) — the
+    /// hard-deny, user-private, and secure-field boundaries in decideObservation
+    /// run BEFORE this, so sensitive contexts are still never observed.
     public static func isAllowlisted(bundleId: String?, allowlistBundles: [String]) -> Bool {
+        if allowlistBundles.contains("*") { return true }
         guard let bundleId else { return false }
         let lower = bundleId.lowercased()
         return allowlistBundles.contains { lower == $0.lowercased() }
