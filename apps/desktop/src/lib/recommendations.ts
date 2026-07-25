@@ -164,22 +164,28 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
     }
 
     // Forming: patterns Maman is watching that haven't crossed every bar yet.
-    // Ranked closest-first so the user sees what's about to surface.
-    const forming: FormingItem[] = result.watching
-      .map((w) => ({
-        signature: patternSignature(w.candidate.canonical_sequence),
+    // Ranked closest-first so the user sees what's about to surface. Deduped by
+    // signature (like `items`) so two clusters with the same canonical sequence
+    // never collide on their React key or entry lookup.
+    const formingSeen = new Set<string>();
+    const forming: FormingItem[] = [];
+    for (const w of result.watching) {
+      const signature = patternSignature(w.candidate.canonical_sequence);
+      if (formingSeen.has(signature)) continue;
+      const e = state.entries[signature];
+      // Hide ones the user has explicitly waved off (dismissed/accepted).
+      if (e && (e.status === "dismissed" || e.status === "accepted")) continue;
+      formingSeen.add(signature);
+      forming.push({
+        signature,
         candidate: w.candidate,
         title: w.naming.title,
         summary: w.naming.summary,
         steps: w.naming.redacted_steps.map((s) => `${s.action} · ${s.app}`),
         progress: patternGates(w.candidate),
-      }))
-      .filter((f) => {
-        // Hide ones the user has explicitly waved off (dismissed/never-suggest).
-        const e = state.entries[f.signature];
-        return !e || (e.status !== "dismissed" && e.status !== "accepted");
-      })
-      .sort((a, b) => b.progress.ratio - a.progress.ratio);
+      });
+    }
+    forming.sort((a, b) => b.progress.ratio - a.progress.ratio);
 
     // Keep dismissed/accepted history entries visible in their filters even
     // when the engine no longer produces them (data deleted, cooldown, …).

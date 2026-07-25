@@ -148,4 +148,45 @@ describe("server run state machine", () => {
     expect(store.getState().phase).toBe("failed");
     expect(store.getState().error).toContain("enrolled");
   });
+
+  it("supervised run whose approval never arrives times out to a safe 'failed' (not a wedged mid-run phase)", async () => {
+    const { deps } = makeDeps({
+      server_start_run: () => ({ run_id: "r1" }),
+      // No pending ever, and status never terminal → poll budget exhausts.
+      server_pending_approval: () => ({ pending: null }),
+      server_run_status: () => ({ status: "running_read" }),
+    });
+    const store = createServerRunStore(deps);
+    await store.getState().startSupervised("srv-agent-1");
+    expect(store.getState().phase).toBe("failed");
+    expect(store.getState().error).toMatch(/longer than expected/i);
+  });
+
+  it("a pending approval with no loadable diff fails cleanly instead of showing an empty approval card", async () => {
+    const { deps } = makeDeps({
+      server_start_run: () => ({ run_id: "r1" }),
+      server_pending_approval: () => ({ pending: { step_id: "apply", diff_sha256: "abc123" } }),
+      server_run_status: () => ({ status: "waiting_approval" }),
+      server_proposal: () => ({ diff: null }),
+    });
+    const store = createServerRunStore(deps);
+    await store.getState().startSupervised("srv-agent-1");
+    expect(store.getState().phase).toBe("failed");
+    expect(store.getState().pending).toBeNull();
+  });
+
+  it("reset clears mode back to shadow", async () => {
+    const { deps } = makeDeps({
+      server_start_run: () => ({ run_id: "r1" }),
+      server_pending_approval: () => ({ pending: { step_id: "apply", diff_sha256: "abc" } }),
+      server_run_status: () => ({ status: "waiting_approval" }),
+      server_proposal: () => ({ diff: DIFF }),
+    });
+    const store = createServerRunStore(deps);
+    await store.getState().startSupervised("srv-agent-1");
+    expect(store.getState().mode).toBe("supervised");
+    store.getState().reset();
+    expect(store.getState().mode).toBe("shadow");
+    expect(store.getState().phase).toBe("idle");
+  });
 });

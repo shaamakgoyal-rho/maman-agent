@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { hidePanel, onAppEvent, emitAppEvent } from "../lib/bridge.js";
 import type { PetStateName } from "../pet/machine.js";
 import { useSettings } from "../state/settings.js";
+import { useRecommendations } from "../lib/recommendations.js";
 import { Onboarding } from "./screens/Onboarding.js";
 import { Home } from "./screens/Home.js";
 import { Privacy } from "./screens/Privacy.js";
@@ -38,6 +39,47 @@ export function App() {
     void emitAppEvent({ type: "pet_state_probe" });
     return () => unlisten?.();
   }, []);
+
+  // Proactive suggestion loop — the core "Maman notices repeated work and gently
+  // offers help" behavior. The panel webview is always alive (even while the
+  // window is hidden), so it periodically re-runs the pattern engine over
+  // observed activity and, when a NEW suggestion clears the surfacing policy
+  // (daily budget, quiet hours, not paused), tells the pet to wave. Without this
+  // the pipeline only ran when a tab was open and the pet never surfaced anything.
+  const wavingRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated || !settings.onboarding_complete) return;
+    let cancelled = false;
+    let running = false;
+    const tick = async () => {
+      if (running || cancelled) return;
+      running = true;
+      try {
+        await useRecommendations.getState().refresh();
+        if (cancelled) return;
+        const st = useRecommendations.getState();
+        const hasNew = st.items.some((i) => i.entry.status === "new");
+        if (hasNew && !wavingRef.current && (await st.maybeSurface())) {
+          wavingRef.current = true;
+          await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_READY" });
+        } else if (!hasNew && wavingRef.current) {
+          wavingRef.current = false;
+          await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_HANDLED" });
+        }
+      } catch {
+        // A background tick must never crash the panel.
+      } finally {
+        running = false;
+      }
+    };
+    const initial = setTimeout(() => void tick(), 4000);
+    const id = setInterval(() => void tick(), 60_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(initial);
+      clearInterval(id);
+    };
+  }, [hydrated, settings.onboarding_complete]);
 
   // Escape closes the panel unless a blocking approval is open.
   useEffect(() => {

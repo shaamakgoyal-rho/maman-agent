@@ -145,10 +145,13 @@ fn gate_event(settings: &GateSettings, event: &serde_json::Value) -> Result<Opti
     // Allowlist: browser events require an allowlisted domain. Demo source is
     // exempt only when it carries an allowlisted or generic fixture domain.
     if let Some(d) = domain {
+        // Exact host or a subdomain of an allowlisted host ONLY. The looser
+        // `a.ends_with(d)` / `d.contains(a)` forms wrongly admitted lookalikes
+        // (e.g. "force.com" or "evil-salesforce.com.attacker.com").
         let allowed = settings
             .allowlist_domains
             .iter()
-            .any(|a| d == a || d.ends_with(&format!(".{a}")) || a.ends_with(d) || d.contains(a));
+            .any(|a| d == a || d.ends_with(&format!(".{a}")));
         let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
         if !allowed && source == "chrome" {
             return Ok(Some("not_allowlisted".into()));
@@ -1245,8 +1248,16 @@ fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
     None
 }
 
-/// Persists one observer-emitted event/boundary through the ingest gate.
+/// Persists one observer-emitted event through the central ingest gate.
+/// Re-applying `gate_event` here is the authoritative, LIVE check: the Swift
+/// observer's allowlist/private/paused config is pushed once at spawn and can
+/// go stale, so this guarantees a freshly paused / newly private / hard-denied
+/// context is dropped even before the sidecar restarts (spec §10 central gate).
 async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
+    let settings = load_gate_settings(app);
+    if !matches!(gate_event(&settings, event), Ok(None)) {
+        return; // paused / hard-denied / user-private / not-allowlisted → drop
+    }
     let state = app.state::<StoreState>();
     let mut guard = match store_guard(app, &state).await {
         Ok(g) => g,
@@ -1307,7 +1318,11 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             } else {
                 settings.allowlist_bundles.clone()
             };
-            if let Some(mut stdin) = child.stdin.take() {
+            // Keep the control pipe open for the child's lifetime WITHOUT leaking
+            // it: this binding drops (closing the pipe) at the end of the
+            // iteration, after the child has exited — no per-respawn FD leak.
+            let mut control_stdin = child.stdin.take();
+            if let Some(stdin) = control_stdin.as_mut() {
                 let configure = serde_json::json!({
                     "type": "configure",
                     "allowlist_bundles": bundles,
@@ -1318,18 +1333,20 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                 let _ = stdin.write_all(format!("{configure}\n").as_bytes()).await;
                 let _ = stdin.write_all(b"{\"type\":\"resume\"}\n").await;
                 let _ = stdin.flush().await;
-                // Hold stdin open for the life of the child.
-                std::mem::forget(stdin);
             }
 
             set_observer_status(&app, ObserverStatus::Observing);
             let started = std::time::Instant::now();
+            // Distinguishes a deliberate stop (pause / consent revoked) from a
+            // crash so an intentional stop never burns the restart budget.
+            let mut intentional_stop = false;
             if let Some(stdout) = child.stdout.take() {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
                     // Stop promptly if the gate flipped (pause / consent revoked).
                     if !load_observer_gate(&app).should_observe() {
                         let _ = child.start_kill();
+                        intentional_stop = true;
                         break;
                     }
                     match lines.next_line().await {
@@ -1351,13 +1368,27 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             }
 
             let _ = child.wait().await;
+            drop(control_stdin); // close the control pipe now the child is gone
+
+            // A deliberate pause/consent stop is NOT a crash: don't penalize the
+            // restart budget — loop back and let the gate check idle or resume.
+            if intentional_stop {
+                set_observer_status(&app, ObserverStatus::Disabled);
+                continue;
+            }
+
             // A long healthy run clears the restart history.
             if started.elapsed() > std::time::Duration::from_secs(60) {
                 policy.on_stable();
             }
             if policy.on_crash(std::time::Instant::now()) == observer::RestartDecision::GiveUp {
+                // Surface Failed but do NOT exit the supervisor: after a cool-off
+                // the crash window ages out and observation can recover on its own
+                // (or when the user re-enables it) — a rough patch never becomes
+                // a permanent dead state.
                 set_observer_status(&app, ObserverStatus::Failed);
-                break;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
@@ -1513,6 +1544,23 @@ mod gate_tests {
         let verdict =
             gate_event(&settings(), &event("Chrome", Some("random-site.example"), "chrome")).unwrap();
         assert_eq!(verdict, Some("not_allowlisted".into()));
+    }
+
+    #[test]
+    fn lookalike_domains_do_not_match_the_allowlist() {
+        // allowlist has "salesforce.com" — none of these are it or a subdomain.
+        for host in [
+            "notsalesforce.com",
+            "evil-salesforce.com.attacker.com",
+            "force.com",
+            "salesforce.com.attacker.com",
+        ] {
+            assert_eq!(
+                gate_event(&settings(), &event("Chrome", Some(host), "chrome")).unwrap(),
+                Some("not_allowlisted".into()),
+                "lookalike {host} must be dropped"
+            );
+        }
     }
 
     #[test]

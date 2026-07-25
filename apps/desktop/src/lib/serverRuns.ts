@@ -49,8 +49,13 @@ function phaseForStatus(status: string): RunPhase {
     case "failed":
     case "policy_blocked":
       return "failed";
+    case "cancelled":
+    case "expired":
+      return "cancelled";
     default:
-      return "cancelled"; // cancelled / expired
+      // Unknown/transient status: treat as still-running rather than flashing a
+      // misleading "cancelled" while polling continues.
+      return "running_read";
   }
 }
 
@@ -85,22 +90,36 @@ export function createServerRunStore(deps: ServerRunDeps) {
   const pollMs = deps.pollMs ?? 1000;
   const maxPolls = deps.maxPolls ?? 120;
 
+  const TIMEOUT_MSG =
+    "The run is taking longer than expected. It may still be running on the server — check back shortly.";
+
   return create<ServerRunsState>((set, get) => {
-    /** Polls run status until terminal; returns the final status string. */
-    async function pollToTerminal(runId: string): Promise<string> {
+    /**
+     * Polls run status until terminal or the poll budget is exhausted.
+     * `timedOut` is true when it stopped without reaching a terminal status, so
+     * the caller can fail cleanly instead of pinning a mid-run phase forever.
+     */
+    async function pollToTerminal(runId: string): Promise<{ status: string; timedOut: boolean }> {
       let status = "validating";
       for (let i = 0; i < maxPolls; i++) {
         const res = await deps.invoke<{ status: string }>("server_run_status", { runId });
         status = res.status;
         set({ phase: phaseForStatus(status) });
-        if (TERMINAL.has(status)) break;
+        if (TERMINAL.has(status)) return { status, timedOut: false };
         await deps.sleep(pollMs);
       }
-      return status;
+      return { status, timedOut: true };
     }
 
-    /** Polls for a pending approval; returns it (or null if the run ended). */
-    async function pollForPending(runId: string): Promise<ServerPending | null> {
+    /**
+     * Polls for a pending approval. Returns the pending approval, or reports the
+     * run ended (terminal) or the poll budget was exhausted (timedOut) so the
+     * caller never wedges the UI in a non-terminal, non-actionable state.
+     */
+    async function pollForPending(
+      runId: string,
+    ): Promise<{ pending: ServerPending | null; status: string; timedOut: boolean }> {
+      let status = "validating";
       for (let i = 0; i < maxPolls; i++) {
         const res = await deps.invoke<{ pending: ServerPending | null }>(
           "server_pending_approval",
@@ -108,14 +127,13 @@ export function createServerRunStore(deps: ServerRunDeps) {
             runId,
           },
         );
-        if (res.pending) return res.pending;
-        const status = (await deps.invoke<{ status: string }>("server_run_status", { runId }))
-          .status;
+        if (res.pending) return { pending: res.pending, status, timedOut: false };
+        status = (await deps.invoke<{ status: string }>("server_run_status", { runId })).status;
         set({ phase: phaseForStatus(status) });
-        if (TERMINAL.has(status)) return null;
+        if (TERMINAL.has(status)) return { pending: null, status, timedOut: false };
         await deps.sleep(pollMs);
       }
-      return null;
+      return { pending: null, status, timedOut: true };
     }
 
     async function loadReceipt(runId: string): Promise<void> {
@@ -154,7 +172,11 @@ export function createServerRunStore(deps: ServerRunDeps) {
             idempotencyKey: deps.genKey(),
           });
           set({ runId: started.run_id });
-          const status = await pollToTerminal(started.run_id);
+          const { status, timedOut } = await pollToTerminal(started.run_id);
+          if (timedOut) {
+            set({ phase: "failed", error: TIMEOUT_MSG });
+            return;
+          }
           // The proposed diff is surfaced even for shadow (it proposes, never writes).
           const proposal = await deps.invoke<{ diff: ProposedDiff | null }>("server_proposal", {
             runId: started.run_id,
@@ -184,21 +206,29 @@ export function createServerRunStore(deps: ServerRunDeps) {
             idempotencyKey: deps.genKey(),
           });
           set({ runId: started.run_id });
-          const pending = await pollForPending(started.run_id);
+          const { pending, status, timedOut } = await pollForPending(started.run_id);
+          if (timedOut) {
+            set({ phase: "failed", error: TIMEOUT_MSG });
+            return;
+          }
           if (!pending) {
             // The run ended before proposing a write (e.g. policy blocked).
             await loadReceipt(started.run_id);
-            const status = (
-              await deps.invoke<{ status: string }>("server_run_status", {
-                runId: started.run_id,
-              })
-            ).status;
             set({ phase: phaseForStatus(status) });
             return;
           }
           const proposal = await deps.invoke<{ diff: ProposedDiff | null }>("server_proposal", {
             runId: started.run_id,
           });
+          if (!proposal.diff) {
+            // Pending approval but no diff to show — never present an approval
+            // card with nothing to approve; fail cleanly with a reset path.
+            set({
+              phase: "failed",
+              error: "Couldn't load the proposed change to approve. Please run it again.",
+            });
+            return;
+          }
           set({ phase: "waiting_approval", pending, diff: proposal.diff });
         } catch (e) {
           set({ phase: "failed", error: e instanceof Error ? e.message : String(e) });
@@ -215,7 +245,11 @@ export function createServerRunStore(deps: ServerRunDeps) {
             stepId: pending.step_id,
             diffHash: pending.diff_sha256,
           });
-          const status = await pollToTerminal(runId);
+          const { status, timedOut } = await pollToTerminal(runId);
+          if (timedOut) {
+            set({ phase: "failed", error: TIMEOUT_MSG });
+            return;
+          }
           await loadReceipt(runId);
           set({ phase: phaseForStatus(status) });
         } catch (e) {
@@ -244,6 +278,7 @@ export function createServerRunStore(deps: ServerRunDeps) {
       reset: () =>
         set({
           phase: "idle",
+          mode: "shadow",
           runId: null,
           diff: null,
           pending: null,

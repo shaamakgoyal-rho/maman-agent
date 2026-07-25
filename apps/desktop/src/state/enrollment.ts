@@ -103,6 +103,7 @@ export function createEnrollmentStore(deps: EnrollmentDeps) {
           deviceId: enrolled ? s.server_device_id : null,
           tokenExpiresAt: enrolled ? s.server_token_expires_at : null,
           lastSyncAt: s.server_last_sync_at,
+          error: null, // a successful refresh clears any stale prior error
         });
       } catch (e) {
         set({ phase: "not_enrolled", error: e instanceof Error ? e.message : String(e) });
@@ -175,7 +176,14 @@ export function createEnrollmentStore(deps: EnrollmentDeps) {
         server_device_id: null,
         server_token_expires_at: null,
       });
-      set({ phase: "not_enrolled", deviceId: null, tokenExpiresAt: null, lastSync: null });
+      set({
+        phase: "not_enrolled",
+        deviceId: null,
+        tokenExpiresAt: null,
+        lastSync: null,
+        lastSyncAt: null,
+        error: null,
+      });
     },
   }));
 }
