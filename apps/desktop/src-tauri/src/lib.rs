@@ -124,6 +124,27 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
     }
 }
 
+/// The observer `configure` control line for the current settings. Sent at
+/// spawn and re-sent whenever it changes so the running sidecar picks up a new
+/// allowlist / observe-all / private-apps config LIVE (no restart). The exact
+/// string doubles as a change fingerprint. "Observe every app" sends the "*"
+/// wildcard; the Swift observer's hard-deny / private / secure-field boundaries
+/// still run first.
+fn observer_configure_line(settings: &GateSettings) -> String {
+    let bundles: Vec<String> = if settings.observe_all_apps {
+        vec!["*".to_string()]
+    } else {
+        settings.allowlist_bundles.clone()
+    };
+    serde_json::json!({
+        "type": "configure",
+        "allowlist_bundles": bundles,
+        "allowlist_domains": settings.allowlist_domains,
+        "private_apps": settings.private_apps,
+    })
+    .to_string()
+}
+
 /// Central ingest gate (spec §10): decides whether an event may be persisted.
 /// Returns Ok(None) to persist, Ok(Some(reason)) to drop/boundary, Err on abuse.
 fn gate_event(settings: &GateSettings, event: &serde_json::Value) -> Result<Option<String>, String> {
@@ -1309,28 +1330,14 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                 }
             };
 
-            // Configure the observer with the current allowlist, then resume.
-            // "Observe every app" sends the "*" wildcard; the Swift observer's
-            // hard-deny / private / secure-field boundaries still run first.
-            let settings = load_gate_settings(&app);
-            let bundles: Vec<String> = if settings.observe_all_apps {
-                vec!["*".to_string()]
-            } else {
-                settings.allowlist_bundles.clone()
-            };
+            // Configure the observer with the current settings, then resume.
             // Keep the control pipe open for the child's lifetime WITHOUT leaking
             // it: this binding drops (closing the pipe) at the end of the
             // iteration, after the child has exited — no per-respawn FD leak.
             let mut control_stdin = child.stdin.take();
+            let mut last_config = observer_configure_line(&load_gate_settings(&app));
             if let Some(stdin) = control_stdin.as_mut() {
-                let configure = serde_json::json!({
-                    "type": "configure",
-                    "allowlist_bundles": bundles,
-                    "allowlist_domains": settings.allowlist_domains,
-                    "private_apps": settings.private_apps,
-                })
-                .to_string();
-                let _ = stdin.write_all(format!("{configure}\n").as_bytes()).await;
+                let _ = stdin.write_all(format!("{last_config}\n").as_bytes()).await;
                 let _ = stdin.write_all(b"{\"type\":\"resume\"}\n").await;
                 let _ = stdin.flush().await;
             }
@@ -1343,14 +1350,31 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             if let Some(stdout) = child.stdout.take() {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
-                    // Stop promptly if the gate flipped (pause / consent revoked).
+                    // Stop promptly on pause / consent revoke — the 2s read
+                    // timeout below guarantees this is re-checked even when the
+                    // observer is idle (no events to unblock the read).
                     if !load_observer_gate(&app).should_observe() {
                         let _ = child.start_kill();
                         intentional_stop = true;
                         break;
                     }
-                    match lines.next_line().await {
-                        Ok(Some(line)) => match observer::parse_observer_line(&line) {
+                    // Live reconfigure: push a fresh allowlist / observe-all /
+                    // private config within ~2s of a settings change — no restart.
+                    let current_config = observer_configure_line(&load_gate_settings(&app));
+                    if current_config != last_config {
+                        last_config = current_config.clone();
+                        if let Some(stdin) = control_stdin.as_mut() {
+                            let _ = stdin.write_all(format!("{current_config}\n").as_bytes()).await;
+                            let _ = stdin.flush().await;
+                        }
+                    }
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        lines.next_line(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(line))) => match observer::parse_observer_line(&line) {
                             observer::ObserverLine::Event(ev) => ingest_observer_value(&app, &ev).await,
                             observer::ObserverLine::Boundary { .. } => {
                                 set_observer_status(&app, ObserverStatus::Observing);
@@ -1362,7 +1386,8 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                             | observer::ObserverLine::Hello { .. }
                             | observer::ObserverLine::Ignored => {}
                         },
-                        _ => break, // stdout closed → child exiting
+                        Ok(_) => break, // stdout closed → child exiting
+                        Err(_) => {}    // 2s idle tick: re-check gate + config
                     }
                 }
             }
