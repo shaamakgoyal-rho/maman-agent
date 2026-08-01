@@ -4,25 +4,47 @@
   "objects": [
     {
       "id": "invoice",
-      "aliases": ["bill", "vendor_invoice", "ap_invoice"],
+      "aliases": [
+        "bill",
+        "vendor_invoice",
+        "ap_invoice"
+      ],
       "detection_hints": {
-        "app_categories": ["ap_automation", "erp", "email", "pdf_viewer"],
-        "label_patterns": ["invoice", "INV-", "bill #", "amount due"],
+        "app_categories": [
+          "ap_automation",
+          "erp",
+          "email",
+          "pdf_viewer"
+        ],
+        "label_patterns": [
+          "invoice",
+          "INV-",
+          "bill #",
+          "amount due"
+        ],
         "target_roles": []
       }
     },
     {
       "id": "purchase_order",
-      "aliases": ["po"],
+      "aliases": [
+        "po"
+      ],
       "detection_hints": {
         "app_categories": [],
-        "label_patterns": ["PO-", "purchase order"],
+        "label_patterns": [
+          "PO-",
+          "purchase order"
+        ],
         "target_roles": []
       }
     },
     {
       "id": "receipt",
-      "aliases": ["goods_receipt", "grn"],
+      "aliases": [
+        "goods_receipt",
+        "grn"
+      ],
       "detection_hints": {
         "app_categories": [],
         "label_patterns": [],
@@ -31,10 +53,20 @@
     },
     {
       "id": "gl_entry",
-      "aliases": ["journal_entry", "journal", "je"],
+      "aliases": [
+        "journal_entry",
+        "journal",
+        "je"
+      ],
       "detection_hints": {
         "app_categories": [],
-        "label_patterns": ["GL", "journal", "debit", "credit", "account code"],
+        "label_patterns": [
+          "GL",
+          "journal",
+          "debit",
+          "credit",
+          "account code"
+        ],
         "target_roles": []
       }
     },
@@ -52,7 +84,11 @@
       "aliases": [],
       "detection_hints": {
         "app_categories": [],
-        "label_patterns": ["vendor", "supplier", "payee"],
+        "label_patterns": [
+          "vendor",
+          "supplier",
+          "payee"
+        ],
         "target_roles": []
       }
     },
@@ -61,7 +97,12 @@
       "aliases": [],
       "detection_hints": {
         "app_categories": [],
-        "label_patterns": ["payment batch", "pay run", "ACH", "wire"],
+        "label_patterns": [
+          "payment batch",
+          "pay run",
+          "ACH",
+          "wire"
+        ],
         "target_roles": []
       }
     },
@@ -76,10 +117,18 @@
     },
     {
       "id": "close_task",
-      "aliases": ["close_checklist_item"],
+      "aliases": [
+        "close_checklist_item"
+      ],
       "detection_hints": {
-        "app_categories": ["close_management"],
-        "label_patterns": ["close", "flux", "reconciliation"],
+        "app_categories": [
+          "close_management"
+        ],
+        "label_patterns": [
+          "close",
+          "flux",
+          "reconciliation"
+        ],
         "target_roles": []
       }
     },
@@ -87,8 +136,15 @@
       "id": "cost_anomaly",
       "aliases": [],
       "detection_hints": {
-        "app_categories": ["cloud_cost", "spend_management"],
-        "label_patterns": ["anomaly", "spike", "budget alert"],
+        "app_categories": [
+          "cloud_cost",
+          "spend_management"
+        ],
+        "label_patterns": [
+          "anomaly",
+          "spike",
+          "budget alert"
+        ],
         "target_roles": []
       }
     },
@@ -116,37 +172,57 @@
     {
       "id": "code_invoice",
       "risk": "medium",
-      "on": ["invoice", "gl_entry"]
+      "on": [
+        "invoice",
+        "gl_entry"
+      ]
     },
     {
       "id": "three_way_match",
       "risk": "medium",
-      "on": ["invoice", "purchase_order", "receipt"]
+      "on": [
+        "invoice",
+        "purchase_order",
+        "receipt"
+      ]
     },
     {
       "id": "approve_invoice",
       "risk": "high",
-      "on": ["invoice"]
+      "on": [
+        "invoice"
+      ]
     },
     {
       "id": "reconcile",
       "risk": "medium",
-      "on": ["gl_entry", "close_task"]
+      "on": [
+        "gl_entry",
+        "close_task"
+      ]
     },
     {
       "id": "post_journal",
       "risk": "high",
-      "on": ["gl_entry", "accrual"]
+      "on": [
+        "gl_entry",
+        "accrual"
+      ]
     },
     {
       "id": "schedule_payment",
       "risk": "critical",
-      "on": ["payment_run", "invoice"]
+      "on": [
+        "payment_run",
+        "invoice"
+      ]
     },
     {
       "id": "release_payment",
       "risk": "critical",
-      "on": ["payment_run"]
+      "on": [
+        "payment_run"
+      ]
     },
     {
       "id": "flag_exception",
@@ -166,7 +242,9 @@
     {
       "id": "update_budget",
       "risk": "medium",
-      "on": ["budget_line"]
+      "on": [
+        "budget_line"
+      ]
     }
   ],
   "workflows": [
@@ -175,10 +253,26 @@
       "name": "Invoice intake & coding",
       "cadence": "continuous",
       "signature": [
-        ["open", "invoice", "*"],
-        ["extract_field", "invoice", "*"],
-        ["code_invoice", "gl_entry", "*"],
-        ["flag_exception|submit", "invoice", "*"]
+        [
+          "open",
+          "invoice",
+          "*"
+        ],
+        [
+          "extract_field",
+          "invoice",
+          "*"
+        ],
+        [
+          "code_invoice",
+          "gl_entry",
+          "*"
+        ],
+        [
+          "flag_exception|submit",
+          "invoice",
+          "*"
+        ]
       ],
       "min_reps_with_template": 2,
       "trigger": {
@@ -191,10 +285,26 @@
       "name": "PO / invoice / receipt match",
       "cadence": "continuous",
       "signature": [
-        ["open", "invoice", "*"],
-        ["open", "purchase_order", "*"],
-        ["three_way_match", "invoice", "*"],
-        ["approve_invoice|flag_exception", "invoice", "*"]
+        [
+          "open",
+          "invoice",
+          "*"
+        ],
+        [
+          "open",
+          "purchase_order",
+          "*"
+        ],
+        [
+          "three_way_match",
+          "invoice",
+          "*"
+        ],
+        [
+          "approve_invoice|flag_exception",
+          "invoice",
+          "*"
+        ]
       ],
       "min_reps_with_template": 2
     },
@@ -203,9 +313,21 @@
       "name": "Month-end accrual journals",
       "cadence": "fiscal_monthly",
       "signature": [
-        ["open", "close_task", "*"],
-        ["extract_field", "accrual", "*"],
-        ["post_journal", "accrual", "*"]
+        [
+          "open",
+          "close_task",
+          "*"
+        ],
+        [
+          "extract_field",
+          "accrual",
+          "*"
+        ],
+        [
+          "post_journal",
+          "accrual",
+          "*"
+        ]
       ],
       "min_reps_with_template": 2,
       "pre_stage": {
@@ -218,9 +340,21 @@
       "name": "Bank / GL reconciliation",
       "cadence": "fiscal_monthly",
       "signature": [
-        ["open", "gl_entry", "*"],
-        ["reconcile", "gl_entry", "*"],
-        ["flag_exception|post_journal", "gl_entry", "*"]
+        [
+          "open",
+          "gl_entry",
+          "*"
+        ],
+        [
+          "reconcile",
+          "gl_entry",
+          "*"
+        ],
+        [
+          "flag_exception|post_journal",
+          "gl_entry",
+          "*"
+        ]
       ],
       "min_reps_with_template": 2
     },
@@ -229,9 +363,21 @@
       "name": "Cost anomaly triage",
       "cadence": "event_driven",
       "signature": [
-        ["open", "cost_anomaly", "*"],
-        ["extract_field", "cost_anomaly", "*"],
-        ["flag_exception|draft_email", "*", "*"]
+        [
+          "open",
+          "cost_anomaly",
+          "*"
+        ],
+        [
+          "extract_field",
+          "cost_anomaly",
+          "*"
+        ],
+        [
+          "flag_exception|draft_email",
+          "*",
+          "*"
+        ]
       ],
       "min_reps_with_template": 3
     },
@@ -240,9 +386,21 @@
       "name": "Expense report review",
       "cadence": "weekly",
       "signature": [
-        ["open", "expense_report", "*"],
-        ["extract_field", "expense_report", "*"],
-        ["approve_invoice|flag_exception", "expense_report", "*"]
+        [
+          "open",
+          "expense_report",
+          "*"
+        ],
+        [
+          "extract_field",
+          "expense_report",
+          "*"
+        ],
+        [
+          "approve_invoice|flag_exception",
+          "expense_report",
+          "*"
+        ]
       ],
       "min_reps_with_template": 3
     }
@@ -250,13 +408,22 @@
   "policy": {
     "segregation_of_duties": [
       {
-        "cannot_combine": ["code_invoice", "approve_invoice"]
+        "cannot_combine": [
+          "code_invoice",
+          "approve_invoice"
+        ]
       },
       {
-        "cannot_combine": ["post_journal", "reconcile"]
+        "cannot_combine": [
+          "post_journal",
+          "reconcile"
+        ]
       },
       {
-        "cannot_combine": ["schedule_payment", "release_payment"]
+        "cannot_combine": [
+          "schedule_payment",
+          "release_payment"
+        ]
       }
     ],
     "autonomy_rules": [
@@ -308,7 +475,10 @@
       "immutable": true,
       "retain_days": 2555
     },
-    "amount_extraction_required_for": ["approve_invoice", "schedule_payment"]
+    "amount_extraction_required_for": [
+      "approve_invoice",
+      "schedule_payment"
+    ]
   },
   "proactivity": {
     "calendar": "fiscal",
@@ -330,7 +500,11 @@
     "dismissal_learning": {
       "source": "suggestion_history",
       "never_means": "suppress_workflow_family",
-      "not_now_backoff_days": [14, 45, 120]
+      "not_now_backoff_days": [
+        14,
+        45,
+        120
+      ]
     }
   }
 }
