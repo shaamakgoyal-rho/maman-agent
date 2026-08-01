@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { agentSpecSchema, uuidv7, type AgentSpec, type AgentStep } from "@maman/contracts";
-import { describeAgentSpec } from "../src/describe.js";
+import { describeAgentSpec, describeProposedHelper } from "../src/describe.js";
+import { compileAgentSpec, type CompileRequest } from "../src/compiler.js";
+import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 
 /**
  * The agent description must state what the agent DOES, and may never overstate
@@ -144,5 +146,98 @@ describe("describeAgentSpec", () => {
     expect(a).toEqual(b);
     expect(a.changes).toEqual([]);
     expect(a.read_only).toBe(true);
+  });
+});
+
+/** A real compile request for the reconciliation recipe. */
+function request(): CompileRequest {
+  return {
+    candidate: {
+      pattern_id: uuidv7(),
+      owner_user_id: uuidv7(),
+      first_seen_at: "2026-07-14T09:40:00.000Z",
+      last_seen_at: "2026-07-16T15:00:00.000Z",
+      occurrence_count: 6,
+      distinct_day_count: 3,
+      median_duration_ms: 660_000,
+      p90_duration_ms: 780_000,
+      canonical_sequence: [
+        "chrome:spreadsheet:table_read:grid:account_list:account",
+        "chrome:crm:record_updated:field:account_field:account",
+      ],
+      episode_ids: [],
+      similarity_mean: 0.9,
+      repeatability_score: 0.9,
+      feasibility_score: 0.8,
+      risk_score: 0.3,
+      projected_minutes_saved_weekly: 70,
+      opportunity_score: 0.72,
+      status: "eligible",
+    },
+    generalized_intent: "reconcile_account_list",
+    desired_outcome: "Match rows by company domain and propose Salesforce Account updates.",
+    organization_id: uuidv7(),
+    owner_user_id: uuidv7(),
+    budgets: {
+      max_runtime_seconds: 300,
+      max_model_tokens: 12_000,
+      max_cost_usd: 1,
+      max_records_read: 1000,
+      max_records_written: 20,
+    },
+    policy: DEFAULT_ORG_POLICY,
+    policy_version_id: uuidv7(),
+    now: () => new Date("2026-07-17T18:00:00.000Z"),
+  };
+}
+
+describe("describeProposedHelper (suggestion card, nothing compiled yet)", () => {
+  it("speaks conditionally and names the read sources and the approval-gated target", () => {
+    const d = describeProposedHelper([
+      "local.parse_csv",
+      "salesforce.query_records",
+      "salesforce.propose_field_updates",
+      "salesforce.update_fields",
+    ]);
+    expect(d.read_only).toBe(false);
+    expect(d.reads).toEqual(["your own files", "Salesforce"]);
+    expect(d.changes).toEqual(["Salesforce"]);
+    expect(d.summary).toBe(
+      "It would read your own files and Salesforce, show you every change first, then — only with your approval — update Salesforce.",
+    );
+    // A proposal must not claim limits it hasn't compiled yet.
+    expect(d.summary).not.toMatch(/\$|records|minutes/);
+  });
+
+  it("says a read-only helper would change nothing", () => {
+    const d = describeProposedHelper(["salesforce.query_records", "google_sheets.read_range"]);
+    expect(d.read_only).toBe(true);
+    expect(d.changes).toEqual([]);
+    expect(d.summary).toBe(
+      "It would read Salesforce and Google Sheets, and change nothing at all.",
+    );
+    expect(d.summary).not.toMatch(/approv|update/i);
+  });
+
+  it("ignores unknown capabilities and stays empty rather than inventing a claim", () => {
+    expect(describeProposedHelper([])).toEqual({
+      summary: "",
+      reads: [],
+      changes: [],
+      read_only: true,
+    });
+    expect(describeProposedHelper(["not.real"]).summary).toBe("");
+  });
+
+  it("writes_need_approval_is_guaranteed: the compiler never emits an unapproved write", async () => {
+    // The card's "only with your approval" wording is only honest because every
+    // compiled write step demands approval. Assert that on the real recipe
+    // rather than trusting the copy.
+    const result = await compileAgentSpec(request());
+    expect(result.status).toBe("valid");
+    if (result.status !== "valid") return;
+    const writes = result.spec.steps.filter((s) => s.mode === "write");
+    expect(writes.length).toBeGreaterThan(0);
+    for (const w of writes) expect(w.approval.required).toBe(true);
   });
 });

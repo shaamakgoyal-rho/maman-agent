@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeProposedHelper } from "@maman/agent-runtime";
 import { emitAppEvent } from "../../lib/bridge.js";
 import { useAgents } from "../../lib/agents.js";
 import {
@@ -234,6 +235,7 @@ function SuggestionCard({
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
+  const proposed = describeProposedHelper(rec.required_capabilities);
   const title = item.entry.custom_title ?? rec.title;
   const divergences = v.results.filter((r) => r.verdict !== "match");
 
@@ -283,9 +285,25 @@ function SuggestionCard({
       <Muted>
         ~{Math.round(rec.projected_minutes_saved_weekly)} min/week of repeated work, seen{" "}
         {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count}{" "}
-        {rec.evidence.distinct_day_count === 1 ? "day" : "days"}. It will draft and stage only —
-        nothing changes without your approval.
+        {rec.evidence.distinct_day_count === 1 ? "day" : "days"}.
       </Muted>
+
+      {/* What the helper would actually do — derived from the capabilities this
+          pattern needs. Conditional wording: nothing is compiled until "Try it". */}
+      {proposed.summary && (
+        <>
+          <p className="mt-1.5 text-sm text-ink">{proposed.summary}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {proposed.reads.length > 0 && (
+              <StatusPill tone="muted">reads {proposed.reads.join(", ")}</StatusPill>
+            )}
+            <StatusPill tone={proposed.read_only ? "success" : "warning"}>
+              {proposed.read_only ? "changes nothing" : `changes ${proposed.changes.join(", ")}`}
+            </StatusPill>
+            {!proposed.read_only && <StatusPill tone="primary">needs your approval</StatusPill>}
+          </div>
+        </>
+      )}
 
       <button className="mt-2 text-xs text-primary" onClick={onToggleExpand}>
         {expanded ? "Hide the run-by-run results" : "See the run-by-run results"}
