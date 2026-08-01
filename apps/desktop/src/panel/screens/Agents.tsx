@@ -259,7 +259,20 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
             across {diff.summary.accounts_affected} accounts · destination Salesforce
           </p>
           <div className="mt-2 flex gap-2">
-            <Button onClick={() => void runs.approve()}>Approve &amp; write once</Button>
+            <Button
+              onClick={async () => {
+                await runs.approve();
+                // An approved run that COMPLETED counts toward earned autonomy.
+                const phase = serverMode
+                  ? useServerRuns.getState().phase
+                  : useRuns.getState().phase;
+                if (phase === "completed" || phase === "completed_with_warnings") {
+                  await useAgents.getState().recordApprovedRun(agent.agent_id);
+                }
+              }}
+            >
+              Approve &amp; write once
+            </Button>
             <Button variant="secondary" onClick={() => void runs.reject()}>
               Reject
             </Button>
@@ -301,6 +314,55 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
             Done
           </Button>
         </div>
+      )}
+
+      <AutonomyMeter agent={agent} />
+    </div>
+  );
+}
+
+/**
+ * Earned autonomy, made visible. Each approved + completed supervised run
+ * ticks the meter; when it fills, the WORKER may grant draft autonomy —
+ * nothing is ever auto-promoted from a score.
+ */
+function AutonomyMeter({ agent }: { agent: AgentRecord }) {
+  const { settings } = useSettings();
+  const { grantDraftAutonomy } = useAgents();
+  const needed = settings.autonomy_min_approved_runs;
+  const done = agent.approved_runs;
+  const remaining = Math.max(0, needed - done);
+
+  if (agent.draft_autonomy) {
+    return (
+      <p className="mt-3 border-t border-line pt-2 text-[11px] text-success">
+        Draft autonomy granted — Maman may prepare drafts for this workflow without asking first.
+        Material writes still require your approval, always.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 border-t border-line pt-2">
+      <div className="flex items-center justify-between text-[11px] text-muted">
+        <span>
+          {remaining > 0
+            ? `${remaining} more approved run${remaining === 1 ? "" : "s"} until Maman can draft without asking`
+            : "Earned: you can now let Maman draft without asking"}
+        </span>
+        <span className="tabular-nums">
+          {Math.min(done, needed)}/{needed}
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-line">
+        <div
+          className="h-full rounded-full bg-success transition-all"
+          style={{ width: `${Math.min(100, Math.round((done / needed) * 100))}%` }}
+        />
+      </div>
+      {remaining === 0 && (
+        <Button variant="secondary" onClick={() => void grantDraftAutonomy(agent.agent_id)}>
+          Grant draft autonomy
+        </Button>
       )}
     </div>
   );

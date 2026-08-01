@@ -55,7 +55,11 @@ export function App() {
       if (running || cancelled) return;
       running = true;
       try {
+        // The pet shows a distinct "thinking" state while a pattern is scored —
+        // the worker always knows when Maman is working on their history.
+        await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
         await useRecommendations.getState().refresh();
+        await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
         if (cancelled) return;
         const st = useRecommendations.getState();
         const hasNew = st.items.some((i) => i.entry.status === "new");

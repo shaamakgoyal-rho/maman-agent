@@ -177,7 +177,30 @@ CREATE TABLE IF NOT EXISTS deletion_tombstones (
   deleted_at TEXT NOT NULL,
   sync_status TEXT NOT NULL
 );
+-- Replay-fidelity step sequences for verifying candidate agents against the
+-- worker's own recorded runs. LOCAL-ONLY, tier two of the two-tier model:
+-- richer than any synced projection, and NEVER referenced by sync_outbox —
+-- no code path enqueues from this table. Never uploaded.
+CREATE TABLE IF NOT EXISTS episode_traces (
+  episode_id TEXT PRIMARY KEY,
+  pattern_signature TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  encrypted_payload BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traces_signature ON episode_traces (pattern_signature, started_at DESC);
 "#;
+
+/// Additive column migrations for databases created before the columns existed
+/// (SQLite CREATE TABLE IF NOT EXISTS never alters an existing table). Each is
+/// safe to re-run: a duplicate-column error means it is already applied.
+const COLUMN_MIGRATIONS: &[&str] = &[
+    "ALTER TABLE pattern_candidates ADD COLUMN runs_tested INTEGER",
+    "ALTER TABLE pattern_candidates ADD COLUMN runs_matched INTEGER",
+    "ALTER TABLE pattern_candidates ADD COLUMN last_verified_at TEXT",
+    // Encrypted per-run replay results (incl. divergence step). Local-only.
+    "ALTER TABLE pattern_candidates ADD COLUMN verification_detail BLOB",
+];
 
 pub struct LocalStore {
     pool: SqlitePool,
@@ -255,6 +278,15 @@ impl LocalStore {
             .connect_with(options)
             .await?;
         sqlx::raw_sql(SCHEMA_SQL).execute(&pool).await?;
+        for migration in COLUMN_MIGRATIONS {
+            // Duplicate-column = already applied; anything else is a real error.
+            if let Err(e) = sqlx::query(migration).execute(&pool).await {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(StoreError::Db(e));
+                }
+            }
+        }
         Ok(Self {
             pool,
             key,
@@ -736,9 +768,240 @@ impl LocalStore {
         Ok(row.get::<i64, _>("n"))
     }
 
+    // ---- replay verification (two-tier local data; see episode_traces DDL) ----
+
+    /// Upserts replay-fidelity episode traces. LOCAL-ONLY BY CONSTRUCTION:
+    /// unlike `insert_event`, this never enqueues anything to `sync_outbox` —
+    /// traces are richer than any synced projection and never leave the device.
+    pub async fn traces_save(&self, traces: &[serde_json::Value]) -> Result<u64, StoreError> {
+        let mut saved = 0u64;
+        for trace in traces {
+            let episode_id = trace
+                .get("episode_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| StoreError::InvalidPayload("missing episode_id".into()))?;
+            let signature = trace
+                .get("pattern_signature")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| StoreError::InvalidPayload("missing pattern_signature".into()))?;
+            let started_at = trace
+                .get("started_at")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| StoreError::InvalidPayload("missing started_at".into()))?;
+            let aad = self.aad("episode_traces", episode_id, 1);
+            let plaintext = serde_json::to_vec(trace)
+                .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
+            let blob = self.encrypt(&plaintext, &aad)?;
+            sqlx::query(
+                "INSERT INTO episode_traces (episode_id, pattern_signature, started_at, encrypted_payload, created_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(episode_id) DO UPDATE SET
+                   pattern_signature = excluded.pattern_signature,
+                   started_at = excluded.started_at,
+                   encrypted_payload = excluded.encrypted_payload",
+            )
+            .bind(episode_id)
+            .bind(signature)
+            .bind(started_at)
+            .bind(blob)
+            .bind(now_iso())
+            .execute(&self.pool)
+            .await?;
+            saved += 1;
+        }
+        Ok(saved)
+    }
+
+    /// The most recent traces recorded for a pattern (decrypted, newest first).
+    pub async fn traces_for_pattern(
+        &self,
+        signature: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT episode_id, encrypted_payload FROM episode_traces
+             WHERE pattern_signature = ? ORDER BY started_at DESC LIMIT ?",
+        )
+        .bind(signature)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let episode_id: String = row.get("episode_id");
+            let blob: Vec<u8> = row.get("encrypted_payload");
+            let aad = self.aad("episode_traces", &episode_id, 1);
+            if let Ok(pt) = self.decrypt(&blob, &aad) {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&pt) {
+                    out.push(v);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Upserts a computed pattern candidate row (encrypted full candidate JSON).
+    /// Verification columns are preserved on update — they are owned by
+    /// `candidate_verification_save`.
+    pub async fn candidate_upsert(
+        &self,
+        pattern_id: &str,
+        status: &str,
+        opportunity_score: f64,
+        first_seen_at: &str,
+        last_seen_at: &str,
+        candidate: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        let aad = self.aad("pattern_candidates", pattern_id, 1);
+        let plaintext = serde_json::to_vec(candidate)
+            .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
+        let blob = self.encrypt(&plaintext, &aad)?;
+        sqlx::query(
+            "INSERT INTO pattern_candidates
+               (pattern_id, status, opportunity_score, encrypted_payload, payload_sha256, first_seen_at, last_seen_at)
+             VALUES (?, ?, ?, ?, '', ?, ?)
+             ON CONFLICT(pattern_id) DO UPDATE SET
+               status = excluded.status,
+               opportunity_score = excluded.opportunity_score,
+               encrypted_payload = excluded.encrypted_payload,
+               first_seen_at = excluded.first_seen_at,
+               last_seen_at = excluded.last_seen_at",
+        )
+        .bind(pattern_id)
+        .bind(status)
+        .bind(opportunity_score)
+        .bind(blob)
+        .bind(first_seen_at)
+        .bind(last_seen_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records a replay-verification outcome on the candidate row. The per-run
+    /// detail (incl. divergence steps) is encrypted; only the counts are plain.
+    pub async fn candidate_verification_save(
+        &self,
+        pattern_id: &str,
+        runs_tested: i64,
+        runs_matched: i64,
+        detail: &serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        let aad = self.aad("pattern_candidates:verification", pattern_id, 1);
+        let plaintext = serde_json::to_vec(detail)
+            .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
+        let blob = self.encrypt(&plaintext, &aad)?;
+        let result = sqlx::query(
+            "UPDATE pattern_candidates
+             SET runs_tested = ?, runs_matched = ?, last_verified_at = ?, verification_detail = ?
+             WHERE pattern_id = ?",
+        )
+        .bind(runs_tested)
+        .bind(runs_matched)
+        .bind(now_iso())
+        .bind(blob)
+        .bind(pattern_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Card-ready verification report for one candidate: counts + decrypted
+    /// per-run results ("tested N, matched M, diverged at step X on run Y").
+    pub async fn verification_report(
+        &self,
+        pattern_id: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        let row = sqlx::query(
+            "SELECT runs_tested, runs_matched, last_verified_at, verification_detail
+             FROM pattern_candidates WHERE pattern_id = ?",
+        )
+        .bind(pattern_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let runs_tested: Option<i64> = row.get("runs_tested");
+        let runs_matched: Option<i64> = row.get("runs_matched");
+        let last_verified_at: Option<String> = row.get("last_verified_at");
+        let detail_blob: Option<Vec<u8>> = row.get("verification_detail");
+        let detail = detail_blob.and_then(|blob| {
+            let aad = self.aad("pattern_candidates:verification", pattern_id, 1);
+            self.decrypt(&blob, &aad)
+                .ok()
+                .and_then(|pt| serde_json::from_slice::<serde_json::Value>(&pt).ok())
+        });
+        Ok(Some(serde_json::json!({
+            "pattern_id": pattern_id,
+            "runs_tested": runs_tested,
+            "runs_matched": runs_matched,
+            "last_verified_at": last_verified_at,
+            "detail": detail,
+        })))
+    }
+
+    /// Appends a suggestion action (accepted / suppressed / never, with reason)
+    /// to the local history ledger.
+    pub async fn suggestion_history_log(
+        &self,
+        pattern_id: &str,
+        action: &str,
+        reason: Option<&str>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO suggestion_history (recommendation_local_id, pattern_id, action, reason, occurred_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(uuid_like_id())
+        .bind(pattern_id)
+        .bind(action)
+        .bind(reason)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Non-mutating peek at the next queued sync payloads (decrypted) so the
+    /// user can see exactly what would leave the device. Read-only: no drain,
+    /// no attempt bump.
+    pub async fn outbox_peek(&self, limit: i64) -> Result<Vec<serde_json::Value>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT outbox_id, message_type, encrypted_payload FROM sync_outbox
+             ORDER BY created_at ASC LIMIT ?",
+        )
+        .bind(limit.clamp(1, 50))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let outbox_id: String = row.get("outbox_id");
+            let message_type: String = row.get("message_type");
+            let blob: Vec<u8> = row.get("encrypted_payload");
+            let aad = self.aad("sync_outbox", &outbox_id, 1);
+            if let Ok(pt) = self.decrypt(&blob, &aad) {
+                if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&pt) {
+                    out.push(serde_json::json!({
+                        "message_type": message_type,
+                        "payload": payload,
+                    }));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+/// Deterministic-enough local id for ledger rows (no uuid crate dependency here).
+fn uuid_like_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let h = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 /// Builds the redacted, identity-safe projection uploaded to the server. It
@@ -848,6 +1111,63 @@ mod tests {
             .await
             .expect("store opens");
         (store, path)
+    }
+
+    #[tokio::test]
+    async fn traces_and_verification_roundtrip_and_stay_out_of_the_outbox() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+
+        // Save two replay traces for a pattern.
+        let traces = vec![
+            json!({"episode_id": "ep-1", "pattern_signature": "sig-a", "started_at": "2026-07-30T10:00:00.000Z", "tokens": ["a:b:c:d:e:f"]}),
+            json!({"episode_id": "ep-2", "pattern_signature": "sig-a", "started_at": "2026-07-31T10:00:00.000Z", "tokens": ["a:b:c:d:e:f", "g:h:i:j:k:l"]}),
+        ];
+        assert_eq!(store.traces_save(&traces).await.unwrap(), 2);
+        let loaded = store.traces_for_pattern("sig-a", 10).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        // Newest first.
+        assert_eq!(loaded[0]["episode_id"], "ep-2");
+
+        // Two-tier invariant: saving traces enqueues NOTHING to sync_outbox.
+        assert_eq!(store.outbox_depth().await.unwrap(), 0);
+
+        // Candidate + verification roundtrip — the card's numbers come from here.
+        store
+            .candidate_upsert("pat-1", "candidate", 0.72, "2026-07-01T00:00:00.000Z", "2026-07-31T00:00:00.000Z", &json!({"pattern_id": "pat-1"}))
+            .await
+            .unwrap();
+        let detail = json!([{"episode_id": "ep-1", "verdict": "match"}, {"episode_id": "ep-2", "verdict": "partial", "divergence_step": 2}]);
+        assert!(store.candidate_verification_save("pat-1", 21, 19, &detail).await.unwrap());
+        let report = store.verification_report("pat-1").await.unwrap().unwrap();
+        assert_eq!(report["runs_tested"], 21);
+        assert_eq!(report["runs_matched"], 19);
+        assert_eq!(report["detail"][1]["divergence_step"], 2);
+        assert!(report["last_verified_at"].as_str().unwrap().len() > 10);
+
+        // Unknown pattern → None (no fabricated report).
+        assert!(store.verification_report("nope").await.unwrap().is_none());
+
+        // Suggestion history ledger appends.
+        store.suggestion_history_log("pat-1", "never", Some("not my workflow")).await.unwrap();
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn outbox_peek_is_read_only() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        store.insert_event(&sample_event(41), 30).await.unwrap();
+        let before = store.outbox_depth().await.unwrap();
+        let peeked = store.outbox_peek(10).await.unwrap();
+        assert_eq!(peeked.len() as i64, before);
+        // Peeking neither drains nor bumps attempts: a drain still returns it.
+        assert_eq!(store.outbox_depth().await.unwrap(), before);
+        assert_eq!(store.outbox_drain(10).await.unwrap().len() as i64, before);
+        // The peeked payload is the redacted projection (no display name).
+        let s = serde_json::to_string(&peeked).unwrap();
+        assert!(!s.contains("Salesforce"), "peek must show the projection, not raw identity");
+        store.close().await;
     }
 
     #[tokio::test]

@@ -67,7 +67,7 @@ export function Suggestions() {
           title={filter === "New" ? "No suggestions yet" : `Nothing ${filter.toLowerCase()}`}
           body={
             filter === "New"
-              ? "Suggestions appear after Maman notices a workflow repeat at least three times across two days — run the demo workflow on Home to see one."
+              ? "A suggestion appears only after Maman notices a repeated workflow AND has tested a helper against your own recorded runs. Seed the demo history on Home to see one."
               : "Items you act on land in this filter."
           }
         />
@@ -207,6 +207,13 @@ function FormingCard({
   );
 }
 
+/**
+ * THE card. One workflow Maman built an agent for and PROVED against the
+ * worker's own recorded runs. Headline (editable name), the score, an
+ * expandable per-run list naming each divergence in plain language, and
+ * exactly three actions: Try it / Not now / Never. No prompt box, no
+ * configuration — if the worker had to configure something, the card failed.
+ */
 function SuggestionCard({
   item,
   expanded,
@@ -219,66 +226,104 @@ function SuggestionCard({
   onAct: (signature: string, action: never) => Promise<void>;
 }) {
   const rec = item.recommendation;
+  const v = item.verification;
   const act = onAct as (
     signature: string,
-    action: { type: string; option?: SnoozeOption; reason?: string },
+    action: { type: string; option?: SnoozeOption; reason?: string; title?: string },
   ) => Promise<void>;
-  const [snoozeOpen, setSnoozeOpen] = useState(false);
-  const minutes = Math.round(rec.evidence.median_duration_ms / 60_000);
-  const steps = expanded ? rec.evidence.redacted_steps : rec.evidence.redacted_steps.slice(0, 5);
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const title = item.entry.custom_title ?? rec.title;
+  const divergences = v.results.filter((r) => r.verdict !== "match");
 
   return (
     <Card>
       <div className="flex items-start justify-between gap-2">
-        <SectionTitle>{rec.title}</SectionTitle>
-        <StatusPill
-          tone={
-            rec.risk_level === "low"
-              ? "success"
-              : rec.risk_level === "medium"
-                ? "warning"
-                : "danger"
-          }
-        >
-          {rec.risk_level} risk
-        </StatusPill>
-      </div>
-      <Muted>{rec.summary}</Muted>
-
-      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted tabular-nums">
-        <span>
-          Seen {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count} days
-        </span>
-        <span>Median {minutes} min manually</span>
-        <span>~{Math.round(rec.projected_minutes_saved_weekly)} min/week back</span>
-        <span>
-          ${rec.expected_cost_usd_low.toFixed(2)}–${rec.expected_cost_usd_high.toFixed(2)} per run ·{" "}
-          {Math.round(rec.confidence * 100)}% confidence
-        </span>
-      </div>
-
-      <div className="mt-2">
-        <p className="text-xs font-medium text-ink">What I noticed (redacted)</p>
-        <ol className="mt-1 space-y-0.5 text-xs text-muted list-decimal pl-4">
-          {steps.map((s) => (
-            <li key={s.order}>
-              {s.action} {s.app}
-            </li>
-          ))}
-        </ol>
-        {rec.evidence.redacted_steps.length > 5 && (
-          <button className="mt-1 text-xs text-primary" onClick={onToggleExpand}>
-            {expanded ? "Show fewer steps" : `Show all ${rec.evidence.redacted_steps.length} steps`}
+        {editing ? (
+          <input
+            value={draftTitle}
+            autoFocus
+            onChange={(e) => setDraftTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                setEditing(false);
+                void act(item.signature, { type: "renamed", title: draftTitle });
+              }
+              if (e.key === "Escape") setEditing(false);
+            }}
+            onBlur={() => {
+              setEditing(false);
+              void act(item.signature, { type: "renamed", title: draftTitle });
+            }}
+            aria-label="Workflow name"
+            className="flex-1 rounded-lg border border-line bg-panel px-2 py-1 text-sm font-semibold"
+          />
+        ) : (
+          <button
+            className="text-left"
+            title="Rename this workflow"
+            onClick={() => {
+              setDraftTitle(title);
+              setEditing(true);
+            }}
+          >
+            <SectionTitle>{title}</SectionTitle>
           </button>
         )}
+        <StatusPill tone="success">verified</StatusPill>
       </div>
 
-      <div className="mt-2">
-        <p className="text-xs font-medium text-ink">Would need</p>
-        <p className="text-xs text-muted">
-          {rec.required_capabilities.join(", ") || "local processing only"}
-        </p>
-      </div>
+      {/* The proof — every number here is a real replayed run. */}
+      <p className="mt-1 text-sm text-ink">
+        I can do this for you — I tested it against your last{" "}
+        <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+        <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
+      </p>
+      <Muted>
+        ~{Math.round(rec.projected_minutes_saved_weekly)} min/week of repeated work, seen{" "}
+        {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count} days. It will draft
+        and stage only — nothing changes without your approval.
+      </Muted>
+
+      <button className="mt-2 text-xs text-primary" onClick={onToggleExpand}>
+        {expanded ? "Hide the run-by-run results" : "See the run-by-run results"}
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          <ul className="space-y-0.5 text-xs">
+            {v.results.map((r, i) => (
+              <li key={r.episode_id} className="flex items-start justify-between gap-2">
+                <span className={r.verdict === "match" ? "text-ink" : "text-muted"}>
+                  {r.verdict === "match" ? "✓" : "○"} Run {v.results.length - i} ·{" "}
+                  {new Date(r.started_at).toLocaleDateString()}
+                </span>
+                <span className="text-right text-muted">
+                  {r.verdict === "match"
+                    ? "matched"
+                    : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {divergences.length > 0 && (
+            <Muted>
+              The {divergences.length === 1 ? "divergence is" : "divergences are"} left in on
+              purpose — an honest score beats a perfect one.
+            </Muted>
+          )}
+          <div>
+            <p className="text-xs font-medium text-ink">What I noticed (typed events only)</p>
+            <ol className="mt-1 space-y-0.5 text-xs text-muted list-decimal pl-4">
+              {rec.evidence.redacted_steps.map((s) => (
+                <li key={s.order}>
+                  {s.action} {s.app}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      )}
 
       {item.entry.status !== "accepted" && item.entry.status !== "dismissed" && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -294,54 +339,26 @@ function SuggestionCard({
               }
             }}
           >
-            Create agent
+            Try it
           </Button>
-          <Button variant="secondary" onClick={onToggleExpand}>
-            Preview
+          <Button
+            variant="secondary"
+            onClick={() => void act(item.signature, { type: "snoozed", option: "2w" })}
+          >
+            Not now
           </Button>
-          <div className="relative">
-            <Button variant="secondary" onClick={() => setSnoozeOpen((v) => !v)}>
-              Not now
-            </Button>
-            {snoozeOpen && (
-              <div className="absolute z-10 mt-1 card p-1 flex flex-col">
-                {(
-                  [
-                    ["1h", "1 hour"],
-                    ["4h", "4 hours"],
-                    ["today", "Today"],
-                    ["1w", "One week"],
-                  ] as Array<[SnoozeOption, string]>
-                ).map(([option, label]) => (
-                  <button
-                    key={option}
-                    className="rounded px-3 py-1 text-left text-xs hover:bg-bg"
-                    onClick={() => {
-                      setSnoozeOpen(false);
-                      void act(item.signature, { type: "snoozed", option });
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
           <Button
             variant="ghost"
             onClick={() => void act(item.signature, { type: "never_suggest" })}
           >
-            Never suggest this
-          </Button>
-          <Button variant="ghost" onClick={() => void act(item.signature, { type: "wrong" })}>
-            This is wrong
+            Never
           </Button>
         </div>
       )}
       {item.entry.status === "accepted" && (
         <p className="mt-3 text-xs text-success">
-          Draft agent created — inspect its full plan in the Agents tab. Nothing runs or changes
-          until you approve it there.
+          Draft agent created — inspect its full plan in the Agents tab. It drafts and stages only;
+          every step needs your approval until its record says otherwise.
         </p>
       )}
     </Card>

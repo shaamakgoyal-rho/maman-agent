@@ -30,12 +30,46 @@ function candidate(over: Partial<PatternCandidate> = {}): PatternCandidate {
   };
 }
 
+const PASSING_REPLAY = { runs_tested: 21, runs_matched: 19, min_runs: 10, min_match_pct: 0.85 };
+
 describe("patternGates (forming progress)", () => {
-  it("a fully-qualified pattern meets every check and reads as ready", () => {
-    const p = patternGates(candidate());
+  it("a fully-qualified, replay-proven pattern meets every check and reads as ready", () => {
+    const p = patternGates(candidate(), PASSING_REPLAY);
     expect(p.metCount).toBe(p.total);
     expect(p.ratio).toBe(1);
     expect(p.nextStep).toMatch(/ready/i);
+  });
+
+  it("without replay data the replay gate is honestly unmet", () => {
+    const p = patternGates(candidate());
+    const replay = p.gates.find((g) => g.key === "replay")!;
+    expect(replay.met).toBe(false);
+    expect(replay.detail).toBe("not tested yet");
+    expect(p.metCount).toBe(p.total - 1);
+  });
+
+  it("replay-only-unmet explains the score in plain language", () => {
+    const p = patternGates(candidate(), {
+      runs_tested: 21,
+      runs_matched: 15, // 71% < 85%
+      min_runs: 10,
+      min_match_pct: 0.85,
+    });
+    const replay = p.gates.find((g) => g.key === "replay")!;
+    expect(replay.met).toBe(false);
+    expect(replay.detail).toContain("matched 15 of 21");
+    expect(p.nextStep).toMatch(/matched 15 of your last 21 runs/);
+  });
+
+  it("too few tested runs asks for more runs, not more accuracy", () => {
+    const p = patternGates(candidate(), {
+      runs_tested: 4,
+      runs_matched: 4,
+      min_runs: 10,
+      min_match_pct: 0.85,
+    });
+    expect(p.gates.find((g) => g.key === "replay")!.met).toBe(false);
+    expect(p.nextStep).toMatch(/4 so far — 6 more/);
   });
 
   it("too-few repeats is the blocking check and the copy counts what's left", () => {

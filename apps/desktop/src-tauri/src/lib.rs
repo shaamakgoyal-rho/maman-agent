@@ -478,7 +478,66 @@ async fn events_ingest<R: Runtime>(
             },
         }
     }
+    record_observation_stats(&app, &result);
     Ok(result)
+}
+
+/// Weekly counters of what was — and pointedly was NOT — collected. Counts
+/// only, never content. Backs the "What Maman sees" trust surface: showing the
+/// drop reasons (paused / denied / not allowed) is how the worker verifies the
+/// boundaries are real.
+const STATS_FILE: &str = "observation-stats.json";
+
+fn week_start_iso() -> String {
+    // Monday of the current UTC week, date only.
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let days_since_epoch = now_ms / 86_400_000;
+    // 1970-01-01 was a Thursday → Monday offset 3.
+    let monday = days_since_epoch - ((days_since_epoch + 3).rem_euclid(7));
+    store::iso_from_unix_ms(monday * 86_400_000)[..10].to_string()
+}
+
+fn record_observation_stats<R: Runtime>(app: &AppHandle<R>, result: &IngestResult) {
+    let Ok(path) = config_path(app, STATS_FILE) else { return };
+    let week = week_start_iso();
+    let mut stats: serde_json::Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if stats.get("week_start").and_then(|v| v.as_str()) != Some(week.as_str()) {
+        stats = serde_json::json!({ "week_start": week });
+    }
+    let mut bump = |key: &str, by: u32| {
+        let cur = stats.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        stats[key] = serde_json::json!(cur + by as u64);
+    };
+    bump("stored", result.stored);
+    bump("dropped_paused", result.dropped_paused);
+    bump("dropped_denied", result.dropped_denied);
+    bump("dropped_not_allowlisted", result.dropped_not_allowlisted);
+    bump("boundary_events", result.boundary_events);
+    bump("rejected_forbidden", result.rejected_forbidden);
+    let _ = fs::write(&path, stats.to_string());
+}
+
+/// This week's observation counters (what was stored vs deliberately dropped).
+#[tauri::command]
+fn observation_stats<R: Runtime>(app: AppHandle<R>) -> serde_json::Value {
+    let empty = serde_json::json!({
+        "week_start": week_start_iso(),
+        "stored": 0, "dropped_paused": 0, "dropped_denied": 0,
+        "dropped_not_allowlisted": 0, "boundary_events": 0, "rejected_forbidden": 0,
+    });
+    let Ok(path) = config_path(&app, STATS_FILE) else { return empty };
+    let stats: Option<serde_json::Value> =
+        fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
+    match stats {
+        Some(s) if s.get("week_start").and_then(|v| v.as_str()) == Some(&week_start_iso()) => s,
+        _ => empty,
+    }
 }
 
 #[tauri::command]
@@ -637,6 +696,169 @@ async fn events_set_excluded<R: Runtime>(
         .set_excluded_from_learning(&event_id, excluded)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------- replay verification (two-tier local data; panel-only) ----------
+
+/// Persists replay-fidelity traces. LOCAL-ONLY: nothing here touches the sync
+/// outbox — traces are richer than any synced projection and never leave the
+/// device (see the episode_traces schema comment).
+#[tauri::command]
+async fn traces_save<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    traces: Vec<serde_json::Value>,
+) -> Result<u64, String> {
+    require_panel(&window)?;
+    if traces.len() > 500 {
+        return Err("trace batch too large".into());
+    }
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .traces_save(&traces)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The most recent recorded runs for a pattern (decrypted, newest first).
+#[tauri::command]
+async fn traces_for_pattern<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    signature: String,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .traces_for_pattern(&signature, limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Upserts computed pattern candidates so every number the card shows traces
+/// to a real row in pattern_candidates.
+#[tauri::command]
+async fn patterns_upsert<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    candidates: Vec<serde_json::Value>,
+) -> Result<u64, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    let store = guard.as_ref().expect("initialized");
+    let mut saved = 0u64;
+    for c in &candidates {
+        let (Some(id), Some(status), Some(score), Some(first), Some(last)) = (
+            c.get("pattern_id").and_then(|v| v.as_str()),
+            c.get("status").and_then(|v| v.as_str()),
+            c.get("opportunity_score").and_then(|v| v.as_f64()),
+            c.get("first_seen_at").and_then(|v| v.as_str()),
+            c.get("last_seen_at").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        store
+            .candidate_upsert(id, status, score, first, last, c)
+            .await
+            .map_err(|e| e.to_string())?;
+        saved += 1;
+    }
+    Ok(saved)
+}
+
+/// Records a replay-verification outcome on the candidate row.
+#[tauri::command]
+async fn pattern_verification_save<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    pattern_id: String,
+    runs_tested: i64,
+    runs_matched: i64,
+    detail: serde_json::Value,
+) -> Result<bool, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .candidate_verification_save(&pattern_id, runs_tested, runs_matched, &detail)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Card-ready verification report: "tested N, matched M, diverged at step X".
+#[tauri::command]
+async fn verification_report<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    pattern_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .verification_report(&pattern_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Appends a suggestion action to the local suggestion_history ledger.
+#[tauri::command]
+async fn suggestion_history_log<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    pattern_id: String,
+    action: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .suggestion_history_log(&pattern_id, &action, reason.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------- trust surface (panel-only) ----------
+
+/// Non-mutating peek at the next queued sync payloads, decrypted, so the user
+/// can see for themselves exactly what would leave this device.
+#[tauri::command]
+async fn sync_preview<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .outbox_peek(limit)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The hard-denied contexts, verbatim from the code that enforces them —
+/// structurally incapable of being observed, not a policy toggle.
+#[tauri::command]
+fn hard_denied_list() -> Vec<String> {
+    redaction::HARD_DENY_SUBSTRINGS.iter().map(|s| s.to_string()).collect()
 }
 
 // ---------- browser extension pairing + socket bridge ----------
@@ -1276,17 +1498,37 @@ fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
 /// context is dropped even before the sidecar restarts (spec §10 central gate).
 async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
     let settings = load_gate_settings(app);
-    if !matches!(gate_event(&settings, event), Ok(None)) {
-        return; // paused / hard-denied / user-private / not-allowlisted → drop
-    }
-    let state = app.state::<StoreState>();
-    let mut guard = match store_guard(app, &state).await {
-        Ok(g) => g,
-        Err(_) => return,
+    let mut deltas = IngestResult {
+        stored: 0,
+        dropped_paused: 0,
+        dropped_denied: 0,
+        dropped_not_allowlisted: 0,
+        boundary_events: 0,
+        rejected_forbidden: 0,
     };
-    if let Some(store) = guard.as_mut() {
-        let _ = store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await;
+    match gate_event(&settings, event) {
+        Ok(None) => {
+            let state = app.state::<StoreState>();
+            let mut guard = match store_guard(app, &state).await {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if let Some(store) = guard.as_mut() {
+                match store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await {
+                    Ok(_) => deltas.stored += 1,
+                    Err(store::StoreError::ForbiddenField(_)) => deltas.rejected_forbidden += 1,
+                    Err(_) => {}
+                }
+            }
+        }
+        Ok(Some(reason)) => match reason.as_str() {
+            "observation_paused" => deltas.dropped_paused += 1,
+            "not_allowlisted" => deltas.dropped_not_allowlisted += 1,
+            _ => deltas.dropped_denied += 1,
+        },
+        Err(_) => return,
     }
+    record_observation_stats(app, &deltas);
 }
 
 /// Supervises the observer sidecar: spawns only when the gate allows, streams
@@ -1447,6 +1689,15 @@ pub fn run() {
             events_delete_all,
             events_delete_app,
             events_set_excluded,
+            traces_save,
+            traces_for_pattern,
+            patterns_upsert,
+            pattern_verification_save,
+            verification_report,
+            suggestion_history_log,
+            sync_preview,
+            hard_denied_list,
+            observation_stats,
             device_data_wipe,
             pairing_begin,
             device_enroll,

@@ -1,10 +1,89 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { APP_PRESETS, ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
+import { invokeCommand, isTauri } from "../../lib/bridge.js";
+import { deleteAllEvents, deleteAppHistory, fetchTimeline } from "../../lib/events.js";
 import { Button, Card, Muted, SectionTitle, StatusPill, Toggle } from "../ui.js";
+
+type ObservationStats = {
+  week_start: string;
+  stored: number;
+  dropped_paused: number;
+  dropped_denied: number;
+  dropped_not_allowlisted: number;
+  boundary_events: number;
+  rejected_forbidden: number;
+};
 
 export function Privacy() {
   const { settings, update } = useSettings();
   const [newDomain, setNewDomain] = useState("");
+  const [stats, setStats] = useState<ObservationStats | null>(null);
+  const [hardDenied, setHardDenied] = useState<string[]>([]);
+  const [syncPreview, setSyncPreview] = useState<unknown[] | null>(null);
+  const [observedApps, setObservedApps] = useState<string[]>([]);
+  const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isTauri()) {
+      void invokeCommand<ObservationStats>("observation_stats")
+        .then(setStats)
+        .catch(() => {});
+      void invokeCommand<string[]>("hard_denied_list")
+        .then(setHardDenied)
+        .catch(() => {});
+    }
+    // Which apps have recorded history (drives the per-app delete list).
+    void fetchTimeline(500, 0)
+      .then((entries) => {
+        const names = [...new Set(entries.map((e) => e.app_display_name))].filter(
+          (n) => n && n !== "Private" && n !== "System",
+        );
+        setObservedApps(names.slice(0, 8));
+      })
+      .catch(() => {});
+  }, []);
+
+  const loadSyncPreview = async () => {
+    if (!isTauri()) {
+      setSyncPreview([]);
+      return;
+    }
+    try {
+      setSyncPreview(await invokeCommand<unknown[]>("sync_preview", { limit: 5 }));
+    } catch {
+      setSyncPreview([]);
+    }
+  };
+
+  const wipeApp = async (app: string) => {
+    const n = await deleteAppHistory(app);
+    setDeleteResult(
+      `Deleted ${n} events from ${app} — queued sync payloads purged, tombstone written.`,
+    );
+    setObservedApps((apps) => apps.filter((a) => a !== app));
+  };
+
+  const wipeAll = async () => {
+    const n = await deleteAllEvents();
+    setDeleteResult(
+      `Deleted ${n} observed events — queued sync payloads purged, tombstones written.`,
+    );
+    setObservedApps([]);
+  };
+
+  const wipeDevice = async () => {
+    if (!isTauri()) {
+      setDeleteResult("Device wipe runs in the desktop app.");
+      return;
+    }
+    const phrase = window.prompt(
+      'This deletes the local database AND its encryption key. Type "delete-device-data" to confirm.',
+    );
+    if (phrase !== "delete-device-data") return;
+    await invokeCommand("device_data_wipe", { confirm: phrase });
+    setDeleteResult("Device data deleted — database and Keychain key are gone.");
+    setObservedApps([]);
+  };
 
   const removeDomain = (domain: string) =>
     void update({
@@ -137,33 +216,112 @@ export function Privacy() {
       </Card>
 
       <Card>
+        <SectionTitle>Not collected this week</SectionTitle>
+        <Muted>
+          The counters below are what Maman deliberately did NOT record — showing you what was
+          dropped is how you verify the boundaries are real.
+        </Muted>
+        {stats ? (
+          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular-nums">
+            <span className="text-muted">Recorded (typed events)</span>
+            <span className="text-right text-ink">{stats.stored}</span>
+            <span className="text-muted">Dropped — app/site not on your list</span>
+            <span className="text-right text-ink">{stats.dropped_not_allowlisted}</span>
+            <span className="text-muted">Dropped — off-limits or private context</span>
+            <span className="text-right text-ink">{stats.dropped_denied}</span>
+            <span className="text-muted">Dropped — observation paused</span>
+            <span className="text-right text-ink">{stats.dropped_paused}</span>
+            <span className="text-muted">Boundary markers (context only, no content)</span>
+            <span className="text-right text-ink">{stats.boundary_events}</span>
+          </div>
+        ) : (
+          <Muted>Live counters are available in the desktop app.</Muted>
+        )}
+      </Card>
+
+      <Card>
         <SectionTitle>Always off-limits</SectionTitle>
         <Muted>
-          These are hard-denied in code and cannot be enabled by you or your company: macOS login
-          and authorization dialogs, password managers, private/incognito windows, banking and
-          payment sites, health portals, the system keychain, secure text fields, and any password,
-          one-time-code, or card field. When you're in one of these, Maman sleeps and records only
-          that a boundary existed — never what was behind it.
+          Structurally incapable, not policy: these contexts are hard-denied in the observation code
+          itself and cannot be enabled by you or your company. When you're in one, Maman records
+          only that a boundary existed — never what was behind it.
         </Muted>
+        {hardDenied.length > 0 ? (
+          <p className="mt-2 break-words rounded-lg border border-line bg-bg p-2 font-mono text-[10px] leading-relaxed text-muted">
+            {hardDenied.join(" · ")}
+          </p>
+        ) : (
+          <Muted>
+            Password managers, banking and payment sites, health portals, the system keychain,
+            login/authorization dialogs, private windows, and every password, one-time-code, or card
+            field.
+          </Muted>
+        )}
+      </Card>
+
+      <Card>
+        <SectionTitle>What would leave this device</SectionTitle>
+        <Muted>
+          See for yourself: the exact next payloads waiting to sync, decrypted locally. Typed events
+          with coarse categories and bucketed counts — no app names, no text you typed, no images of
+          your work.
+        </Muted>
+        <div className="mt-2">
+          <Button variant="secondary" onClick={() => void loadSyncPreview()}>
+            Show next sync payload
+          </Button>
+          {syncPreview !== null &&
+            (syncPreview.length === 0 ? (
+              <Muted>Nothing is queued to sync right now.</Muted>
+            ) : (
+              <pre className="mt-2 max-h-48 overflow-auto rounded-lg border border-line bg-bg p-2 text-[10px] leading-relaxed text-muted">
+                {JSON.stringify(syncPreview.slice(0, 3), null, 2)}
+              </pre>
+            ))}
+        </div>
       </Card>
 
       <Card>
         <SectionTitle>Where your data lives</SectionTitle>
         <Muted>
           On this Mac: every raw observation, encrypted with a key in your Keychain (retention: 30
-          days, configurable). On the server: only redacted pattern summaries you choose to sync,
-          your agents, runs, and approvals. Never screenshots, never keystrokes — those are never
-          captured in the first place.
+          days, configurable). Replay traces used to test helpers against your own runs stay in a
+          local-only table that is never synced. On the server: only the redacted summaries above,
+          your agents, runs, and approvals.
         </Muted>
       </Card>
 
       <Card>
         <SectionTitle>Delete</SectionTitle>
         <Muted>
-          Event inspection and granular deletion arrive with the local event store (Milestone 3).
-          Deleting all device data removes the local database and its Keychain key after
-          confirmation.
+          Everything Maman learned is yours. Deleting removes local history, queued sync payloads
+          for it, and writes a tombstone so the server forgets too.
         </Muted>
+        {observedApps.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {observedApps.map((app) => (
+              <div key={app} className="flex items-center justify-between text-sm">
+                <span>{app}</span>
+                <Button
+                  variant="ghost"
+                  onClick={() => void wipeApp(app)}
+                  ariaLabel={`Delete all history from ${app}`}
+                >
+                  Delete its history
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => void wipeAll()}>
+            Delete all observed history
+          </Button>
+          <Button variant="ghost" onClick={() => void wipeDevice()}>
+            Delete this device's data…
+          </Button>
+        </div>
+        {deleteResult && <p className="mt-2 text-xs text-success">{deleteResult}</p>}
       </Card>
     </div>
   );

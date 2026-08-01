@@ -28,23 +28,33 @@ async function completeOnboarding(page: Page): Promise<void> {
   await finish.click();
 }
 
-test("onboarding → demo workflow → suggestion → agent → shadow → supervised approval → receipt", async ({
+test("onboarding → seeded history → replay-verified card → Try it → supervised approval → receipt → autonomy meter", async ({
   page,
 }) => {
   await page.goto("/index.html");
 
-  // 1–2. Consent.
+  // 1–2. Consent (the cold open: allowlist, hard-denied, comprehension).
   await completeOnboarding(page);
 
-  // 3. Observe a demo workflow (Home).
-  await page.getByRole("button", { name: /Run demo workflow/i }).click();
+  // 3. Seed a realistic month of recorded runs (23, two divergent on purpose).
+  await page.getByRole("button", { name: /Seed demo history/i }).click();
 
-  // 4. A suggestion appears.
+  // 4. THE card appears — with the replay-verified score, not a confidence guess.
   await page.getByRole("button", { name: "Suggestions" }).click();
   await expect(page.getByText(/Reconcile account lists with Salesforce/i)).toBeVisible();
+  await expect(page.getByText(/tested it against your last/i)).toBeVisible();
+  await expect(page.getByText("21", { exact: true })).toBeVisible();
+  await expect(page.getByText("19", { exact: true })).toBeVisible();
 
-  // 5. Create the agent from the suggestion.
-  await page.getByRole("button", { name: /Create agent/i }).click();
+  // Expand: the two planted divergences are named, step and all.
+  await page.getByRole("button", { name: /See the run-by-run results/i }).click();
+  await expect(page.getByText(/diverged at step/i).first()).toBeVisible();
+
+  // 5. Exactly three actions — no prompt box, no configuration.
+  await expect(page.getByRole("button", { name: "Try it", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Not now", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Never", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Try it", exact: true }).click();
 
   // 6. Go to Agents — the draft is here with its plan; nothing has run.
   await page.getByRole("button", { name: "Agents" }).click();
@@ -75,6 +85,17 @@ test("onboarding → demo workflow → suggestion → agent → shadow → super
   // 10. Receipt with measured ROI, in the pet's honest voice.
   await expect(page.getByText(/Updated 4 records\. Saved approximately/i)).toBeVisible();
   await expect(page.getByText(/ROI measured · verification passed/i)).toBeVisible();
+
+  // 11. Earned autonomy: the approved run ticked the per-workflow meter.
+  await expect(page.getByText(/more approved runs? until Maman can draft/i)).toBeVisible();
+  await expect(page.getByText(/1\/5/)).toBeVisible();
+
+  // 12. The exit — the trust surface answers "what does Maman see?"
+  await page.getByRole("button", { name: "Privacy" }).click();
+  await expect(page.getByText(/Not collected this week/i)).toBeVisible();
+  await expect(page.getByText(/Always off-limits/i)).toBeVisible();
+  await expect(page.getByText(/What would leave this device/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: /Delete all observed history/i })).toBeVisible();
 
   // 11. Settings → Connect to Maman server card renders (M18.1 regression guard).
   // The enrollment store hydrates on mount; if it threw (as the CSP-blocked

@@ -1,5 +1,6 @@
 export {
   reconciliationFixture,
+  demoHistoryFixture,
   unrelatedFixture,
   mulberry32,
   type FixtureOptions,

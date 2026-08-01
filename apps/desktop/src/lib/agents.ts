@@ -50,6 +50,12 @@ const agentRecordSchema = z
     // Compile inputs, kept so the agent can be (re)compiled server-side.
     generalized_intent: z.string().default("reconcile_account_list"),
     desired_outcome: z.string().default("Reconcile the account list with Salesforce."),
+    // Earned autonomy: approved supervised runs accumulate per workflow. When
+    // the count reaches the settings threshold the WORKER may grant draft
+    // autonomy — a match record makes the offer possible; only the worker's
+    // explicit grant changes anything. Never auto-promoted.
+    approved_runs: z.number().int().nonnegative().default(0),
+    draft_autonomy: z.boolean().default(false),
   })
   .strict();
 
@@ -101,6 +107,13 @@ type AgentsStore = {
     agentId: string,
     candidate: PatternCandidate,
   ) => Promise<{ ok: true; server_agent_id: string } | { ok: false; message: string }>;
+  /** Records one approved, completed supervised run (the autonomy meter). */
+  recordApprovedRun: (agentId: string) => Promise<void>;
+  /**
+   * WORKER-granted draft autonomy. Only enabled once approved_runs reaches the
+   * settings threshold; a match record never auto-promotes anything.
+   */
+  grantDraftAutonomy: (agentId: string) => Promise<void>;
 };
 
 export const useAgents = create<AgentsStore>((set, get) => ({
@@ -165,6 +178,8 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       server_agent_id: null,
       generalized_intent: generalizedIntent,
       desired_outcome: desiredOutcome,
+      approved_runs: 0,
+      draft_autonomy: false,
     };
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
     await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
@@ -212,6 +227,22 @@ export const useAgents = create<AgentsStore>((set, get) => ({
 
   setState: async (agentId, state) => {
     const agents = get().agents.map((a) => (a.agent_id === agentId ? { ...a, state } : a));
+    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    set({ agents });
+  },
+
+  recordApprovedRun: async (agentId) => {
+    const agents = get().agents.map((a) =>
+      a.agent_id === agentId ? { ...a, approved_runs: a.approved_runs + 1 } : a,
+    );
+    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    set({ agents });
+  },
+
+  grantDraftAutonomy: async (agentId) => {
+    const agents = get().agents.map((a) =>
+      a.agent_id === agentId ? { ...a, draft_autonomy: true } : a,
+    );
     await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
     set({ agents });
   },

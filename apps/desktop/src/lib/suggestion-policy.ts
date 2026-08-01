@@ -57,7 +57,7 @@ export function canSurfaceSuggestion(ctx: SurfacingContext): SurfacingDecision {
   return { allowed: true };
 }
 
-export type SnoozeOption = "1h" | "4h" | "today" | "1w";
+export type SnoozeOption = "1h" | "4h" | "today" | "1w" | "2w";
 
 export function snoozeUntil(option: SnoozeOption, now: Date): string {
   switch (option) {
@@ -73,5 +73,8 @@ export function snoozeUntil(option: SnoozeOption, now: Date): string {
     }
     case "1w":
       return new Date(now.getTime() + 7 * 86_400_000).toISOString();
+    // "Not now" on the suggestion card: suppressed for 14 days.
+    case "2w":
+      return new Date(now.getTime() + 14 * 86_400_000).toISOString();
   }
 }

@@ -41,3 +41,12 @@ export {
 } from "./engine.js";
 export { deterministicName, type NamingResult } from "./naming.js";
 export { toPatternFeature, categorizeApp } from "./projection.js";
+export {
+  replayCandidate,
+  replayAgainstTrace,
+  humanizeToken,
+  type ReplayReport,
+  type ReplayRunResult,
+  type ReplayVerdict,
+  type EpisodeTrace,
+} from "./replay.js";

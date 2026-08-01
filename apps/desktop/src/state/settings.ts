@@ -30,6 +30,15 @@ export const localSettingsSchema = z
     quiet_hours_end: z.string().default("08:30"),
     reduced_motion: z.enum(["system", "on", "off"]).default("system"),
     global_shortcut: z.string().default("Control+Alt+P"),
+    // Replay-verification gate: a pattern becomes a suggestion card only after
+    // the compiled candidate has been tested against the worker's own recorded
+    // runs and cleared this bar. Tunable so the demo can adjust honestly.
+    verify_min_runs: z.number().int().min(1).max(100).default(10),
+    verify_min_match_pct: z.number().min(0).max(1).default(0.85),
+    /** How many of the most recent recorded runs to replay against. */
+    verify_window: z.number().int().min(1).max(100).default(21),
+    /** Approved supervised runs required before draft autonomy can be granted. */
+    autonomy_min_approved_runs: z.number().int().min(1).max(50).default(5),
     // Maman server enrollment (display only — the device TOKEN never reaches the
     // webview; it lives in the OS keychain and is attached by the Rust core).
     server_enabled: z.boolean().default(false),

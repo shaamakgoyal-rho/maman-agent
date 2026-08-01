@@ -270,6 +270,108 @@ export function reconciliationFixture(opts: FixtureOptions = {}): WorkflowEvent[
 }
 
 /**
+ * Demo-history fixture (the 3-minute demo arc): a realistic month of the
+ * reconciliation workflow — `total` recorded runs spread two-per-workday, with
+ * `divergent_runs` of them missing the Salesforce update step (the worker did
+ * it differently that day). The divergent runs land INSIDE the most recent
+ * verification window, so the card truthfully shows an imperfect score:
+ * 19/21 reads as honest; 21/21 reads as staged.
+ */
+export function demoHistoryFixture(
+  opts: FixtureOptions & { total?: number; divergent_runs?: number[] } = {},
+): WorkflowEvent[] {
+  const seed = opts.seed ?? 20260801;
+  const rand = mulberry32(seed);
+  const device_id = opts.device_id ?? uuidv7({ timestampMs: 1, random: rand });
+  const user_id = opts.user_id ?? uuidv7({ timestampMs: 2, random: rand });
+  const organization_id = opts.organization_id ?? uuidv7({ timestampMs: 3, random: rand });
+  const startDay = new Date(`${opts.start_day ?? "2026-07-06"}T00:00:00.000Z`);
+  const total = opts.total ?? 23;
+  // 0-indexed runs that skip the Salesforce update step (default: runs 18 and
+  // 22 of 23 — both inside a 21-run verification window).
+  const divergent = new Set(opts.divergent_runs ?? [17, 21]);
+
+  const events: WorkflowEvent[] = [];
+  let monotonic = 10_000;
+
+  for (let run = 0; run < total; run++) {
+    // Two runs per day at 09:40 and 15:10; weekends skipped.
+    const workday = Math.floor(run / 2);
+    const dayOffset = workday + Math.floor(workday / 5) * 2;
+    const hour = run % 2 === 0 ? 9 : 15;
+    const minute = run % 2 === 0 ? 40 : 10;
+    const t0 = startDay.getTime() + dayOffset * 86_400_000 + hour * 3_600_000 + minute * 60_000;
+    let t = t0;
+
+    for (const step of RECONCILIATION_STEPS) {
+      // History runs share one canonical shape (duration jitter still varies);
+      // the optional-variation steps stay out so the replay score is exactly
+      // the seeded story: every divergence on the card is one we planted.
+      if (step.only_episodes) continue;
+      // The divergent runs skip the Salesforce update — the exact step the
+      // replay verifier will name on the card.
+      if (divergent.has(run) && step.event_type === "record_updated") continue;
+      const jitter = 0.8 + rand() * 0.4;
+      const durationMs = Math.round(step.seconds * 1000 * jitter);
+      t += durationMs;
+      monotonic += durationMs;
+
+      events.push(
+        workflowEventSchema.parse({
+          schema_version: 1,
+          event_id: uuidv7({ timestampMs: t, random: rand }),
+          device_id,
+          user_id,
+          organization_id,
+          occurred_at: new Date(t).toISOString(),
+          monotonic_ms: monotonic,
+          source: step.source,
+          app: { display_name: step.display_name, domain: step.domain },
+          event_type: step.event_type,
+          target: {
+            ...(step.role ? { role: step.role } : {}),
+            ...(step.semantic_type ? { semantic_type: step.semantic_type } : {}),
+            stable_id_hash: `h_${step.event_type}_${step.role ?? "none"}`,
+          },
+          context: {
+            ...(step.page_type ? { page_type: step.page_type } : {}),
+            ...(step.object_type ? { object_type: step.object_type } : {}),
+            ...(step.item_count ? { item_count: step.item_count } : {}),
+          },
+          duration_ms: durationMs,
+          sensitivity: "internal",
+          redaction: { applied: false, reasons: [] },
+        } satisfies WorkflowEvent),
+      );
+    }
+
+    // idle boundary closes each run
+    t += 6 * 60_000;
+    monotonic += 6 * 60_000;
+    events.push(
+      workflowEventSchema.parse({
+        schema_version: 1,
+        event_id: uuidv7({ timestampMs: t, random: rand }),
+        device_id,
+        user_id,
+        organization_id,
+        occurred_at: new Date(t).toISOString(),
+        monotonic_ms: monotonic,
+        source: "demo",
+        app: { display_name: "System" },
+        event_type: "idle_started",
+        target: {},
+        context: {},
+        sensitivity: "public",
+        redaction: { applied: false, reasons: [] },
+      } satisfies WorkflowEvent),
+    );
+  }
+
+  return events;
+}
+
+/**
  * Unrelated fixture: scattered, non-repeating activity that must yield ZERO
  * recommendations (varied apps, no repeated sequence, single occurrences).
  */

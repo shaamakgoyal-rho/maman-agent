@@ -177,10 +177,11 @@ export function Onboarding() {
             </Muted>
           </Card>
           <Card>
-            <SectionTitle>Screen Recording — optional, Teach Mode only</SectionTitle>
+            <SectionTitle>Teach Mode — coming soon, always yours to start</SectionTitle>
             <Muted>
-              Requested only when you explicitly start Teach Mode. Never required for normal use,
-              and never used in the background.
+              Show Maman a workflow once — coming soon. You start it, you see an indicator while it
+              runs, nothing is kept on disk, and it is never used in the background. The macOS
+              Screen Recording permission is requested only at that moment, never in advance.
             </Muted>
           </Card>
           <Card>

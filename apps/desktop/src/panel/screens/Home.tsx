@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { reconciliationFixture } from "@maman/demo-fixtures";
+import { demoHistoryFixture, reconciliationFixture } from "@maman/demo-fixtures";
+import { useRecommendations } from "../../lib/recommendations.js";
 import { capabilitySnapshot, type CapabilityLine } from "../../lib/capabilities.js";
 import { useSettings, pauseUntil } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
@@ -30,6 +31,30 @@ export function Home({ petState }: { petState: PetStateName }) {
       });
       setDemoResult(result);
       await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
+  /**
+   * Demo seed (dev): loads a realistic month — 23 recorded runs of the
+   * reconciliation workflow, two done differently on purpose — through the SAME
+   * gate → redact → encrypt pipeline, then scores it. The resulting card reads
+   * "tested against your last 21 runs, matched 19": honest, not staged.
+   */
+  const seedDemoHistory = async () => {
+    setDemoBusy(true);
+    try {
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STARTED" });
+      const result = await ingestEvents(demoHistoryFixture(), {
+        observationPaused: settings.observation_paused,
+      });
+      setDemoResult(result);
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
+      // Score immediately (the background loop would get there within a minute).
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+      await useRecommendations.getState().refresh();
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
     } finally {
       setDemoBusy(false);
     }
@@ -102,11 +127,16 @@ export function Home({ petState }: { petState: PetStateName }) {
       <Card>
         <SectionTitle>Demo</SectionTitle>
         <Muted>
-          Injects the deterministic six-episode reconciliation fixture through the real observation
-          pipeline (gating, redaction, encryption). Inspect it in Activity.
+          Both run through the real observation pipeline (gating, redaction, encryption). “Seed demo
+          history” loads a realistic month — 23 recorded reconciliation runs, two of them done
+          differently on purpose — so the suggestion card can honestly show a tested, imperfect
+          score. Inspect everything in Activity.
         </Muted>
-        <div className="mt-2 flex items-center gap-3">
-          <Button onClick={() => void runDemoWorkflow()} disabled={demoBusy}>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button onClick={() => void seedDemoHistory()} disabled={demoBusy}>
+            Seed demo history (23 runs)
+          </Button>
+          <Button variant="secondary" onClick={() => void runDemoWorkflow()} disabled={demoBusy}>
             Run demo workflow
           </Button>
           {demoResult && (
@@ -123,7 +153,7 @@ export function Home({ petState }: { petState: PetStateName }) {
 
       <EmptyState
         title="No suggestions yet"
-        body="Once Maman has seen a workflow repeat at least three times across two days, a suggestion with full evidence will appear here."
+        body="Once Maman has noticed a repeated workflow AND tested a helper against your own recorded runs, a card with the score appears in Suggestions."
       />
     </div>
   );
