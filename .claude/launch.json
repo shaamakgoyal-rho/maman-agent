@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "desktop-panel-preview",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@maman/desktop", "preview", "--port", "4318", "--strictPort"],
+      "port": 4318
+    }
+  ]
+}
