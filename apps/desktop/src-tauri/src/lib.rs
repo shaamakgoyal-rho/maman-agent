@@ -355,6 +355,14 @@ fn position_panel_near_pet<R: Runtime>(app: &AppHandle<R>) {
     let _ = panel.set_position(PhysicalPosition::new(x, y));
 }
 
+/// Windows that are hideable surfaces rather than document windows: closing
+/// them must HIDE, never destroy. A destroyed window is gone from
+/// `get_webview_window`, so every later open path (pet click, global shortcut,
+/// tray) silently no-ops until the app restarts.
+fn hides_on_close(label: &str) -> bool {
+    label == "panel"
+}
+
 fn toggle_panel_impl<R: Runtime>(app: &AppHandle<R>) {
     let Some(panel) = app.get_webview_window("panel") else { return };
     if panel.is_visible().unwrap_or(false) {
@@ -1741,6 +1749,16 @@ pub fn run() {
         .on_window_event({
             let last_move_ms = last_move_ms.clone();
             move |window, event| {
+                // Closing the panel must hide it, not destroy it — otherwise the
+                // window is gone and clicking the pet (or pressing the shortcut)
+                // does nothing at all until the app is restarted.
+                if hides_on_close(window.label()) {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    return;
+                }
                 if window.label() != "pet" {
                     return;
                 }
@@ -1940,5 +1958,43 @@ mod tests {
     fn respects_monitor_origin_offsets() {
         let bounds = (1920, 0, 1920, 1080); // second display to the right
         assert_eq!(snap_to_edges((1925, 500), SIZE, bounds), (1936, 500));
+    }
+}
+
+#[cfg(test)]
+mod panel_close_tests {
+    //! The panel is a hideable surface. If its close button destroys the window,
+    //! `get_webview_window("panel")` returns None and every later open path
+    //! (pet click, global shortcut) silently no-ops until the app restarts —
+    //! the window looks fine, the pet just stops responding.
+    use super::hides_on_close;
+
+    #[test]
+    fn the_panel_hides_on_close_but_the_pet_does_not() {
+        assert!(hides_on_close("panel"));
+        assert!(!hides_on_close("pet"));
+        assert!(!hides_on_close("other"));
+    }
+
+    #[test]
+    fn the_close_handler_prevents_destruction_and_hides() {
+        // The behavior lives in a Tauri window-event closure that cannot be
+        // constructed in a unit test, so assert the wiring the way csp_tests
+        // asserts the CSP: someone removing it has to remove this too.
+        let src = include_str!("lib.rs");
+        let handler = src
+            .split("if hides_on_close(window.label())")
+            .nth(1)
+            .expect("panel close branch missing from on_window_event");
+        let branch = &handler[..handler.find("if window.label() != \"pet\"").unwrap_or(400)];
+        assert!(
+            branch.contains("CloseRequested"),
+            "panel branch must handle CloseRequested"
+        );
+        assert!(
+            branch.contains("prevent_close"),
+            "panel close must be prevented, never allowed to destroy the window"
+        );
+        assert!(branch.contains(".hide()"), "panel close must hide the window");
     }
 }
