@@ -282,8 +282,9 @@ function SuggestionCard({
       </p>
       <Muted>
         ~{Math.round(rec.projected_minutes_saved_weekly)} min/week of repeated work, seen{" "}
-        {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count} days. It will draft
-        and stage only — nothing changes without your approval.
+        {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count}{" "}
+        {rec.evidence.distinct_day_count === 1 ? "day" : "days"}. It will draft and stage only —
+        nothing changes without your approval.
       </Muted>
 
       <button className="mt-2 text-xs text-primary" onClick={onToggleExpand}>
