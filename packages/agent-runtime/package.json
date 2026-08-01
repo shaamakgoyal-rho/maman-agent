@@ -29,8 +29,8 @@
     "@temporalio/client": "^1.11.5",
     "@temporalio/testing": "^1.11.5",
     "@temporalio/worker": "^1.11.5",
-    "@vitest/coverage-v8": "^2.1.8",
+    "@vitest/coverage-v8": "^3.2.7",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.7"
   }
 }
