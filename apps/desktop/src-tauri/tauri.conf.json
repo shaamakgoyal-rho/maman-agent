@@ -54,6 +54,9 @@
     "externalBin": ["binaries/maman-observer"],
     "macOS": {
       "minimumSystemVersion": "14.0"
+    },
+    "resources": {
+      "../../../domain/packs/*.json": "domain/packs/"
     }
   }
 }

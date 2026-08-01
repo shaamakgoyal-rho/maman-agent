@@ -1,0 +1,152 @@
+[
+  {
+    "name": "no signal at all",
+    "input": {
+      "app_category": "other",
+      "event_type": "app_activated"
+    },
+    "expected": null
+  },
+  {
+    "name": "crm record_opened by object_type",
+    "input": {
+      "app_category": "crm",
+      "event_type": "record_opened",
+      "object_type": "opportunity"
+    },
+    "expected": {
+      "domain": "revops",
+      "object": "opportunity",
+      "action": "extract_field",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "object via alias",
+    "input": {
+      "event_type": "record_opened",
+      "object_type": "deal"
+    },
+    "expected": {
+      "domain": "revops",
+      "object": "opportunity",
+      "action": "extract_field",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "label pattern hit only",
+    "input": {
+      "app_category": "erp",
+      "event_type": "record_opened",
+      "label_pattern_hits": [
+        "invoice"
+      ]
+    },
+    "expected": {
+      "domain": "finops",
+      "object": "invoice",
+      "action": "extract_field",
+      "confidence": 0.85
+    }
+  },
+  {
+    "name": "write event on invoice",
+    "input": {
+      "event_type": "value_committed",
+      "object_type": "invoice"
+    },
+    "expected": {
+      "domain": "finops",
+      "object": "invoice",
+      "action": "draft_email",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "read event on invoice",
+    "input": {
+      "event_type": "record_opened",
+      "object_type": "invoice"
+    },
+    "expected": {
+      "domain": "finops",
+      "object": "invoice",
+      "action": "extract_field",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "all evidence corroborating",
+    "input": {
+      "app_category": "erp",
+      "event_type": "record_opened",
+      "object_type": "invoice",
+      "label_pattern_hits": [
+        "invoice"
+      ]
+    },
+    "expected": {
+      "domain": "finops",
+      "object": "invoice",
+      "action": "extract_field",
+      "confidence": 1
+    }
+  },
+  {
+    "name": "semantic_type substring hint",
+    "input": {
+      "event_type": "value_committed",
+      "semantic_type": "account_name"
+    },
+    "expected": {
+      "domain": "revops",
+      "object": "account",
+      "action": "draft_email",
+      "confidence": 0.3
+    }
+  },
+  {
+    "name": "revops quote via cpq category",
+    "input": {
+      "app_category": "cpq",
+      "event_type": "record_opened"
+    },
+    "expected": null
+  },
+  {
+    "name": "ambiguous account across packs",
+    "input": {
+      "app_category": "crm",
+      "event_type": "record_opened",
+      "object_type": "account"
+    },
+    "expected": {
+      "domain": "revops",
+      "object": "account",
+      "action": "extract_field",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "bulk write on wildcard object",
+    "input": {
+      "event_type": "record_updated",
+      "object_type": "lead"
+    },
+    "expected": {
+      "domain": "revops",
+      "object": "lead",
+      "action": "draft_email",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "unknown object_type",
+    "input": {
+      "event_type": "record_opened",
+      "object_type": "definitely_not_a_pack_object"
+    },
+    "expected": null
+  }
+]

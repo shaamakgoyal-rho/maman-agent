@@ -5,6 +5,7 @@
 //! calling window's label (the pet window may never reach privileged surfaces).
 
 pub mod browser_bridge;
+pub mod domain;
 pub mod observer;
 pub mod redaction;
 pub mod store;
@@ -63,9 +64,18 @@ async fn store_guard<'a, R: Runtime>(
             service: KEYCHAIN_SERVICE.to_string(),
             account: KEYCHAIN_ACCOUNT.to_string(),
         };
-        let store = LocalStore::open(&dir.join("maman-local.sqlite"), &provider, "local-user")
-            .await
-            .map_err(|e| format!("store open failed: {e}"))?;
+        // Domain packs for the L1 classifier. Resolved from the bundled resource
+        // dir, falling back to the repo checkout in dev. Missing packs are fine:
+        // nothing gets classified and observation is unaffected.
+        let packs = domain::load_packs(&domain_packs_dir(app));
+        let store = LocalStore::open_with_packs(
+            &dir.join("maman-local.sqlite"),
+            &provider,
+            "local-user",
+            packs,
+        )
+        .await
+        .map_err(|e| format!("store open failed: {e}"))?;
         *guard = Some(store);
     }
     Ok(guard)
@@ -179,6 +189,43 @@ fn gate_event(settings: &GateSettings, event: &serde_json::Value) -> Result<Opti
         }
     }
     Ok(None)
+}
+
+/// Where compiled domain packs live: the bundled resource dir in a packaged app,
+/// else the repo checkout so `tauri dev` works without a build step.
+fn domain_packs_dir<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
+    if let Ok(resource) = app.path().resource_dir() {
+        let bundled = resource.join("domain/packs");
+        if bundled.is_dir() {
+            return bundled;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../domain/packs")
+}
+
+/// Loaded domains, their counts, and classifier coverage over the last 7 days.
+/// Panel-only: it reports on observation data.
+#[tauri::command]
+async fn packs_status<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    let store = guard.as_ref().expect("initialized");
+    let coverage = store
+        .classifier_coverage(7)
+        .await
+        .map_err(|e| format!("coverage query failed: {e}"))?;
+    Ok(serde_json::json!({
+        "packs": domain::pack_status(store.packs()),
+        "classified_last_7_days": coverage.0,
+        "events_last_7_days": coverage.1,
+        "coverage_pct": if coverage.1 == 0 { 0.0 } else {
+            (coverage.0 as f64 / coverage.1 as f64 * 1000.0).round() / 10.0
+        },
+    }))
 }
 
 fn config_path<R: Runtime>(app: &AppHandle<R>, file: &str) -> Result<PathBuf, String> {
@@ -1724,6 +1771,7 @@ pub fn run() {
             resolve_dev_identity,
             connector_authorize,
             observer_status,
+            packs_status,
             open_accessibility_settings
         ])
         .setup(|app| {

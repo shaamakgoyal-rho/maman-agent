@@ -11,6 +11,7 @@ packages/contracts/schemas
 # Generated from domain/packs/*.yaml by `pnpm packs:generate`; packs:check enforces
 # byte-equality with the generator, so prettier must not reformat them.
 domain/packs/*.json
+domain/classifier-conformance.json
 apps/desktop/src-tauri/gen
 # Vendored Seedy source — keep byte-identical to the upstream provenance package.
 apps/desktop/src/pet/assets/seedy-source
