@@ -1,0 +1,30 @@
+flowchart TB
+    subgraph packs["domain/packs/*.yaml — single source of domain truth"]
+        FIN["finops.yaml"]
+        REV["revops.yaml"]
+    end
+
+    subgraph device["On-device (local-first boundary)"]
+        OBS["AX Observer\nsemantic events"] --> RED["Redaction +\nallowlist / hard-deny"]
+        RED --> L1["L1 Domain classifier\n(domain, object, action)\n+ amount/pct extractors"]
+        L1 --> SEG["Segmenter\nepisode:closed"]
+        SEG --> TRACES[("episode_traces\nLOCAL ONLY")]
+        SEG --> L2["L2 Template matcher\n(pack signatures, N=2)\n→ novel clustering fallback"]
+        L2 --> VER["Replay verifier\nruns_tested / runs_matched"]
+        VER --> CARD["Suggestion card\n(L5 scheduler decides WHEN:\nfiscal / renewal / weekday)"]
+        CARD --> RUN["Step-gated run view"]
+        L3["L3 Policy engine\nSoD · autonomy caps ·\ndual control · immutable receipts"] --> RUN
+        RUN --> ACT["AX Actuator\n+ crm snapshot/revert"]
+        ACT --> RCPT[("receipts\nappend-only")]
+        TRACES --> EXP["L4 export_trajectories\n(opt-in, local output)"]
+        VER -. "grader for" .-> RS["L4 rejection_sample_plans\nSFT + DPO pairs\n+ holdout tripwire"]
+        EXP --> RS
+    end
+
+    packs --> L1
+    packs --> L2
+    packs --> L3
+    packs --> CARD
+
+    SYNC[("sync_outbox\ncoarse abstractions only")] 
+    SEG --> SYNC

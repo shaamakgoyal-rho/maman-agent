@@ -1,0 +1,150 @@
+# Maman domain pack: RevOps
+# Drop into repo at domain/packs/revops.yaml
+domain: revops
+version: 0.1.0
+
+# ---------- Layer 1: object & action taxonomy ----------
+objects:
+  - id: lead
+    detection_hints:
+      app_categories: [crm, marketing_automation, email]
+      label_patterns: ["lead", "MQL", "inbound"]
+  - id: contact
+  - id: account
+    detection_hints: { label_patterns: ["account", "company"] }
+  - id: opportunity
+    aliases: [deal, opp]
+    detection_hints: { label_patterns: ["opportunity", "deal", "stage", "close date"] }
+  - id: quote
+    aliases: [proposal]
+    detection_hints:
+      { app_categories: [cpq, esign], label_patterns: ["quote", "proposal", "pricing"] }
+  - id: contract
+    detection_hints:
+      {
+        app_categories: [esign, clm],
+        label_patterns: ["contract", "order form", "MSA", "signature"],
+      }
+  - id: renewal
+    detection_hints: { label_patterns: ["renewal", "expires", "term end"] }
+  - id: pipeline_report
+  - id: commission_line
+    detection_hints:
+      {
+        app_categories: [commissions, spreadsheet],
+        label_patterns: ["commission", "payout", "attainment"],
+      }
+  - id: activity_log
+    aliases: [call_note, meeting_note]
+
+actions:
+  - { id: open, risk: none }
+  - { id: extract_field, risk: none }
+  - { id: enrich, on: [lead, account, contact], risk: low }
+  - { id: route_lead, on: [lead], risk: medium }
+  - { id: update_crm_field, on: [lead, opportunity, account, contact], risk: medium }
+  - { id: advance_stage, on: [opportunity], risk: medium }
+  - { id: generate_quote, on: [quote, opportunity], risk: medium }
+  - { id: apply_discount, on: [quote], risk: high }
+  - { id: send_for_signature, on: [contract, quote], risk: critical } # external + binding
+  - { id: draft_email, risk: low }
+  - { id: send_email, risk: high } # external comms
+  - { id: log_activity, on: [activity_log], risk: low }
+  - { id: bulk_update, on: ["*"], risk: high } # CRM corruption risk
+  - { id: reconcile_commissions, on: [commission_line], risk: medium }
+
+# ---------- Layer 2: seed workflow templates ----------
+workflows:
+  - id: lead_routing
+    name: Inbound lead triage & routing
+    cadence: event_driven
+    signature:
+      - [open, lead, "*"]
+      - [enrich, lead, "*"]
+      - [update_crm_field, lead, owner_field]
+      - [route_lead|draft_email, lead, "*"]
+    min_reps_with_template: 2
+    trigger: { opening_ngram: 2 }
+    default_autonomy_ceiling: stage_only
+  - id: quote_to_cash
+    name: Quote generation from opportunity
+    cadence: continuous
+    signature:
+      - [open, opportunity, "*"]
+      - [extract_field, opportunity, "*"]
+      - [generate_quote, quote, "*"]
+      - [draft_email|send_for_signature, quote, "*"]
+    min_reps_with_template: 2
+  - id: renewal_motion
+    name: Renewal prep & outreach
+    cadence: date_driven # keyed to term-end dates, not fiscal calendar
+    signature:
+      - [open, renewal, "*"]
+      - [extract_field, renewal, "*"]
+      - [generate_quote|draft_email, "*", "*"]
+    min_reps_with_template: 2
+    pre_stage: { days_before_renewal: 30, mode: draft_only }
+  - id: pipeline_hygiene
+    name: Pipeline hygiene sweep
+    cadence: weekly
+    signature:
+      - [open, pipeline_report, "*"]
+      - [open, opportunity, "*"]
+      - [update_crm_field, opportunity, close_date|stage|next_step]
+    min_reps_with_template: 3
+    notes: bulk_update policy applies when >10 records in one episode
+  - id: meeting_logging
+    name: Post-meeting CRM logging
+    cadence: event_driven
+    signature:
+      - [open, activity_log, "*"]
+      - [extract_field, activity_log, "*"]
+      - [log_activity, activity_log, "*"]
+      - [update_crm_field, opportunity, next_step]
+    min_reps_with_template: 2
+  - id: commission_reconciliation
+    name: Commission statement reconciliation
+    cadence: fiscal_monthly
+    signature:
+      - [open, commission_line, "*"]
+      - [reconcile_commissions, commission_line, "*"]
+      - [flag_exception|draft_email, "*", "*"]
+    min_reps_with_template: 2
+
+# ---------- Layer 3: policy pack ----------
+policy:
+  segregation_of_duties:
+    - cannot_combine: [apply_discount, send_for_signature]
+    - cannot_combine: [reconcile_commissions, update_crm_field] # no self-dealing on comp inputs
+  autonomy_rules:
+    - match: { action: send_email }
+      rule: { max_level: draft_only } # ALL customer-facing comms draft-only, permanently
+    - match: { action: send_for_signature }
+      rule: { max_level: never_autonomous, dual_control: true }
+    - match: { action: apply_discount, discount_pct_gt: 10 }
+      rule: { always_gate: true }
+    - match: { action: bulk_update, record_count_gt: 10 }
+      rule: { max_level: dry_run_first, always_gate: true }
+    - match: { action: advance_stage }
+      rule: { max_level: stage_only }
+  receipts: { immutable: true, retain_days: 1095 }
+  crm_write_safety: { snapshot_before_write: true, revert_command: true }
+
+# ---------- Layer 5: proactivity tuning ----------
+proactivity:
+  calendar: none # RevOps is event/date-driven, not fiscal-periodic
+  event_triggers:
+    - {
+        watch: renewal,
+        field: term_end,
+        lead_days: 30,
+        copy: "{account}'s renewal is {days} out. I can draft the renewal packet — matched {runs_matched}/{runs_tested} on past renewals.",
+      }
+    - { watch: lead, condition: new_unrouted, surface: on_trigger }
+  suggestion_timing:
+    weekly_workflows: { surface: same_weekday_observed } # suggest the sweep when they usually do it
+    continuous_workflows: { surface: after_verification }
+  dismissal_learning:
+    source: suggestion_history
+    never_means: suppress_workflow_family
+    not_now_backoff_days: [14, 45, 120]

@@ -1,0 +1,343 @@
+{
+  "domain": "revops",
+  "version": "0.1.0",
+  "objects": [
+    {
+      "id": "lead",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": ["crm", "marketing_automation", "email"],
+        "label_patterns": ["lead", "MQL", "inbound"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "contact",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": [],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "account",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": ["account", "company"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "opportunity",
+      "aliases": ["deal", "opp"],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": ["opportunity", "deal", "stage", "close date"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "quote",
+      "aliases": ["proposal"],
+      "detection_hints": {
+        "app_categories": ["cpq", "esign"],
+        "label_patterns": ["quote", "proposal", "pricing"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "contract",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": ["esign", "clm"],
+        "label_patterns": ["contract", "order form", "MSA", "signature"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "renewal",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": ["renewal", "expires", "term end"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "pipeline_report",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": [],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "commission_line",
+      "aliases": [],
+      "detection_hints": {
+        "app_categories": ["commissions", "spreadsheet"],
+        "label_patterns": ["commission", "payout", "attainment"],
+        "target_roles": []
+      }
+    },
+    {
+      "id": "activity_log",
+      "aliases": ["call_note", "meeting_note"],
+      "detection_hints": {
+        "app_categories": [],
+        "label_patterns": [],
+        "target_roles": []
+      }
+    }
+  ],
+  "actions": [
+    {
+      "id": "open",
+      "risk": "none",
+      "on": []
+    },
+    {
+      "id": "extract_field",
+      "risk": "none",
+      "on": []
+    },
+    {
+      "id": "enrich",
+      "risk": "low",
+      "on": ["lead", "account", "contact"]
+    },
+    {
+      "id": "route_lead",
+      "risk": "medium",
+      "on": ["lead"]
+    },
+    {
+      "id": "update_crm_field",
+      "risk": "medium",
+      "on": ["lead", "opportunity", "account", "contact"]
+    },
+    {
+      "id": "advance_stage",
+      "risk": "medium",
+      "on": ["opportunity"]
+    },
+    {
+      "id": "generate_quote",
+      "risk": "medium",
+      "on": ["quote", "opportunity"]
+    },
+    {
+      "id": "apply_discount",
+      "risk": "high",
+      "on": ["quote"]
+    },
+    {
+      "id": "send_for_signature",
+      "risk": "critical",
+      "on": ["contract", "quote"]
+    },
+    {
+      "id": "draft_email",
+      "risk": "low",
+      "on": []
+    },
+    {
+      "id": "send_email",
+      "risk": "high",
+      "on": []
+    },
+    {
+      "id": "log_activity",
+      "risk": "low",
+      "on": ["activity_log"]
+    },
+    {
+      "id": "bulk_update",
+      "risk": "high",
+      "on": ["*"]
+    },
+    {
+      "id": "reconcile_commissions",
+      "risk": "medium",
+      "on": ["commission_line"]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "lead_routing",
+      "name": "Inbound lead triage & routing",
+      "cadence": "event_driven",
+      "signature": [
+        ["open", "lead", "*"],
+        ["enrich", "lead", "*"],
+        ["update_crm_field", "lead", "owner_field"],
+        ["route_lead|draft_email", "lead", "*"]
+      ],
+      "min_reps_with_template": 2,
+      "trigger": {
+        "opening_ngram": 2
+      },
+      "default_autonomy_ceiling": "stage_only"
+    },
+    {
+      "id": "quote_to_cash",
+      "name": "Quote generation from opportunity",
+      "cadence": "continuous",
+      "signature": [
+        ["open", "opportunity", "*"],
+        ["extract_field", "opportunity", "*"],
+        ["generate_quote", "quote", "*"],
+        ["draft_email|send_for_signature", "quote", "*"]
+      ],
+      "min_reps_with_template": 2
+    },
+    {
+      "id": "renewal_motion",
+      "name": "Renewal prep & outreach",
+      "cadence": "date_driven",
+      "signature": [
+        ["open", "renewal", "*"],
+        ["extract_field", "renewal", "*"],
+        ["generate_quote|draft_email", "*", "*"]
+      ],
+      "min_reps_with_template": 2,
+      "pre_stage": {
+        "days_before_renewal": 30,
+        "mode": "draft_only"
+      }
+    },
+    {
+      "id": "pipeline_hygiene",
+      "name": "Pipeline hygiene sweep",
+      "cadence": "weekly",
+      "signature": [
+        ["open", "pipeline_report", "*"],
+        ["open", "opportunity", "*"],
+        ["update_crm_field", "opportunity", "close_date|stage|next_step"]
+      ],
+      "min_reps_with_template": 3,
+      "notes": "bulk_update policy applies when >10 records in one episode"
+    },
+    {
+      "id": "meeting_logging",
+      "name": "Post-meeting CRM logging",
+      "cadence": "event_driven",
+      "signature": [
+        ["open", "activity_log", "*"],
+        ["extract_field", "activity_log", "*"],
+        ["log_activity", "activity_log", "*"],
+        ["update_crm_field", "opportunity", "next_step"]
+      ],
+      "min_reps_with_template": 2
+    },
+    {
+      "id": "commission_reconciliation",
+      "name": "Commission statement reconciliation",
+      "cadence": "fiscal_monthly",
+      "signature": [
+        ["open", "commission_line", "*"],
+        ["reconcile_commissions", "commission_line", "*"],
+        ["flag_exception|draft_email", "*", "*"]
+      ],
+      "min_reps_with_template": 2
+    }
+  ],
+  "policy": {
+    "segregation_of_duties": [
+      {
+        "cannot_combine": ["apply_discount", "send_for_signature"]
+      },
+      {
+        "cannot_combine": ["reconcile_commissions", "update_crm_field"]
+      }
+    ],
+    "autonomy_rules": [
+      {
+        "match": {
+          "action": "send_email"
+        },
+        "rule": {
+          "max_level": "draft_only"
+        }
+      },
+      {
+        "match": {
+          "action": "send_for_signature"
+        },
+        "rule": {
+          "max_level": "never_autonomous",
+          "dual_control": true
+        }
+      },
+      {
+        "match": {
+          "action": "apply_discount",
+          "discount_pct_gt": 10
+        },
+        "rule": {
+          "always_gate": true
+        }
+      },
+      {
+        "match": {
+          "action": "bulk_update",
+          "record_count_gt": 10
+        },
+        "rule": {
+          "max_level": "dry_run_first",
+          "always_gate": true
+        }
+      },
+      {
+        "match": {
+          "action": "advance_stage"
+        },
+        "rule": {
+          "max_level": "stage_only"
+        }
+      }
+    ],
+    "receipts": {
+      "immutable": true,
+      "retain_days": 1095
+    },
+    "amount_extraction_required_for": [],
+    "crm_write_safety": {
+      "snapshot_before_write": true,
+      "revert_command": true
+    }
+  },
+  "proactivity": {
+    "calendar": "none",
+    "quiet_periods": [],
+    "event_triggers": [
+      {
+        "watch": "renewal",
+        "field": "term_end",
+        "lead_days": 30,
+        "copy": "{account}'s renewal is {days} out. I can draft the renewal packet — matched {runs_matched}/{runs_tested} on past renewals."
+      },
+      {
+        "watch": "lead",
+        "condition": "new_unrouted",
+        "surface": "on_trigger"
+      }
+    ],
+    "suggestion_timing": {
+      "weekly_workflows": {
+        "surface": "same_weekday_observed"
+      },
+      "continuous_workflows": {
+        "surface": "after_verification"
+      }
+    },
+    "dismissal_learning": {
+      "source": "suggestion_history",
+      "never_means": "suppress_workflow_family",
+      "not_now_backoff_days": [14, 45, 120]
+    }
+  }
+}

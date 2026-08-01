@@ -1,0 +1,152 @@
+# Maman domain pack: FinOps
+# Drop into repo at domain/packs/finops.yaml
+# Consumed by: observer domain classifier (L1), template matcher (L2),
+#              policy engine (L3), suggestion scheduler (L5).
+domain: finops
+version: 0.1.0
+
+# ---------- Layer 1: object & action taxonomy ----------
+objects:
+  - id: invoice
+    aliases: [bill, vendor_invoice, ap_invoice]
+    detection_hints:
+      app_categories: [ap_automation, erp, email, pdf_viewer]
+      label_patterns: ["invoice", "INV-", "bill #", "amount due"]
+  - id: purchase_order
+    aliases: [po]
+    detection_hints: { label_patterns: ["PO-", "purchase order"] }
+  - id: receipt
+    aliases: [goods_receipt, grn]
+  - id: gl_entry
+    aliases: [journal_entry, journal, je]
+    detection_hints: { label_patterns: ["GL", "journal", "debit", "credit", "account code"] }
+  - id: accrual
+  - id: vendor
+    detection_hints: { label_patterns: ["vendor", "supplier", "payee"] }
+  - id: payment_run
+    detection_hints: { label_patterns: ["payment batch", "pay run", "ACH", "wire"] }
+  - id: expense_report
+  - id: close_task
+    aliases: [close_checklist_item]
+    detection_hints:
+      { app_categories: [close_management], label_patterns: ["close", "flux", "reconciliation"] }
+  - id: cost_anomaly
+    detection_hints:
+      {
+        app_categories: [cloud_cost, spend_management],
+        label_patterns: ["anomaly", "spike", "budget alert"],
+      }
+  - id: budget_line
+
+actions:
+  - { id: open, risk: none }
+  - { id: extract_field, risk: none }
+  - { id: code_invoice, on: [invoice, gl_entry], risk: medium } # assign GL code
+  - { id: three_way_match, on: [invoice, purchase_order, receipt], risk: medium }
+  - { id: approve_invoice, on: [invoice], risk: high }
+  - { id: reconcile, on: [gl_entry, close_task], risk: medium }
+  - { id: post_journal, on: [gl_entry, accrual], risk: high }
+  - { id: schedule_payment, on: [payment_run, invoice], risk: critical }
+  - { id: release_payment, on: [payment_run], risk: critical }
+  - { id: flag_exception, risk: low }
+  - { id: draft_email, risk: low }
+  - { id: send_email, risk: high } # external comms in a finance context
+  - { id: update_budget, on: [budget_line], risk: medium }
+
+# ---------- Layer 2: seed workflow templates ----------
+# signature tuples: [domain_action, domain_object, target_role]; "*" = wildcard.
+# min_reps_with_template: card may appear after this many observed matches
+# (template prior substitutes for repetition count; verifier still gates).
+workflows:
+  - id: invoice_intake
+    name: Invoice intake & coding
+    cadence: continuous
+    signature:
+      - [open, invoice, "*"]
+      - [extract_field, invoice, "*"]
+      - [code_invoice, gl_entry, "*"]
+      - [flag_exception|submit, invoice, "*"]
+    min_reps_with_template: 2
+    trigger: { opening_ngram: 2 } # watch live stream for first 2 tuples
+    default_autonomy_ceiling: stage_only # policy below may lower, never raise
+  - id: three_way_match
+    name: PO / invoice / receipt match
+    cadence: continuous
+    signature:
+      - [open, invoice, "*"]
+      - [open, purchase_order, "*"]
+      - [three_way_match, invoice, "*"]
+      - [approve_invoice|flag_exception, invoice, "*"]
+    min_reps_with_template: 2
+  - id: month_end_accruals
+    name: Month-end accrual journals
+    cadence: fiscal_monthly
+    signature:
+      - [open, close_task, "*"]
+      - [extract_field, accrual, "*"]
+      - [post_journal, accrual, "*"]
+    min_reps_with_template: 2 # i.e. two month-ends
+    pre_stage: { days_before_close: 3, mode: draft_only }
+  - id: bank_reconciliation
+    name: Bank / GL reconciliation
+    cadence: fiscal_monthly
+    signature:
+      - [open, gl_entry, "*"]
+      - [reconcile, gl_entry, "*"]
+      - [flag_exception|post_journal, gl_entry, "*"]
+    min_reps_with_template: 2
+  - id: spend_anomaly_triage
+    name: Cost anomaly triage
+    cadence: event_driven
+    signature:
+      - [open, cost_anomaly, "*"]
+      - [extract_field, cost_anomaly, "*"]
+      - [flag_exception|draft_email, "*", "*"]
+    min_reps_with_template: 3
+  - id: expense_review
+    name: Expense report review
+    cadence: weekly
+    signature:
+      - [open, expense_report, "*"]
+      - [extract_field, expense_report, "*"]
+      - [approve_invoice|flag_exception, expense_report, "*"]
+    min_reps_with_template: 3
+
+# ---------- Layer 3: policy pack (enforced in approval chain, precedes autonomy meter) ----------
+policy:
+  segregation_of_duties:
+    # an agent instance may not hold both actions across the same object instance
+    - cannot_combine: [code_invoice, approve_invoice]
+    - cannot_combine: [post_journal, reconcile]
+    - cannot_combine: [schedule_payment, release_payment]
+  autonomy_rules:
+    - match: { action: schedule_payment } # payment-adjacent
+      rule: { max_level: draft_only, dual_control: true }
+    - match: { action: release_payment }
+      rule: { max_level: never_autonomous, dual_control: true }
+    - match: { action: approve_invoice, amount_usd_gt: 5000 }
+      rule: { always_gate: true }
+    - match: { action: post_journal }
+      rule: { max_level: stage_only } # human posts; agent stages
+    - match: { action: send_email }
+      rule: { max_level: draft_only }
+  receipts: { immutable: true, retain_days: 2555 } # 7y, SOX-shaped
+  amount_extraction_required_for: [approve_invoice, schedule_payment] # gate if extractor confidence low
+
+# ---------- Layer 5: proactivity tuning ----------
+proactivity:
+  calendar: fiscal # detection windows & suggestion timing keyed to fiscal calendar
+  quiet_periods: [] # e.g. audit weeks; user-populated
+  suggestion_timing:
+    fiscal_monthly_workflows:
+      {
+        surface: pre_close,
+        days_before: 3,
+        copy: "Close starts {date}. I can pre-stage {workflow} — last cycle matched {runs_matched}/{runs_tested}.",
+      }
+    continuous_workflows: { surface: after_verification }
+    event_driven_workflows: { surface: on_trigger }
+  dismissal_learning:
+    source: suggestion_history
+    never_means: suppress_workflow_family # not just this pattern instance
+    not_now_backoff_days: [14, 45, 120]

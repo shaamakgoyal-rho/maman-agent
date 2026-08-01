@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://maman.local/domain/pack.schema.json",
+  "title": "Maman domain pack",
+  "description": "Single source of domain truth: taxonomy, seed workflow templates, policy, and proactivity tuning. Consumed by the on-device classifier (L1), the template matcher (L2), the policy engine (L3) and the suggestion scheduler (L5). A new domain must be addable by writing YAML only — no domain knowledge belongs in code.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["domain", "version", "objects", "actions", "workflows"],
+  "properties": {
+    "domain": {
+      "description": "Stable domain id. Namespaces every object/action/workflow id.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,31}$"
+    },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+
+    "objects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "aliases": { "type": "array", "items": { "$ref": "#/$defs/identifier" } },
+          "detection_hints": { "$ref": "#/$defs/detectionHints" }
+        }
+      }
+    },
+
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "risk"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "risk": { "enum": ["none", "low", "medium", "high", "critical"] },
+          "on": {
+            "description": "Object ids this action applies to; \"*\" for any.",
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "workflows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "cadence", "signature"],
+        "properties": {
+          "id": { "$ref": "#/$defs/identifier" },
+          "name": { "type": "string", "minLength": 1 },
+          "cadence": {
+            "enum": ["continuous", "fiscal_monthly", "weekly", "date_driven", "event_driven"]
+          },
+          "signature": {
+            "description": "Ordered tuples [domain_action, domain_object, target_role]. '*' is a wildcard; 'a|b' matches either.",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "min_reps_with_template": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "trigger": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "opening_ngram": { "type": "integer", "minimum": 1, "maximum": 10 } }
+          },
+          "default_autonomy_ceiling": { "$ref": "#/$defs/autonomyLevel" },
+          "pre_stage": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "days_before_close": { "type": "integer", "minimum": 0, "maximum": 60 },
+              "days_before_renewal": { "type": "integer", "minimum": 0, "maximum": 365 },
+              "mode": { "$ref": "#/$defs/autonomyLevel" }
+            }
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "segregation_of_duties": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cannot_combine"],
+            "properties": {
+              "cannot_combine": {
+                "type": "array",
+                "minItems": 2,
+                "items": { "$ref": "#/$defs/identifier" }
+              }
+            }
+          }
+        },
+        "autonomy_rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match", "rule"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action"],
+                "properties": {
+                  "action": { "$ref": "#/$defs/identifier" },
+                  "amount_usd_gt": { "type": "number", "minimum": 0 },
+                  "discount_pct_gt": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "record_count_gt": { "type": "integer", "minimum": 0 }
+                }
+              },
+              "rule": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "max_level": { "$ref": "#/$defs/autonomyLevel" },
+                  "always_gate": { "type": "boolean" },
+                  "dual_control": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "receipts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "immutable": { "type": "boolean" },
+            "retain_days": { "type": "integer", "minimum": 1, "maximum": 3650 }
+          }
+        },
+        "amount_extraction_required_for": {
+          "description": "Actions whose policy depends on an extracted amount. Low extractor confidence must fail CLOSED (treated as threshold exceeded).",
+          "type": "array",
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "crm_write_safety": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "snapshot_before_write": { "type": "boolean" },
+            "revert_command": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
+    "proactivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "calendar": { "enum": ["fiscal", "none"] },
+        "quiet_periods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start", "end"],
+            "properties": {
+              "start": { "type": "string", "format": "date" },
+              "end": { "type": "string", "format": "date" },
+              "label": { "type": "string" }
+            }
+          }
+        },
+        "event_triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["watch"],
+            "properties": {
+              "watch": { "$ref": "#/$defs/identifier" },
+              "field": { "type": "string" },
+              "lead_days": { "type": "integer", "minimum": 0, "maximum": 365 },
+              "condition": { "type": "string" },
+              "surface": { "type": "string" },
+              "copy": { "type": "string" }
+            }
+          }
+        },
+        "suggestion_timing": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "surface": { "type": "string" },
+              "days_before": { "type": "integer", "minimum": 0, "maximum": 60 },
+              "copy": { "type": "string" }
+            }
+          }
+        },
+        "dismissal_learning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": { "type": "string" },
+            "never_means": { "enum": ["suppress_workflow_family", "suppress_pattern"] },
+            "not_now_backoff_days": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 365 }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$" },
+    "autonomyLevel": {
+      "description": "Ceiling only — policy may lower autonomy, never raise it.",
+      "enum": ["draft_only", "stage_only", "dry_run_first", "never_autonomous"]
+    },
+    "detectionHints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "app_categories": { "type": "array", "items": { "type": "string" } },
+        "label_patterns": {
+          "description": "Matched against label text INSIDE the observer boundary, pre-hash. Only the derived domain tuple is ever emitted — raw label text never leaves the observer.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "target_roles": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

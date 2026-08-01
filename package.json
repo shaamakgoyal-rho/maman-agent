@@ -38,6 +38,8 @@
     "openapi:check": "pnpm --filter @maman/api openapi:check",
     "schemas:generate": "pnpm --filter @maman/contracts schemas:generate",
     "schemas:check": "pnpm --filter @maman/contracts schemas:check",
+    "packs:generate": "pnpm --filter @maman/domain-packs packs:generate",
+    "packs:check": "pnpm --filter @maman/domain-packs packs:check",
     "audit:dependencies": "pnpm audit --audit-level high",
     "audit:licenses": "bash scripts/audit-licenses.sh",
     "audit:secrets": "bash scripts/audit-secrets.sh"
