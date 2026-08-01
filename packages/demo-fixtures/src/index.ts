@@ -5,6 +5,7 @@ export {
   mulberry32,
   type FixtureOptions,
 } from "./reconciliation.js";
+export { liveWorkflowRepFixture, type LiveRepOptions } from "./live.js";
 export {
   DEMO_CSV_ROWS,
   DEMO_SF_ACCOUNTS,

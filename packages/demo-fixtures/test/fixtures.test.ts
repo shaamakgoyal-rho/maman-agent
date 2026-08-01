@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { workflowEventSchema } from "@maman/contracts";
-import { reconciliationFixture, unrelatedFixture } from "../src/index.js";
+import { liveWorkflowRepFixture, reconciliationFixture, unrelatedFixture } from "../src/index.js";
 
 describe("reconciliationFixture", () => {
   const events = reconciliationFixture();
@@ -83,5 +83,32 @@ describe("unrelatedFixture", () => {
   it("has no repeated step signature (nothing to cluster)", () => {
     const signatures = events.map((e) => `${e.app.display_name}:${e.event_type}`);
     expect(new Set(signatures).size).toBe(signatures.length);
+  });
+});
+
+describe("liveWorkflowRepFixture (relay-shaped live repetition)", () => {
+  it("emits point-in-time events: no duration_ms, chrome source, CRM domain, URL-derived context", () => {
+    const rep = liveWorkflowRepFixture({
+      rep_index: 0,
+      base_at_ms: Date.parse("2026-08-01T10:00:00Z"),
+    });
+    expect(rep).toHaveLength(4);
+    for (const e of rep) {
+      expect(e.duration_ms).toBeUndefined();
+      expect(e.source).toBe("chrome");
+      expect(e.app.domain).toBe("acme.lightning.force.com");
+    }
+    expect(rep[0]!.context.object_type).toBe("account");
+    expect(rep.filter((e) => e.event_type === "value_committed")).toHaveLength(2);
+  });
+
+  it("is deterministic per (rep_index, base) and lays reps out back-to-back", () => {
+    const base = Date.parse("2026-08-01T10:00:00Z");
+    const a = liveWorkflowRepFixture({ rep_index: 1, base_at_ms: base });
+    const b = liveWorkflowRepFixture({ rep_index: 1, base_at_ms: base });
+    expect(a).toEqual(b);
+    const rep0 = liveWorkflowRepFixture({ rep_index: 0, base_at_ms: base });
+    const gap = Date.parse(a[0]!.occurred_at) - Date.parse(rep0[3]!.occurred_at);
+    expect(gap).toBe(50_000); // 95s spacing − 3×15s steps: under the 90s demo boundary
   });
 });

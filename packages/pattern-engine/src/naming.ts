@@ -73,9 +73,10 @@ export function deterministicName(
   }
 
   const medianMinutes = Math.round(candidate.median_duration_ms / 60_000);
+  const dayWord = candidate.distinct_day_count === 1 ? "day" : "days";
   const summary =
     `I noticed you completed a similar workflow ${candidate.occurrence_count} times across ` +
-    `${candidate.distinct_day_count} days. The median run took ${medianMinutes} minutes. ` +
+    `${candidate.distinct_day_count} ${dayWord}. The median run took ${medianMinutes} minutes. ` +
     `I can draft a helper and show you what it would do before anything changes.`;
 
   // Redacted evidence steps (≤5 by default; the UI can expand).

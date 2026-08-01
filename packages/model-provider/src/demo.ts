@@ -23,15 +23,19 @@ export class DemoModelProvider implements ModelProvider {
       return { ok: false, error: "invalid_output", detail: "invalid naming input" };
     }
     const { generalized_intent, app_categories, object_type } = parsed.data;
-    const apps = app_categories.join(" and ");
+    const apps = app_categories.length > 0 ? app_categories.join(" and ") : "your apps";
+    const updateMatch = /^update_([a-z0-9_]+)_records$/.exec(generalized_intent);
     const candidate: NamingOutput = {
       title:
         generalized_intent === "reconcile_account_list"
           ? "Reconcile account lists with Salesforce"
-          : `Automate your ${object_type} workflow across ${apps}`.slice(0, 80),
+          : updateMatch
+            ? `Update Salesforce ${updateMatch[1]} records`.slice(0, 80)
+            : `Automate your ${object_type} workflow across ${apps}`.slice(0, 80),
       summary:
         `I noticed you completed a similar workflow ${parsed.data.occurrence_count} times across ` +
-        `${parsed.data.distinct_day_count} days. The median run took ` +
+        `${parsed.data.distinct_day_count} ${parsed.data.distinct_day_count === 1 ? "day" : "days"}. ` +
+        `The median run took ` +
         `${Math.round(parsed.data.median_duration_minutes)} minutes. I can draft a helper and ` +
         `show you what it would do before anything changes.`,
       generalized_intent,
