@@ -25,6 +25,45 @@ depth for authenticity: every number comes from what you just did.
   demo tuning is active, and the Forming view always displays the effective
   bars.
 
+## One-time on-device setup (native app + real extension)
+
+Do this once per machine; steps 3–6 need human clicks macOS/Chrome will not let
+any tool automate (a file-picker dialog, a Chrome permission prompt, and the
+Accessibility grant).
+
+```bash
+pnpm --filter @maman/chrome-extension build
+pnpm --filter @maman/desktop build:observer
+cd apps/desktop && pnpm tauri build && cd -
+bash scripts/dev-codesign.sh
+rm -rf /Applications/Maman.app && cp -R apps/desktop/src-tauri/target/release/bundle/macos/Maman.app /Applications/
+```
+
+1. Launch `/Applications/Maman.app`; grant **System Settings → Privacy &
+   Security → Accessibility → Maman** and click "Always Allow" on the first
+   keychain prompt (both persist — the build has a stable signing identity).
+2. In Chrome: `chrome://extensions` → enable **Developer mode** → **Load
+   unpacked** → select `extensions/chrome/dist`. Copy the ID Chrome shows.
+3. Install the native host for **that exact ID** (Chrome derives an unpacked
+   extension's ID from its absolute path, so it changes if `dist` moves):
+
+   ```bash
+   bash scripts/install-native-host-macos.sh <extension-id-from-chrome>
+   ```
+
+   The manifest is the host's only allowlist source, so re-run this whenever the
+   ID changes. Then reload the extension in Chrome.
+
+4. Maman panel (⌃⌥P) → **Settings → Browser extension** → copy the pairing token
+   (valid 5 minutes) → paste it into the extension popup → **Pair**.
+5. Open your CRM tab → extension popup → **Enable on this site** → accept
+   Chrome's host-permission prompt.
+6. Panel → **Privacy → Allowed sites**: confirm the domain is listed.
+
+Verify the relay is really connected before demoing: the extension popup shows
+the site under its enabled list, and `Activity` gains `chrome`-source rows as
+you click around.
+
 ## Prerequisites
 
 - The desktop app running (`pnpm --filter @maman/desktop tauri dev`, or the
@@ -76,6 +115,9 @@ depth for authenticity: every number comes from what you just did.
 | Forming stuck on "Safe steps a helper can do"    | The domain categorized as generic "browser", not CRM — use a salesforce.com / force.com / HubSpot domain.                                                                                     |
 | Card appears but "Try it" reports it can't draft | The pattern's intent has no deterministic recipe (non-CRM shape). Expected honesty: only CRM update/reconcile shapes compile today.                                                           |
 | Pet never waves                                  | Quiet hours (default 18:00–08:30) or daily budget gate the proactive wave only — the card is still in the panel.                                                                              |
+| Extension popup: "Pairing failed: origin_denied" | The installed native-host manifest doesn't list this extension's ID. Re-run `scripts/install-native-host-macos.sh <id>` with the ID from `chrome://extensions`, then reload the extension.    |
+| "Pairing failed: no pairing pending"             | The token expired (5 min) or was already used — copy a fresh one from Settings → Browser extension.                                                                                           |
+| "desktop core unavailable"                       | The Maman app isn't running; its Unix socket only exists while it is.                                                                                                                         |
 
 ## Same-day math under the preset
 

@@ -14,10 +14,19 @@ The production extension ID is set the same way once the extension is packed
 and published; it also lands in `packages/config/src/product.ts`
 (`chrome.productionExtensionId`).
 
+The installed manifest's `allowed_origins` is the **single source of truth** for
+which extensions may reach the host: Chrome checks it before launching the host,
+and the host re-reads the same file for its own allowlist (Chrome cannot pass
+environment variables to a native host, so the host cannot be configured any
+other way). Re-run the installer whenever the extension ID changes — Chrome
+assigns unpacked builds an ID derived from their absolute path, so moving the
+`dist` directory changes it.
+
 ## Pairing protocol (spec §10)
 
 1. The installed native-host manifest allowlists only the production extension
-   ID and the documented development ID (`allowed_origins`).
+   ID and the documented development ID (`allowed_origins`); the host derives
+   its own allowlist from that same manifest.
 2. The desktop generates a 32-byte base64url one-time token
    (`pairing_begin`, panel-only), stores **only its SHA-256 hash** with a
    five-minute expiry, and displays the token in Settings → Browser extension.
