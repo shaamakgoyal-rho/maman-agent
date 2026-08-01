@@ -80,7 +80,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Build + stage the observer sidecar (required by the Tauri build script)
-        run: bash scripts/build-observer.sh
+        run: bash apps/desktop/scripts/build-observer.sh
+      # build-observer.sh exits 0 when it skips (non-macOS, or no swift found).
+      # Without this guard a skip surfaces much later as Tauri's opaque
+      # "resource path ... doesn't exist", so fail here with the real reason.
+      - name: Verify the sidecar was staged for the host triple
+        run: |
+          triple="$(rustc -vV | awk '/host:/ {print $2}')"
+          staged="apps/desktop/src-tauri/binaries/maman-observer-$triple"
+          if [[ ! -x "$staged" ]]; then
+            echo "observer sidecar missing at $staged — build-observer.sh skipped or failed" >&2
+            exit 1
+          fi
+          echo "staged: $staged"
       - name: Run Rust tests (desktop crate)
         run: bash scripts/test-rust.sh desktop
 
