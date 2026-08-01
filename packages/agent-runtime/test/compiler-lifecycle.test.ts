@@ -236,3 +236,46 @@ describe("agent lifecycle (spec §13)", () => {
     }
   });
 });
+
+describe("derived-intent recipe matching (live-detected patterns)", () => {
+  it("update_account_records compiles via the deterministic recipe", async () => {
+    const result = await compileAgentSpec(
+      request({ generalized_intent: "update_account_records" }),
+    );
+    expect(result.status).toBe("valid");
+    if (result.status !== "valid") return;
+    expect(result.compiled_by).toBe("recipe");
+    const query = result.spec.steps.find((s) => s.capability_id === "salesforce.query_records")!;
+    expect(query.inputs["object"]).toEqual({ source: "literal", value: "Account" });
+    // Same safe shape: single approval-gated write.
+    const write = result.spec.steps.find((s) => s.mode === "write")!;
+    expect(write.approval.required).toBe(true);
+  });
+
+  it("the queried object follows the intent (update_opportunity_records → Opportunity)", async () => {
+    const result = await compileAgentSpec(
+      request({ generalized_intent: "update_opportunity_records" }),
+    );
+    expect(result.status).toBe("valid");
+    if (result.status !== "valid") return;
+    expect(result.compiled_by).toBe("recipe");
+    const query = result.spec.steps.find((s) => s.capability_id === "salesforce.query_records")!;
+    expect(query.inputs["object"]).toEqual({ source: "literal", value: "Opportunity" });
+  });
+
+  it("an unknown-object update intent falls back to Account, never garbage", async () => {
+    const result = await compileAgentSpec(request({ generalized_intent: "update_record_records" }));
+    expect(result.status).toBe("valid");
+    if (result.status !== "valid") return;
+    const query = result.spec.steps.find((s) => s.capability_id === "salesforce.query_records")!;
+    expect(query.inputs["object"]).toEqual({ source: "literal", value: "Account" });
+  });
+
+  it("a non-CRM intent still routes to the model path, not the recipe", async () => {
+    const result = await compileAgentSpec(
+      request({ generalized_intent: "generate_account_report", model: new DemoModelProvider() }),
+    );
+    // Demo model path produces an inert-but-valid or blocked result — never the recipe.
+    if (result.status === "valid") expect(result.compiled_by).toBe("model");
+  });
+});

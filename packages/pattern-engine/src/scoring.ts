@@ -10,7 +10,23 @@ import type { SegmentedEpisode } from "./segmentation.js";
 
 export const OPPORTUNITY_THRESHOLD = 0.65;
 
-export const ELIGIBILITY = {
+export type EligibilityThresholds = {
+  min_occurrences: number;
+  min_distinct_days: number;
+  min_similarity_mean: number;
+  min_projected_minutes_weekly: number;
+  min_feasibility: number;
+  max_risk: number;
+  dismissal_cooldown_days: number;
+};
+
+/**
+ * Production eligibility bars. Volume/recency bars (occurrences, days,
+ * projected minutes) and the opportunity ranking bar may be tuned at runtime
+ * via EngineOptions; the safety bars (similarity, feasibility, risk) are
+ * deliberately NOT overridable — see engine.ts.
+ */
+export const ELIGIBILITY: EligibilityThresholds = {
   min_occurrences: 3,
   min_distinct_days: 2,
   min_similarity_mean: 0.82,
@@ -18,7 +34,7 @@ export const ELIGIBILITY = {
   min_feasibility: 0.6,
   max_risk: 0.7,
   dismissal_cooldown_days: 14,
-} as const;
+};
 
 const WORKDAYS_PER_WEEK = 5;
 /** Share of manual time an automated helper realistically returns. */

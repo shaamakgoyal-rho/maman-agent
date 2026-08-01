@@ -233,6 +233,7 @@ function SuggestionCard({
   ) => Promise<void>;
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const [draftError, setDraftError] = useState<string | null>(null);
   const title = item.entry.custom_title ?? rec.title;
   const divergences = v.results.filter((r) => r.verdict !== "match");
 
@@ -329,13 +330,22 @@ function SuggestionCard({
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button
             onClick={async () => {
+              setDraftError(null);
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+              // The pattern's own derived intent selects the compiler recipe;
+              // the legacy reconciliation intent stays the fallback.
               const created = await useAgents
                 .getState()
-                .createDraft(item.candidate, "reconcile_account_list", rec.summary);
+                .createDraft(
+                  item.candidate,
+                  rec.generalized_intent ?? "reconcile_account_list",
+                  rec.summary,
+                );
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
               if (created.ok) {
                 await act(item.signature, { type: "accepted" });
+              } else {
+                setDraftError(created.message);
               }
             }}
           >
@@ -355,6 +365,7 @@ function SuggestionCard({
           </Button>
         </div>
       )}
+      {draftError && <p className="mt-2 text-xs text-danger">{draftError}</p>}
       {item.entry.status === "accepted" && (
         <p className="mt-3 text-xs text-success">
           Draft agent created — inspect its full plan in the Agents tab. It drafts and stages only;

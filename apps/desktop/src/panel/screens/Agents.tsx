@@ -187,8 +187,18 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
   const start = async (mode: "shadow" | "supervised") => {
     setStartError(null);
     if (!serverMode) {
-      if (mode === "shadow") await localRuns.startShadow(candidateFor(agent));
-      else await localRuns.startSupervised(candidateFor(agent));
+      if (mode === "shadow")
+        await localRuns.startShadow(
+          candidateFor(agent),
+          agent.generalized_intent,
+          agent.desired_outcome,
+        );
+      else
+        await localRuns.startSupervised(
+          candidateFor(agent),
+          agent.generalized_intent,
+          agent.desired_outcome,
+        );
       return;
     }
     setStarting(true);

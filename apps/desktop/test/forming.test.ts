@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ELIGIBILITY } from "@maman/pattern-engine";
 import type { PatternCandidate } from "@maman/contracts";
 import { patternGates } from "../src/lib/forming.js";
 
@@ -97,5 +98,33 @@ describe("patternGates (forming progress)", () => {
   it("high risk fails the low-risk check", () => {
     const p = patternGates(candidate({ risk_score: 0.9 }));
     expect(p.gates.find((g) => g.key === "risk")!.met).toBe(false);
+  });
+});
+
+describe("effective bars (live demo tuning)", () => {
+  it("gates evaluate and display the tuned values, not the production defaults", () => {
+    const c = candidate({
+      occurrence_count: 4,
+      distinct_day_count: 1,
+      projected_minutes_saved_weekly: 8,
+    });
+    const tuned = patternGates(c, undefined, {
+      eligibility: {
+        ...ELIGIBILITY,
+        min_occurrences: 3,
+        min_distinct_days: 1,
+        min_projected_minutes_weekly: 3,
+      },
+      opportunity_threshold: 0.5,
+    });
+    const byKey = Object.fromEntries(tuned.gates.map((g) => [g.key, g]));
+    expect(byKey["repeats"]!.met).toBe(true);
+    expect(byKey["repeats"]!.detail).toBe("4 of 3 times");
+    expect(byKey["days"]!.met).toBe(true);
+    expect(byKey["days"]!.detail).toBe("1 of 1 days");
+    expect(byKey["time"]!.met).toBe(true);
+    // Production bars would fail the same candidate on days.
+    const prod = patternGates(c);
+    expect(Object.fromEntries(prod.gates.map((g) => [g.key, g]))["days"]!.met).toBe(false);
   });
 });

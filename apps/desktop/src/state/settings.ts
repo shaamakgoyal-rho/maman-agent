@@ -37,6 +37,18 @@ export const localSettingsSchema = z
     verify_min_match_pct: z.number().min(0).max(1).default(0.85),
     /** How many of the most recent recorded runs to replay against. */
     verify_window: z.number().int().min(1).max(100).default(21),
+    // Detection tuning: each value maps 1:1 to a real pattern-engine bar and
+    // the Forming UI always displays the EFFECTIVE values, so lowering a bar
+    // is visible, never hidden. The safety bars (similarity, feasibility,
+    // risk) are deliberately not settings — the engine refuses to tune them.
+    detect_min_occurrences: z.number().int().min(2).max(20).default(3),
+    detect_min_distinct_days: z.number().int().min(1).max(14).default(2),
+    detect_min_projected_minutes_weekly: z.number().min(0).max(600).default(20),
+    detect_opportunity_threshold: z.number().min(0).max(1).default(0.65),
+    /** Idle gap (seconds) that closes an episode — lower to split quick reps. */
+    detect_event_gap_boundary_s: z.number().int().min(30).max(3600).default(600),
+    /** Split back-to-back repetitions when the workflow's first step recurs. */
+    detect_split_on_sequence_restart: z.boolean().default(false),
     /** Approved supervised runs required before draft autonomy can be granted. */
     autonomy_min_approved_runs: z.number().int().min(1).max(50).default(5),
     // Maman server enrollment (display only — the device TOKEN never reaches the
@@ -54,6 +66,50 @@ export const localSettingsSchema = z
 export type LocalSettings = z.infer<typeof localSettingsSchema>;
 
 export const DEFAULT_SETTINGS: LocalSettings = localSettingsSchema.parse({});
+
+/** The detection-tuning knobs, as one patch (used by the Settings presets). */
+export type DetectionTuning = Pick<
+  LocalSettings,
+  | "detect_min_occurrences"
+  | "detect_min_distinct_days"
+  | "detect_min_projected_minutes_weekly"
+  | "detect_opportunity_threshold"
+  | "detect_event_gap_boundary_s"
+  | "detect_split_on_sequence_restart"
+  | "verify_min_runs"
+>;
+
+export const DETECTION_PRODUCTION: DetectionTuning = {
+  detect_min_occurrences: DEFAULT_SETTINGS.detect_min_occurrences,
+  detect_min_distinct_days: DEFAULT_SETTINGS.detect_min_distinct_days,
+  detect_min_projected_minutes_weekly: DEFAULT_SETTINGS.detect_min_projected_minutes_weekly,
+  detect_opportunity_threshold: DEFAULT_SETTINGS.detect_opportunity_threshold,
+  detect_event_gap_boundary_s: DEFAULT_SETTINGS.detect_event_gap_boundary_s,
+  detect_split_on_sequence_restart: DEFAULT_SETTINGS.detect_split_on_sequence_restart,
+  verify_min_runs: DEFAULT_SETTINGS.verify_min_runs,
+};
+
+/**
+ * Live-demo preset: detect a workflow repeated ~4× in one sitting. Lowers only
+ * volume/recency/value bars (never similarity, feasibility, or risk) and turns
+ * on repetition splitting so back-to-back runs count separately.
+ */
+export const DETECTION_LIVE_DEMO: DetectionTuning = {
+  detect_min_occurrences: 3,
+  detect_min_distinct_days: 1,
+  detect_min_projected_minutes_weekly: 3,
+  detect_opportunity_threshold: 0.5,
+  detect_event_gap_boundary_s: 90,
+  detect_split_on_sequence_restart: true,
+  verify_min_runs: 3,
+};
+
+/** True when any detection bar differs from the production default. */
+export function detectionTuned(s: LocalSettings): boolean {
+  return (Object.keys(DETECTION_PRODUCTION) as Array<keyof DetectionTuning>).some(
+    (k) => s[k] !== DETECTION_PRODUCTION[k],
+  );
+}
 
 /**
  * Desktop-app presets (macOS bundle ids) the AX observer can watch. Browser

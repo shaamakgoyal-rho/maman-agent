@@ -75,4 +75,15 @@ describe("capability catalog (v1)", () => {
     );
     expect(capabilitiesForToken("chrome:other:unknown_event:-:-:-")).toEqual([]);
   });
+
+  it("maps the live CRM edit vocabulary (value_committed / element_focused)", () => {
+    // Live observation records field edits as value_committed — same business
+    // action (and capabilities) as the fixtures' record_updated.
+    expect(
+      capabilitiesForToken("browser_extension:crm:value_committed:input:account_name:account"),
+    ).toEqual(["salesforce.propose_field_updates", "salesforce.update_fields"]);
+    expect(capabilitiesForToken("macos_ax:crm:element_focused:AXTextField:-:-")).toEqual([
+      "salesforce.get_record",
+    ]);
+  });
 });

@@ -4,7 +4,11 @@ import {
   type PatternFeatureEvent,
   type Recommendation,
 } from "@maman/contracts";
-import { segmentEpisodes, type SegmentedEpisode } from "./segmentation.js";
+import {
+  segmentEpisodes,
+  type SegmentationOptions,
+  type SegmentedEpisode,
+} from "./segmentation.js";
 import { clusterEpisodes, DEFAULT_SIMILARITY_THRESHOLD } from "./similarity.js";
 import {
   distinctDayCount,
@@ -14,6 +18,7 @@ import {
   percentile,
   representativeSequence,
   scorePattern,
+  type EligibilityThresholds,
 } from "./scoring.js";
 import { deterministicName, type NamingResult } from "./naming.js";
 
@@ -24,6 +29,16 @@ import { deterministicName, type NamingResult } from "./naming.js";
  * optional model naming lives in model-provider and may only rewrite copy).
  */
 
+/**
+ * The only eligibility bars callers may tune: volume/recency/value bars.
+ * The safety bars (min_similarity_mean, min_feasibility, max_risk) are
+ * deliberately absent — no option can loosen them.
+ */
+export type TunableEligibility = Pick<
+  EligibilityThresholds,
+  "min_occurrences" | "min_distinct_days" | "min_projected_minutes_weekly"
+>;
+
 export type EngineOptions = {
   owner_user_id: string;
   /** Injectable clock for determinism. */
@@ -33,7 +48,28 @@ export type EngineOptions = {
   recently_dismissed_signatures?: string[];
   /** Permanently suppressed signatures ("never suggest this"). */
   suppressed_signatures?: string[];
+  /** Tunable volume bars (clamped to sane floors); safety bars are not tunable. */
+  eligibility?: Partial<TunableEligibility>;
+  /** Ranking bar for surfacing (0..1); not a safety bar. */
+  opportunity_threshold?: number;
+  /** Episode boundary tuning (gap boundary, back-to-back repetition split). */
+  segmentation?: SegmentationOptions;
 };
+
+/** Effective bars: overrides merged over production defaults, clamped. */
+export function effectiveEligibility(
+  overrides?: Partial<TunableEligibility>,
+): EligibilityThresholds {
+  return {
+    ...ELIGIBILITY,
+    min_occurrences: Math.max(2, overrides?.min_occurrences ?? ELIGIBILITY.min_occurrences),
+    min_distinct_days: Math.max(1, overrides?.min_distinct_days ?? ELIGIBILITY.min_distinct_days),
+    min_projected_minutes_weekly: Math.max(
+      0,
+      overrides?.min_projected_minutes_weekly ?? ELIGIBILITY.min_projected_minutes_weekly,
+    ),
+  };
+}
 
 /**
  * A pattern Maman is watching form but that has NOT yet crossed every
@@ -63,7 +99,12 @@ export function runPatternEngine(
   options: EngineOptions,
 ): EngineResult {
   const threshold = options.similarity_threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
-  const episodes = segmentEpisodes(events);
+  const eligibility = effectiveEligibility(options.eligibility);
+  const opportunityThreshold = Math.min(
+    1,
+    Math.max(0, options.opportunity_threshold ?? OPPORTUNITY_THRESHOLD),
+  );
+  const episodes = segmentEpisodes(events, options.segmentation ?? {});
 
   // Learn only from includable episodes; excluded ones still display in the
   // timeline but never feed a pattern.
@@ -103,18 +144,18 @@ export function runPatternEngine(
     const dismissedRecently = options.recently_dismissed_signatures?.includes(signature) ?? false;
 
     const eligible =
-      members.length >= ELIGIBILITY.min_occurrences &&
-      days >= ELIGIBILITY.min_distinct_days &&
-      cluster.similarity_mean >= ELIGIBILITY.min_similarity_mean &&
-      scores.projected_minutes_saved_weekly >= ELIGIBILITY.min_projected_minutes_weekly &&
-      scores.feasibility_score >= ELIGIBILITY.min_feasibility &&
-      scores.risk_score <= ELIGIBILITY.max_risk &&
+      members.length >= eligibility.min_occurrences &&
+      days >= eligibility.min_distinct_days &&
+      cluster.similarity_mean >= eligibility.min_similarity_mean &&
+      scores.projected_minutes_saved_weekly >= eligibility.min_projected_minutes_weekly &&
+      scores.feasibility_score >= eligibility.min_feasibility &&
+      scores.risk_score <= eligibility.max_risk &&
       !members.some((m) => m.excluded_from_learning) &&
       !members.some((m) => m.sensitivity_max === "restricted") &&
       !dismissedRecently &&
       !suppressed;
 
-    const surfaceable = eligible && scores.opportunity_score >= OPPORTUNITY_THRESHOLD;
+    const surfaceable = eligible && scores.opportunity_score >= opportunityThreshold;
 
     const candidate: PatternCandidate = {
       pattern_id: uuidv7({
@@ -169,6 +210,7 @@ function buildRecommendation(
     owner_user_id: candidate.owner_user_id,
     title: naming.title,
     summary: naming.summary,
+    generalized_intent: naming.generalized_intent,
     evidence: {
       occurrence_count: candidate.occurrence_count,
       distinct_day_count: candidate.distinct_day_count,

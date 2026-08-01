@@ -239,6 +239,45 @@ mod tests {
     }
 
     #[test]
+    fn shape_conversion_passes_url_derived_context_through() {
+        // The extension's contextFromUrl emits object_type/page_type; both
+        // must survive into the stored WorkflowEvent context untouched.
+        let shape = json!({
+            "event_type": "navigation",
+            "target": {},
+            "context": {"object_type": "account", "page_type": "record"},
+            "domain": "acme.lightning.force.com"
+        });
+        let event = shape_to_workflow_event(
+            &shape,
+            ("d", "u", "o"),
+            100,
+            "2026-07-17T18:00:00.000Z",
+            "e2",
+        )
+        .unwrap();
+        assert_eq!(event["context"]["object_type"], "account");
+        assert_eq!(event["context"]["page_type"], "record");
+
+        // Older extensions that still send an empty context stay valid.
+        let bare = json!({
+            "event_type": "navigation",
+            "target": {},
+            "context": {},
+            "domain": "acme.lightning.force.com"
+        });
+        let event = shape_to_workflow_event(
+            &bare,
+            ("d", "u", "o"),
+            100,
+            "2026-07-17T18:00:00.000Z",
+            "e3",
+        )
+        .unwrap();
+        assert_eq!(event["context"], json!({}));
+    }
+
+    #[test]
     fn pairing_token_hashing_is_one_way() {
         let token = "some-one-time-token";
         let hash = sha256_hex(token.as_bytes());

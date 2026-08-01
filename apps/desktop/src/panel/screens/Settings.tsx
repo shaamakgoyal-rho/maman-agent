@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { product } from "@maman/config";
-import { useSettings } from "../../state/settings.js";
+import {
+  DETECTION_LIVE_DEMO,
+  DETECTION_PRODUCTION,
+  detectionTuned,
+  useSettings,
+} from "../../state/settings.js";
 import { useEnrollment } from "../../state/enrollment.js";
 import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle, Toggle } from "../ui.js";
@@ -132,6 +137,96 @@ export function Settings() {
               className="rounded-lg border border-line bg-panel px-2 py-1 text-sm"
             />
           </div>
+        </div>
+      </Card>
+
+      <Card>
+        <SectionTitle>Detection tuning</SectionTitle>
+        <Muted>
+          The bars a pattern must clear before Maman suggests a helper. Lowering them makes
+          suggestions form faster (useful for a live demo); the Forming view always shows the
+          effective values. Consistency, feasibility, and risk bars are fixed and cannot be
+          loosened.
+        </Muted>
+        {detectionTuned(settings) && (
+          <p className="mt-2 rounded-lg border border-warning/40 bg-warning/10 px-2 py-1 text-xs text-warning">
+            Detection bars are below production defaults (demo tuning active).
+          </p>
+        )}
+        <div className="mt-2 space-y-1.5">
+          {(
+            [
+              {
+                key: "detect_min_occurrences",
+                label: "Repeats needed",
+                hint: "Times a workflow must recur",
+                min: 2,
+                max: 20,
+              },
+              {
+                key: "detect_min_distinct_days",
+                label: "Separate days needed",
+                hint: "1 = same-day suggestions allowed",
+                min: 1,
+                max: 14,
+              },
+              {
+                key: "detect_min_projected_minutes_weekly",
+                label: "Min. minutes saved / week",
+                hint: "Projected value bar",
+                min: 0,
+                max: 600,
+              },
+              {
+                key: "verify_min_runs",
+                label: "Runs to prove against",
+                hint: "Replay-verification volume floor",
+                min: 1,
+                max: 100,
+              },
+              {
+                key: "detect_event_gap_boundary_s",
+                label: "Run boundary (seconds idle)",
+                hint: "A pause this long ends a run",
+                min: 30,
+                max: 3600,
+              },
+            ] as const
+          ).map((f) => (
+            <div key={f.key} className="flex items-center justify-between gap-3 py-0.5">
+              <div>
+                <p className="text-sm">{f.label}</p>
+                <Muted>{f.hint}</Muted>
+              </div>
+              <input
+                type="number"
+                aria-label={f.label}
+                min={f.min}
+                max={f.max}
+                value={settings[f.key]}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v)) void update({ [f.key]: v });
+                }}
+                className="w-20 rounded-lg border border-line bg-panel px-2 py-1 text-right text-sm"
+              />
+            </div>
+          ))}
+          <Toggle
+            id="detect-split-on-restart"
+            checked={settings.detect_split_on_sequence_restart}
+            onChange={(v) => void update({ detect_split_on_sequence_restart: v })}
+            label="Split back-to-back repetitions"
+            description="Count immediate re-runs of a workflow as separate runs."
+          />
+        </div>
+        <div className="mt-2 flex gap-2">
+          <Button variant="secondary" onClick={() => void update({ ...DETECTION_LIVE_DEMO })}>
+            Live demo preset
+          </Button>
+          <Button variant="ghost" onClick={() => void update({ ...DETECTION_PRODUCTION })}>
+            Reset to production
+          </Button>
         </div>
       </Card>
 

@@ -188,3 +188,105 @@ describe("episode segmentation", () => {
     expect(token).not.toMatch(/11_50|12345|2026/);
   });
 });
+
+describe("derived durations (live events without duration_ms)", () => {
+  let liveCounter = 1000;
+  function liveEvt(iso: string, overrides: Partial<PatternFeatureEvent> = {}): PatternFeatureEvent {
+    liveCounter++;
+    // No duration_ms — matches what the AX observer and browser relay emit.
+    return {
+      event_id: `00000000-0000-7000-8000-${String(liveCounter).padStart(12, "0")}`,
+      occurred_at: iso,
+      monotonic_ms: liveCounter * 1000,
+      source: "chrome",
+      app_category: "crm",
+      event_type: "value_committed",
+      target_role: "input",
+      semantic_type: "account_name",
+      sensitivity: "internal",
+      excluded_from_learning: false,
+      ...overrides,
+    };
+  }
+
+  it("forms an episode from live events by deriving active time from spacing", () => {
+    const episodes = segmentEpisodes([
+      liveEvt("2026-07-14T10:00:00.000Z"),
+      liveEvt("2026-07-14T10:00:08.000Z"),
+      liveEvt("2026-07-14T10:00:16.000Z"),
+    ]);
+    expect(episodes.length).toBe(1);
+    // 8s + 8s derived + 1s trailing credit = 17s of active time.
+    expect(episodes[0]!.active_duration_ms).toBe(17_000);
+  });
+
+  it("caps derived per-event active time so long gaps never inflate it", () => {
+    const episodes = segmentEpisodes([
+      liveEvt("2026-07-14T10:00:00.000Z"),
+      liveEvt("2026-07-14T10:02:00.000Z"), // 120s gap → capped at 30s
+      liveEvt("2026-07-14T10:02:10.000Z"),
+    ]);
+    expect(episodes.length).toBe(1);
+    expect(episodes[0]!.active_duration_ms).toBe(30_000 + 10_000 + 1_000);
+  });
+
+  it("never overrides a recorded duration_ms", () => {
+    const episodes = segmentEpisodes([
+      liveEvt("2026-07-14T10:00:00.000Z", { duration_ms: 4_000 }),
+      liveEvt("2026-07-14T10:00:20.000Z", { duration_ms: 4_000 }),
+      liveEvt("2026-07-14T10:00:40.000Z", { duration_ms: 4_000 }),
+    ]);
+    expect(episodes.length).toBe(1);
+    expect(episodes[0]!.active_duration_ms).toBe(12_000);
+  });
+});
+
+describe("segmentation options", () => {
+  let optCounter = 2000;
+  function optEvt(iso: string, overrides: Partial<PatternFeatureEvent> = {}): PatternFeatureEvent {
+    optCounter++;
+    return {
+      event_id: `00000000-0000-7000-8000-${String(optCounter).padStart(12, "0")}`,
+      occurred_at: iso,
+      monotonic_ms: optCounter * 1000,
+      source: "chrome",
+      app_category: "crm",
+      event_type: "navigation",
+      duration_ms: 5_000,
+      sensitivity: "internal",
+      excluded_from_learning: false,
+      ...overrides,
+    };
+  }
+
+  it("honors a tightened event-gap boundary", () => {
+    const run = (start: string) => [
+      optEvt(start),
+      optEvt(start.replace("00.000Z", "10.000Z"), { event_type: "element_activated" }),
+      optEvt(start.replace("00.000Z", "20.000Z"), { event_type: "value_committed" }),
+    ];
+    const events = [...run("2026-07-14T10:00:00.000Z"), ...run("2026-07-14T10:02:00.000Z")];
+    // Default 10-minute gap boundary: one merged episode.
+    expect(segmentEpisodes(events).length).toBe(1);
+    // 90-second boundary: the 100s gap between runs splits them.
+    expect(segmentEpisodes(events, { event_gap_boundary_ms: 90_000 }).length).toBe(2);
+  });
+
+  it("splits back-to-back repetitions on sequence restart when opted in", () => {
+    const run = (s0: string, s1: string, s2: string) => [
+      optEvt(s0),
+      optEvt(s1, { event_type: "element_activated" }),
+      optEvt(s2, { event_type: "value_committed" }),
+    ];
+    const events = [
+      ...run("2026-07-14T10:00:00.000Z", "2026-07-14T10:00:10.000Z", "2026-07-14T10:00:20.000Z"),
+      ...run("2026-07-14T10:00:30.000Z", "2026-07-14T10:00:40.000Z", "2026-07-14T10:00:50.000Z"),
+      ...run("2026-07-14T10:01:00.000Z", "2026-07-14T10:01:10.000Z", "2026-07-14T10:01:20.000Z"),
+    ];
+    // Without the option the reps merge into one long episode.
+    expect(segmentEpisodes(events).length).toBe(1);
+    const split = segmentEpisodes(events, { split_on_sequence_restart: true });
+    expect(split.length).toBe(3);
+    expect(split.every((e) => e.canonical_tokens.length === 3)).toBe(true);
+  });
+});

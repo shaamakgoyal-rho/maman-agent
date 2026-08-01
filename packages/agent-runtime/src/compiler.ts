@@ -59,13 +59,27 @@ type NameCopy = { title: string; summary: string } | null;
 // ---- deterministic recipes ----
 
 type Recipe = {
-  intent: string;
+  /** Whether this recipe safely covers the given generalized intent. */
+  matches: (intent: string) => boolean;
   build: (req: CompileRequest) => {
     steps: AgentStep[];
     inputs: AgentSpec["inputs"];
     assertions: AgentSpec["assertions"];
   };
 };
+
+/** Derived intents the deterministic naming emits for CRM update patterns. */
+const UPDATE_RECORDS_INTENT = /^update_([a-z0-9_]+)_records$/;
+
+/** Salesforce object for an update_<object>_records intent ("record" = unknown). */
+function salesforceObjectFor(intent: string): string {
+  const raw = UPDATE_RECORDS_INTENT.exec(intent)?.[1];
+  if (!raw || raw === "record") return "Account";
+  return raw
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+}
 
 const step = (
   order: number,
@@ -98,10 +112,15 @@ const step = (
   };
 };
 
-/** The primary demo recipe: account-list reconciliation (spec §24 exactly). */
+/**
+ * The primary demo recipe: account-list reconciliation (spec §24 exactly).
+ * Also covers the derived update_<object>_records intents that live-observed
+ * CRM edit patterns produce — same safe shape (read → match → propose →
+ * approved write → report), with the queried object taken from the intent.
+ */
 const RECONCILIATION_RECIPE: Recipe = {
-  intent: "reconcile_account_list",
-  build: () => ({
+  matches: (intent) => intent === "reconcile_account_list" || UPDATE_RECORDS_INTENT.test(intent),
+  build: (req) => ({
     inputs: [
       {
         key: "account_csv",
@@ -142,7 +161,7 @@ const RECONCILIATION_RECIPE: Recipe = {
         "read",
         {
           keys: { source: "step_output", ref: "normalized_rows" },
-          object: { source: "literal", value: "Account" },
+          object: { source: "literal", value: salesforceObjectFor(req.generalized_intent) },
         },
         "sf_accounts",
       ),
@@ -257,7 +276,7 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
   }
 
   // 1. Deterministic recipe when the intent maps to a known shape.
-  const recipe = RECIPES.find((r) => r.intent === req.generalized_intent);
+  const recipe = RECIPES.find((r) => r.matches(req.generalized_intent));
   if (recipe) {
     return finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
   }

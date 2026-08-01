@@ -1055,20 +1055,45 @@ pub fn redacted_projection(event: &serde_json::Value, app_category: &str) -> ser
     projection
 }
 
+/// Known domains → coarse category. Matched exact-host-or-subdomain ONLY (the
+/// same tightened idiom as the M18.7 allowlist lookalike fix) — a looser
+/// contains/ends_with form would wrongly admit lookalikes like
+/// `evil-salesforce.com.attacker.com`.
+const DOMAIN_CATEGORIES: &[(&str, &str)] = &[
+    ("salesforce.com", "crm"),
+    ("force.com", "crm"),
+    ("lightning.force.com", "crm"),
+    ("docs.google.com", "spreadsheet"),
+    ("mail.google.com", "email"),
+    ("calendar.google.com", "calendar"),
+];
+
 /// Maps app identity to the coarse category exposed to the pattern engine.
+/// The domain, when present, is authoritative; the display name is only a
+/// fallback (native apps have no domain, and browser display names derive
+/// from the domain anyway).
 pub fn categorize_app(display_name: &str, domain: Option<&str>) -> String {
-    let hay = format!("{} {}", display_name.to_lowercase(), domain.unwrap_or("").to_lowercase());
-    if hay.contains("salesforce") || hay.contains("force.com") || hay.contains("hubspot") {
+    if let Some(domain) = domain {
+        let d = domain.to_lowercase();
+        // Exact host or a subdomain of a known host ONLY (see DOMAIN_CATEGORIES).
+        for (host, category) in DOMAIN_CATEGORIES {
+            if d == *host || d.ends_with(&format!(".{host}")) {
+                return (*category).to_string();
+            }
+        }
+    }
+    let name = display_name.to_lowercase();
+    if name.contains("salesforce") || name.contains("force.com") || name.contains("hubspot") {
         "crm"
-    } else if hay.contains("sheets") || hay.contains("excel") || hay.contains("airtable") {
+    } else if name.contains("sheets") || name.contains("excel") || name.contains("airtable") {
         "spreadsheet"
-    } else if hay.contains("gmail") || hay.contains("mail") || hay.contains("outlook") {
+    } else if name.contains("gmail") || name.contains("mail") || name.contains("outlook") {
         "email"
-    } else if hay.contains("calendar") {
+    } else if name.contains("calendar") {
         "calendar"
-    } else if hay.contains("linkedin") || hay.contains("apollo") || hay.contains("zoominfo") {
+    } else if name.contains("linkedin") || name.contains("apollo") || name.contains("zoominfo") {
         "research"
-    } else if hay.contains("chrome") || domain.is_some() {
+    } else if name.contains("chrome") || domain.is_some() {
         "browser"
     } else {
         "other"
@@ -1437,5 +1462,50 @@ mod tests {
         assert_eq!(categorize_app("LinkedIn", Some("linkedin.com")), "research");
         assert_eq!(categorize_app("Some Site", Some("example.com")), "browser");
         assert_eq!(categorize_app("TextEdit", None), "other");
+    }
+
+    #[test]
+    fn app_categorization_domain_is_authoritative() {
+        // Exact host and subdomains of known CRM/productivity hosts — the
+        // extension-derived display name ("Chrome"/whatever) is irrelevant.
+        assert_eq!(categorize_app("Chrome", Some("salesforce.com")), "crm");
+        assert_eq!(categorize_app("Chrome", Some("acme.my.salesforce.com")), "crm");
+        assert_eq!(categorize_app("Chrome", Some("force.com")), "crm");
+        assert_eq!(categorize_app("Chrome", Some("acme.lightning.force.com")), "crm");
+        assert_eq!(categorize_app("Chrome", Some("docs.google.com")), "spreadsheet");
+        assert_eq!(categorize_app("Chrome", Some("mail.google.com")), "email");
+        assert_eq!(categorize_app("Chrome", Some("calendar.google.com")), "calendar");
+        // Case-insensitive on the domain.
+        assert_eq!(categorize_app("Chrome", Some("ACME.Lightning.Force.com")), "crm");
+    }
+
+    #[test]
+    fn app_categorization_rejects_lookalike_domains() {
+        // None of these are a known host or a subdomain of one — they must
+        // stay "browser", never "crm"/"spreadsheet"/"email".
+        for lookalike in [
+            "evil-salesforce.com.attacker.com",
+            "salesforce.com.attacker.com",
+            "notsalesforce.com",
+            "salesforce.company.io",
+            "xn--salesforce.com.evil.example",
+            "docs.google.com.evil.example",
+            "mail.google.com.evil.example",
+        ] {
+            assert_eq!(
+                categorize_app("Chrome", Some(lookalike)),
+                "browser",
+                "lookalike {lookalike} must not be categorized as a known app"
+            );
+        }
+    }
+
+    #[test]
+    fn app_categorization_display_name_fallback_still_works() {
+        // Native apps (no domain) keep the display-name heuristics.
+        assert_eq!(categorize_app("Salesforce", None), "crm");
+        assert_eq!(categorize_app("Microsoft Excel", None), "spreadsheet");
+        assert_eq!(categorize_app("Microsoft Outlook", None), "email");
+        assert_eq!(categorize_app("Calendar", None), "calendar");
     }
 }

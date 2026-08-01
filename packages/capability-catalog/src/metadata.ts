@@ -191,8 +191,12 @@ export function capabilitiesForToken(token: string): string[] {
   const table: Record<string, string[]> = {
     "crm/record_opened": ["salesforce.get_record"],
     "crm/record_updated": ["salesforce.propose_field_updates", "salesforce.update_fields"],
+    // Live observation records CRM field edits as value_committed (the curated
+    // fixtures use record_updated) — the same business action, same capabilities.
+    "crm/value_committed": ["salesforce.propose_field_updates", "salesforce.update_fields"],
     "crm/table_read": ["salesforce.query_records"],
     "crm/element_activated": ["salesforce.query_records"],
+    "crm/element_focused": ["salesforce.get_record"],
     "crm/copy_semantic": ["salesforce.get_record"],
     "crm/navigation": ["salesforce.query_records"],
     "spreadsheet/table_read": ["google_sheets.read_range", "local.parse_csv"],
