@@ -55,7 +55,12 @@ export function deterministicName(
   if (categories.has("crm") && categories.has("spreadsheet") && objectType === "account") {
     title = "Reconcile account lists with Salesforce";
     intent = "reconcile_account_list";
-  } else if (categories.has("crm") && outcome === "record_updated") {
+  } else if (
+    categories.has("crm") &&
+    (outcome === "record_updated" || outcome === "value_committed")
+  ) {
+    // Live observation ends CRM edits with value_committed (field commits);
+    // curated fixtures end with record_updated. Same business action.
     title = `Update Salesforce ${objectType} records from your workflow`;
     intent = `update_${objectType}_records`;
   } else if (categories.has("spreadsheet") && outcome === "table_exported") {

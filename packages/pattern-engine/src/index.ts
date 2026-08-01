@@ -6,6 +6,8 @@ export {
   EVENT_GAP_BOUNDARY_MS,
   MIN_EPISODE_EVENTS,
   MIN_EPISODE_ACTIVE_MS,
+  DERIVED_DURATION_CAP_MS,
+  type SegmentationOptions,
   type SegmentedEpisode,
 } from "./segmentation.js";
 export {
@@ -30,13 +32,16 @@ export {
   representativeSequence,
   ELIGIBILITY,
   OPPORTUNITY_THRESHOLD,
+  type EligibilityThresholds,
   type PatternScores,
 } from "./scoring.js";
 export {
   runPatternEngine,
   patternSignature,
+  effectiveEligibility,
   type EngineOptions,
   type EngineResult,
+  type TunableEligibility,
   type WatchingPattern,
 } from "./engine.js";
 export { deterministicName, type NamingResult } from "./naming.js";

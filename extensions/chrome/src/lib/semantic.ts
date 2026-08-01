@@ -70,6 +70,59 @@ export async function stableHash(value: string): Promise<string> {
   ).join("");
 }
 
+export type UrlContext = { object_type?: string; page_type?: string };
+
+/**
+ * Deterministic context derived from a URL — hostname plus path segment NAMES
+ * only. Never reads query strings, fragments, record ids, or slugs: a segment
+ * is used only when it is structurally guaranteed to be a type name, so ids
+ * and PII-bearing slugs can never leak into context.
+ */
+export function contextFromUrl(url: string): UrlContext {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return {};
+  }
+  const segments = parsed.pathname.split("/").filter((s) => s.length > 0);
+
+  // Salesforce Lightning: /lightning/o/{Object}/... (object home) and
+  // /lightning/r/{Object}/{id}/... (record). The Object segment must look like
+  // an API object name (starts with a letter) — Salesforce record ids start
+  // with a digit key prefix, so bare-id routes like /lightning/r/{id}/view are
+  // rejected here and never fall through to the generic rule.
+  if (segments[0] === "lightning") {
+    const mode = segments[1];
+    const object = segments[2];
+    if (
+      (mode === "o" || mode === "r") &&
+      object !== undefined &&
+      /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(object)
+    ) {
+      return {
+        object_type: object.toLowerCase(),
+        page_type: mode === "o" ? "object_home" : "record",
+      };
+    }
+    return {};
+  }
+
+  // Google Sheets.
+  if (parsed.hostname === "docs.google.com" && segments[0] === "spreadsheets") {
+    return { page_type: "spreadsheet" };
+  }
+
+  // Generic fallback: the first path segment, only when purely alphabetic
+  // (3-32 chars) — lowercased, with one trailing "s" stripped (naive singular).
+  const first = segments[0];
+  if (first !== undefined && /^[a-zA-Z]{3,32}$/.test(first)) {
+    const lowered = first.toLowerCase();
+    return { object_type: lowered.endsWith("s") ? lowered.slice(0, -1) : lowered };
+  }
+  return {};
+}
+
 export type InteractionDescriptor = {
   kind: "click" | "commit" | "navigation" | "copy" | "paste";
   field?: FieldDescriptor;
@@ -93,6 +146,9 @@ export async function buildSemanticEvent(
 ): Promise<SemanticEventShape | null> {
   const url = new URL(interaction.pageUrl);
   const domain = url.hostname;
+  // URL-derived, id-free context (object_type / page_type) — same for every
+  // event kind on the page. Purely structural; never query/fragment/id data.
+  const context = contextFromUrl(interaction.pageUrl);
 
   if (interaction.field) {
     const decision = classifyField(interaction.field);
@@ -109,7 +165,7 @@ export async function buildSemanticEvent(
             `${domain}:${interaction.field.id ?? interaction.field.name ?? "anon"}`,
           ),
         },
-        context: {},
+        context,
         domain,
       };
     }
@@ -117,7 +173,7 @@ export async function buildSemanticEvent(
 
   switch (interaction.kind) {
     case "navigation":
-      return { event_type: "navigation", target: {}, context: {}, domain };
+      return { event_type: "navigation", target: {}, context, domain };
     case "click":
       return {
         event_type: "element_activated",
@@ -125,13 +181,13 @@ export async function buildSemanticEvent(
           ...(interaction.targetRole ? { role: interaction.targetRole } : {}),
           stable_id_hash: await stableHash(`${domain}:${interaction.targetRole ?? "el"}`),
         },
-        context: {},
+        context,
         domain,
       };
     case "copy":
-      return { event_type: "copy_semantic", target: {}, context: {}, domain };
+      return { event_type: "copy_semantic", target: {}, context, domain };
     case "paste":
-      return { event_type: "paste_semantic", target: {}, context: {}, domain };
+      return { event_type: "paste_semantic", target: {}, context, domain };
     default:
       return null;
   }

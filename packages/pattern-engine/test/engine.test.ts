@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { reconciliationFixture, unrelatedFixture } from "@maman/demo-fixtures";
-import { runPatternEngine, patternSignature, type EngineOptions } from "../src/engine.js";
+import {
+  effectiveEligibility,
+  patternSignature,
+  runPatternEngine,
+  type EngineOptions,
+} from "../src/engine.js";
 import { toPatternFeature } from "../src/projection.js";
 import { ELIGIBILITY } from "../src/scoring.js";
 
@@ -150,5 +155,46 @@ describe("eligibility suppression paths", () => {
     expect(ELIGIBILITY.min_feasibility).toBe(0.6);
     expect(ELIGIBILITY.max_risk).toBe(0.7);
     expect(ELIGIBILITY.dismissal_cooldown_days).toBe(14);
+  });
+});
+
+describe("tunable detection bars (live demo tuning)", () => {
+  const oneDay = () =>
+    fixtureEvents().map((e) => ({
+      ...e,
+      occurred_at: `2026-07-14${e.occurred_at.slice(10)}`,
+    }));
+
+  it("same-day repetitions become eligible when min_distinct_days is tuned to 1", () => {
+    const result = runPatternEngine(oneDay(), options({ eligibility: { min_distinct_days: 1 } }));
+    expect(result.recommendations.length).toBe(1);
+    expect(result.candidates.find((c) => c.status === "eligible")!.distinct_day_count).toBe(1);
+  });
+
+  it("opportunity_threshold is honored as the surfacing bar", () => {
+    const result = runPatternEngine(fixtureEvents(), options({ opportunity_threshold: 0.99 }));
+    expect(result.recommendations).toEqual([]);
+    // Still tracked as a forming pattern, honestly.
+    expect(result.watching.length).toBeGreaterThan(0);
+  });
+
+  it("clamps tunables to sane floors and never exposes safety bars", () => {
+    const effective = effectiveEligibility({
+      min_occurrences: 0,
+      min_distinct_days: 0,
+      min_projected_minutes_weekly: -5,
+    });
+    expect(effective.min_occurrences).toBe(2);
+    expect(effective.min_distinct_days).toBe(1);
+    expect(effective.min_projected_minutes_weekly).toBe(0);
+    // Safety bars always stay at production values.
+    expect(effective.min_similarity_mean).toBe(ELIGIBILITY.min_similarity_mean);
+    expect(effective.min_feasibility).toBe(ELIGIBILITY.min_feasibility);
+    expect(effective.max_risk).toBe(ELIGIBILITY.max_risk);
+  });
+
+  it("segmentation options flow through the engine", () => {
+    const result = runPatternEngine(fixtureEvents(), options({ segmentation: {} }));
+    expect(result.episodes.length).toBe(6);
   });
 });

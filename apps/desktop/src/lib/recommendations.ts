@@ -1,5 +1,6 @@
 import type { PatternCandidate, PatternFeatureEvent, Recommendation } from "@maman/contracts";
 import {
+  effectiveEligibility,
   patternSignature,
   replayCandidate,
   runPatternEngine,
@@ -150,16 +151,34 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
       )
       .map(([sig]) => sig);
 
+    const settings = useSettings.getState().settings;
+    // Detection tuning from settings: only volume/recency/value bars — the
+    // engine clamps them and never exposes the safety bars (similarity,
+    // feasibility, risk). The Forming UI shows these same effective values.
+    const effectiveBars = {
+      eligibility: effectiveEligibility({
+        min_occurrences: settings.detect_min_occurrences,
+        min_distinct_days: settings.detect_min_distinct_days,
+        min_projected_minutes_weekly: settings.detect_min_projected_minutes_weekly,
+      }),
+      opportunity_threshold: settings.detect_opportunity_threshold,
+    };
+
     const features = await fetchPatternFeatures();
     const result = runPatternEngine(features, {
       owner_user_id: OWNER_PLACEHOLDER,
       now: () => now,
       recently_dismissed_signatures: recentlyDismissed,
       suppressed_signatures: state.suppressed_signatures,
+      eligibility: effectiveBars.eligibility,
+      opportunity_threshold: effectiveBars.opportunity_threshold,
+      segmentation: {
+        event_gap_boundary_ms: settings.detect_event_gap_boundary_s * 1000,
+        split_on_sequence_restart: settings.detect_split_on_sequence_restart,
+      },
     });
 
     // ---- replay verification (client-side; traces never leave the device) ----
-    const settings = useSettings.getState().settings;
     const replayThresholds = {
       min_runs: settings.verify_min_runs,
       min_match_pct: settings.verify_min_match_pct,
@@ -256,7 +275,11 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           title: recommendation.title,
           summary: recommendation.summary,
           steps: recommendation.evidence.redacted_steps.map((s) => `${s.action} · ${s.app}`),
-          progress: patternGates(candidate, { ...verification, ...replayThresholds }),
+          progress: patternGates(
+            candidate,
+            { ...verification, ...replayThresholds },
+            effectiveBars,
+          ),
           verification,
         });
       }
@@ -280,7 +303,11 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
         title: w.naming.title,
         summary: w.naming.summary,
         steps: w.naming.redacted_steps.map((s) => `${s.action} · ${s.app}`),
-        progress: patternGates(w.candidate, { ...verification, ...replayThresholds }),
+        progress: patternGates(
+          w.candidate,
+          { ...verification, ...replayThresholds },
+          effectiveBars,
+        ),
         verification,
       });
     }

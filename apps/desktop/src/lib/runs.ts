@@ -52,8 +52,16 @@ type RunsStore = {
   receipt: ExecutionReceipt | null;
   receiptSummary: string | null;
   error: string | null;
-  startShadow: (candidate: PatternCandidate) => Promise<void>;
-  startSupervised: (candidate: PatternCandidate) => Promise<void>;
+  startShadow: (
+    candidate: PatternCandidate,
+    generalizedIntent?: string,
+    desiredOutcome?: string,
+  ) => Promise<void>;
+  startSupervised: (
+    candidate: PatternCandidate,
+    generalizedIntent?: string,
+    desiredOutcome?: string,
+  ) => Promise<void>;
   approve: () => Promise<void>;
   reject: () => Promise<void>;
   reset: () => void;
@@ -62,11 +70,18 @@ type RunsStore = {
 const OWNER = "00000000-0000-7000-8000-000000000001";
 const ORG = "00000000-0000-7000-8000-000000000002";
 
-async function compile(candidate: PatternCandidate): Promise<AgentSpec> {
+const DEFAULT_INTENT = "reconcile_account_list";
+const DEFAULT_OUTCOME = "Reconcile the account list with Salesforce.";
+
+async function compile(
+  candidate: PatternCandidate,
+  generalizedIntent: string,
+  desiredOutcome: string,
+): Promise<AgentSpec> {
   const result = await compileAgentSpec({
     candidate,
-    generalized_intent: "reconcile_account_list",
-    desired_outcome: "Reconcile the account list with Salesforce.",
+    generalized_intent: generalizedIntent,
+    desired_outcome: desiredOutcome,
     organization_id: ORG,
     owner_user_id: OWNER,
     budgets: {
@@ -85,8 +100,12 @@ async function compile(candidate: PatternCandidate): Promise<AgentSpec> {
   return result.spec;
 }
 
-// A run's world + spec persist between shadow/approve calls.
+// The demo world persists across runs for the whole session (like a real
+// backend): an approved write stays visible to the next run's reads, so the
+// demo arc shows real state change instead of a world reset per run.
 let activeWorld: DemoSalesforceWorld | null = null;
+const demoWorld = (): DemoSalesforceWorld => (activeWorld ??= new DemoSalesforceWorld());
+// A run's spec + state persist between shadow/approve calls.
 let activeSpec: AgentSpec | null = null;
 let activeState: RunState | null = null;
 let activeRunId = "";
@@ -167,12 +186,16 @@ export const useRuns = create<RunsStore>((set) => ({
   receiptSummary: null,
   error: null,
 
-  startShadow: async (candidate) => {
+  startShadow: async (
+    candidate,
+    generalizedIntent = DEFAULT_INTENT,
+    desiredOutcome = DEFAULT_OUTCOME,
+  ) => {
     set({ phase: "running_read", mode: "shadow", diff: null, receipt: null, error: null });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
     try {
-      activeWorld = new DemoSalesforceWorld();
-      activeSpec = await compile(candidate);
+      activeWorld = demoWorld();
+      activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
       const registry = demoAdapterRegistry(activeWorld);
@@ -206,12 +229,16 @@ export const useRuns = create<RunsStore>((set) => ({
     }
   },
 
-  startSupervised: async (candidate) => {
+  startSupervised: async (
+    candidate,
+    generalizedIntent = DEFAULT_INTENT,
+    desiredOutcome = DEFAULT_OUTCOME,
+  ) => {
     set({ phase: "running_read", mode: "supervised", diff: null, receipt: null, error: null });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
     try {
-      activeWorld = new DemoSalesforceWorld();
-      activeSpec = await compile(candidate);
+      activeWorld = demoWorld();
+      activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
       const registry = demoAdapterRegistry(activeWorld);

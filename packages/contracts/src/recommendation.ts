@@ -45,6 +45,11 @@ export const recommendationSchema = z
     owner_user_id: uuid,
     title: z.string().min(1),
     summary: z.string().min(1),
+    /**
+     * Deterministic generalized intent from naming (e.g. update_account_records)
+     * — the compiler's recipe selector input. Optional for wire compatibility.
+     */
+    generalized_intent: z.string().optional(),
     evidence: recommendationEvidenceSchema,
     projected_minutes_saved_weekly: z.number().nonnegative(),
     expected_cost_usd_low: z.number().nonnegative(),

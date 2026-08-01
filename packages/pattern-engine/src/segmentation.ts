@@ -10,6 +10,23 @@ export const EVENT_GAP_BOUNDARY_MS = 10 * 60 * 1000;
 export const MIN_EPISODE_EVENTS = 3;
 export const MIN_EPISODE_ACTIVE_MS = 10 * 1000;
 export const OBJECT_FAMILY_SWITCH_MIN_EVENTS = 3;
+/** Cap on per-event active time derived from event spacing (duration absent). */
+export const DERIVED_DURATION_CAP_MS = 30 * 1000;
+/** Active-time credit for a final event with no successor and no duration. */
+export const DERIVED_TRAILING_MS = 1000;
+
+export type SegmentationOptions = {
+  /** Gap between events that always closes an episode. */
+  event_gap_boundary_ms?: number;
+  /** Unexplained inactivity (gap minus recorded duration) that closes an episode. */
+  inactivity_boundary_ms?: number;
+  /**
+   * Close the episode when its first canonical token recurs after the episode
+   * already holds a full run — splits back-to-back repetitions of the same
+   * workflow that have no idle gap between them.
+   */
+  split_on_sequence_restart?: boolean;
+};
 
 export type SegmentedEpisode = {
   episode_id: string;
@@ -47,7 +64,37 @@ function isBoundaryEvent(e: PatternFeatureEvent): boolean {
   return e.event_type === "idle_started" || e.event_type === "boundary_redacted";
 }
 
-export function segmentEpisodes(events: PatternFeatureEvent[]): SegmentedEpisode[] {
+/**
+ * Active time per event. Recorded `duration_ms` is authoritative; when a live
+ * source records none (the AX observer and browser relay emit point-in-time
+ * events), derive it deterministically from the spacing to the next event,
+ * capped so a long gap never inflates active time. Without this, live events
+ * sum to zero active time and can never form an episode.
+ */
+function deriveDurations(sorted: PatternFeatureEvent[]): Map<string, number> {
+  const derived = new Map<string, number>();
+  for (let i = 0; i < sorted.length; i++) {
+    const e = sorted[i]!;
+    if (e.duration_ms !== undefined) continue;
+    const next = sorted[i + 1];
+    if (!next) {
+      derived.set(e.event_id, DERIVED_TRAILING_MS);
+      continue;
+    }
+    const gap = Date.parse(next.occurred_at) - Date.parse(e.occurred_at);
+    derived.set(e.event_id, Math.max(0, Math.min(gap, DERIVED_DURATION_CAP_MS)));
+  }
+  return derived;
+}
+
+export function segmentEpisodes(
+  events: PatternFeatureEvent[],
+  options: SegmentationOptions = {},
+): SegmentedEpisode[] {
+  const gapBoundaryMs = options.event_gap_boundary_ms ?? EVENT_GAP_BOUNDARY_MS;
+  const inactivityBoundaryMs = options.inactivity_boundary_ms ?? INACTIVITY_BOUNDARY_MS;
+  const splitOnRestart = options.split_on_sequence_restart ?? false;
+
   // Deterministic ordering: by occurred_at then monotonic_ms (out-of-order input tolerated).
   const sorted = [...events].sort((a, b) =>
     a.occurred_at === b.occurred_at
@@ -56,13 +103,14 @@ export function segmentEpisodes(events: PatternFeatureEvent[]): SegmentedEpisode
         ? -1
         : 1,
   );
+  const derivedDurations = deriveDurations(sorted);
 
   const episodes: SegmentedEpisode[] = [];
   let current: PatternFeatureEvent[] = [];
 
   const flush = () => {
     if (current.length === 0) return;
-    const episode = buildEpisode(current);
+    const episode = buildEpisode(current, derivedDurations);
     if (episode) episodes.push(episode);
     current = [];
   };
@@ -83,10 +131,20 @@ export function segmentEpisodes(events: PatternFeatureEvent[]): SegmentedEpisode
     if (lastTime !== null) {
       const gap = t - lastTime;
       const inactivity = gap - (event.duration_ms ?? 0);
-      if (gap > EVENT_GAP_BOUNDARY_MS || inactivity > INACTIVITY_BOUNDARY_MS) {
+      if (gap > gapBoundaryMs || inactivity > inactivityBoundaryMs) {
         flush();
         objectFamily = null;
       }
+    }
+    // Back-to-back repetition boundary (opt-in): the first token of the episode
+    // recurring after a full run means the workflow restarted, not continued.
+    if (
+      splitOnRestart &&
+      current.length >= MIN_EPISODE_EVENTS &&
+      canonicalToken(event) === canonicalToken(current[0]!)
+    ) {
+      flush();
+      objectFamily = null;
     }
     // Business-object family switch after at least three events.
     const family = event.object_type ?? null;
@@ -107,8 +165,14 @@ export function segmentEpisodes(events: PatternFeatureEvent[]): SegmentedEpisode
   return episodes;
 }
 
-function buildEpisode(events: PatternFeatureEvent[]): SegmentedEpisode | null {
-  const activeMs = events.reduce((sum, e) => sum + (e.duration_ms ?? 0), 0);
+function buildEpisode(
+  events: PatternFeatureEvent[],
+  derivedDurations: Map<string, number>,
+): SegmentedEpisode | null {
+  const activeMs = events.reduce(
+    (sum, e) => sum + (e.duration_ms ?? derivedDurations.get(e.event_id) ?? 0),
+    0,
+  );
   // Discard learning candidates that are too small to mean anything.
   if (events.length < MIN_EPISODE_EVENTS || activeMs < MIN_EPISODE_ACTIVE_MS) return null;
 

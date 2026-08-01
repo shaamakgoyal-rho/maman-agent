@@ -1,4 +1,8 @@
-import { ELIGIBILITY, OPPORTUNITY_THRESHOLD } from "@maman/pattern-engine";
+import {
+  ELIGIBILITY,
+  OPPORTUNITY_THRESHOLD,
+  type EligibilityThresholds,
+} from "@maman/pattern-engine";
 import type { PatternCandidate } from "@maman/contracts";
 
 /**
@@ -38,49 +42,61 @@ export type ReplayGateInput = {
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-export function patternGates(c: PatternCandidate, replay?: ReplayGateInput): FormingProgress {
+/** Effective bars the engine ran with (live demo tuning may lower the volume bars). */
+export type EffectiveBars = {
+  eligibility?: EligibilityThresholds;
+  opportunity_threshold?: number;
+};
+
+export function patternGates(
+  c: PatternCandidate,
+  replay?: ReplayGateInput,
+  bars?: EffectiveBars,
+): FormingProgress {
+  const b = bars?.eligibility ?? ELIGIBILITY;
+  const opportunityThreshold = bars?.opportunity_threshold ?? OPPORTUNITY_THRESHOLD;
   const gates: FormingGate[] = [
     {
       key: "repeats",
       label: "Seen enough times",
-      met: c.occurrence_count >= ELIGIBILITY.min_occurrences,
-      detail: `${c.occurrence_count} of ${ELIGIBILITY.min_occurrences} times`,
+      met: c.occurrence_count >= b.min_occurrences,
+      detail: `${c.occurrence_count} of ${b.min_occurrences} times`,
     },
     {
       key: "days",
       label: "On enough separate days",
-      met: c.distinct_day_count >= ELIGIBILITY.min_distinct_days,
-      detail: `${c.distinct_day_count} of ${ELIGIBILITY.min_distinct_days} days`,
+      met: c.distinct_day_count >= b.min_distinct_days,
+      detail: `${c.distinct_day_count} of ${b.min_distinct_days} days`,
     },
     {
       key: "consistency",
       label: "Done the same way each time",
-      met: c.similarity_mean >= ELIGIBILITY.min_similarity_mean,
-      detail: `${pct(c.similarity_mean)} alike (need ${pct(ELIGIBILITY.min_similarity_mean)})`,
+      met: c.similarity_mean >= b.min_similarity_mean,
+      detail: `${pct(c.similarity_mean)} alike (need ${pct(b.min_similarity_mean)})`,
     },
     {
       key: "time",
       label: "Worth enough time to automate",
-      met: c.projected_minutes_saved_weekly >= ELIGIBILITY.min_projected_minutes_weekly,
-      detail: `~${Math.round(c.projected_minutes_saved_weekly)} min/wk (need ${ELIGIBILITY.min_projected_minutes_weekly})`,
+      met: c.projected_minutes_saved_weekly >= b.min_projected_minutes_weekly,
+      detail: `~${Math.round(c.projected_minutes_saved_weekly)} min/wk (need ${b.min_projected_minutes_weekly})`,
     },
     {
       key: "feasibility",
       label: "Safe steps a helper can do",
-      met: c.feasibility_score >= ELIGIBILITY.min_feasibility,
-      detail: c.feasibility_score >= ELIGIBILITY.min_feasibility ? "yes" : "not yet",
+      met: c.feasibility_score >= b.min_feasibility,
+      detail: c.feasibility_score >= b.min_feasibility ? "yes" : "not yet",
     },
     {
       key: "risk",
       label: "Low enough risk",
-      met: c.risk_score <= ELIGIBILITY.max_risk,
-      detail: c.risk_score <= ELIGIBILITY.max_risk ? "yes" : "too risky",
+      met: c.risk_score <= b.max_risk,
+      detail: c.risk_score <= b.max_risk ? "yes" : "too risky",
     },
     {
       key: "opportunity",
       label: "Clearly worth suggesting",
-      met: c.opportunity_score >= OPPORTUNITY_THRESHOLD,
-      detail: `${pct(c.opportunity_score)} (need ${pct(OPPORTUNITY_THRESHOLD)})`,
+      met: c.opportunity_score >= opportunityThreshold,
+      detail: `${pct(c.opportunity_score)} (need ${pct(opportunityThreshold)})`,
     },
   ];
 
@@ -113,12 +129,17 @@ export function patternGates(c: PatternCandidate, replay?: ReplayGateInput): For
     metCount,
     total,
     ratio: total === 0 ? 0 : metCount / total,
-    nextStep: nextStepFor(c, gates, replay),
+    nextStep: nextStepFor(c, gates, b, replay),
   };
 }
 
 /** The single most useful "here's what's left" sentence, in Maman's voice. */
-function nextStepFor(c: PatternCandidate, gates: FormingGate[], replay?: ReplayGateInput): string {
+function nextStepFor(
+  c: PatternCandidate,
+  gates: FormingGate[],
+  b: EligibilityThresholds,
+  replay?: ReplayGateInput,
+): string {
   if (gates.every((g) => g.met)) {
     return "This is ready — I'll offer it as a suggestion next time you finish it.";
   }
@@ -136,12 +157,12 @@ function nextStepFor(c: PatternCandidate, gates: FormingGate[], replay?: ReplayG
   }
   const repeats = gates.find((g) => g.key === "repeats")!;
   if (!repeats.met) {
-    const left = ELIGIBILITY.min_occurrences - c.occurrence_count;
+    const left = b.min_occurrences - c.occurrence_count;
     return `I've seen this ${c.occurrence_count}×. ${left} more repeat${left === 1 ? "" : "s"} and I'll suggest a helper.`;
   }
   const days = gates.find((g) => g.key === "days")!;
   if (!days.met) {
-    const left = ELIGIBILITY.min_distinct_days - c.distinct_day_count;
+    const left = b.min_distinct_days - c.distinct_day_count;
     return `Seen it enough times — I just need to see it on ${left} more day${left === 1 ? "" : "s"} to be sure it's a habit.`;
   }
   if (!gates.find((g) => g.key === "consistency")!.met) {
