@@ -55,3 +55,4 @@ export {
   type MatchResult,
 } from "./adapters.js";
 export { executeStep, resolveStepInputs, type StepExecution, type RunState } from "./run-engine.js";
+export { describeAgentSpec, type AgentDescription } from "./describe.js";

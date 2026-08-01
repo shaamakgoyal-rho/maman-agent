@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeAgentSpec } from "@maman/agent-runtime";
 import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
 import { useRuns } from "../../lib/runs.js";
@@ -74,6 +75,7 @@ export function Agents() {
     <div className="space-y-3">
       {visible.map((agent) => {
         const latest = agent.versions[agent.versions.length - 1]!;
+        const described = describeAgentSpec(latest.spec);
         const isOpen = expanded === agent.agent_id;
         return (
           <Card key={agent.agent_id}>
@@ -81,10 +83,33 @@ export function Agents() {
               <SectionTitle>{agent.name}</SectionTitle>
               <StatusPill tone={STATE_TONE[agent.state]}>{agent.state}</StatusPill>
             </div>
-            <Muted>{latest.spec.description}</Muted>
+            {/* What it DOES (derived from the compiled spec), then why it exists. */}
+            <p className="text-sm text-ink">{described.summary}</p>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+              {described.reads.length > 0 && (
+                <span className="rounded-full bg-line/60 px-2 py-0.5 text-muted">
+                  reads {described.reads.join(", ")}
+                </span>
+              )}
+              <span
+                className={`rounded-full px-2 py-0.5 ${
+                  described.read_only ? "bg-success/10 text-success" : "bg-warning/10 text-warning"
+                }`}
+              >
+                {described.read_only
+                  ? "changes nothing"
+                  : `changes ${described.changes.join(", ")}`}
+              </span>
+              {described.requires_approval && (
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">
+                  needs your approval
+                </span>
+              )}
+            </div>
+            <Muted>Why: {latest.spec.description}</Muted>
             <p className="mt-1 text-xs text-muted tabular-nums">
-              v{latest.version_number} · {latest.spec.steps.length} steps · last run — · verified
-              time 0 min · cost $0.00
+              v{latest.version_number} · {latest.spec.steps.length} steps · {described.limits} ·
+              last run — · verified time 0 min · cost $0.00
             </p>
 
             {isOpen && (
