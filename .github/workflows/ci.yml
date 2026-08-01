@@ -59,30 +59,30 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level high
 
+  # The portable crate runs on Linux; the Tauri desktop crate cannot build here
+  # at all (its build script requires the macOS-only maman-observer sidecar for
+  # the host triple), so it gets its own macOS job below.
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      # scripts/test-rust.sh also builds apps/desktop/src-tauri, whose Tauri
-      # dependencies link against the Linux WebKit/GTK stack. Without these the
-      # job never got as far as running a test (glib-2.0 not found), so the 69
-      # desktop-crate tests had never actually run in CI.
-      - name: Install Tauri Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-      - name: Run Rust tests
-        run: bash scripts/test-rust.sh
+      - name: Run Rust tests (browser host)
+        run: bash scripts/test-rust.sh browser-host
+
+  rust-desktop:
+    # macOS, because the Tauri crate links the platform webview stack and its
+    # build script needs the staged Swift observer binary. On Linux it failed at
+    # "resource path binaries/maman-observer-x86_64-unknown-linux-gnu doesn't
+    # exist" — before that, at glib-2.0 — so these tests had never run in CI.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Build + stage the observer sidecar (required by the Tauri build script)
+        run: bash scripts/build-observer.sh
+      - name: Run Rust tests (desktop crate)
+        run: bash scripts/test-rust.sh desktop
 
   swift:
     runs-on: macos-14

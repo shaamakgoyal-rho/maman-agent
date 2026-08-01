@@ -21,18 +21,18 @@
   "dependencies": {
     "@maman/config": "workspace:*",
     "@maman/contracts": "workspace:*",
-    "drizzle-orm": "^0.38.3",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@maman/tsconfig": "workspace:*",
-    "@testcontainers/postgresql": "^10.16.0",
+    "@testcontainers/postgresql": "^12.0.4",
     "@types/node": "^24",
-    "@vitest/coverage-v8": "^2.1.8",
+    "@vitest/coverage-v8": "^3.2.7",
     "dotenv": "^16.4.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.7"
   }
 }
