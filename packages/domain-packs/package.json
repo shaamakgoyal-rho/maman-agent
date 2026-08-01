@@ -13,7 +13,9 @@
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
     "packs:generate": "tsx scripts/build-packs.ts",
-    "packs:check": "tsx scripts/build-packs.ts --check"
+    "packs:check": "tsx scripts/build-packs.ts --check",
+    "packs:conformance": "tsx scripts/gen-conformance.ts",
+    "packs:conformance:check": "tsx scripts/gen-conformance.ts --check"
   },
   "dependencies": {
     "zod": "^3.24.1",

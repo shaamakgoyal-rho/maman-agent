@@ -127,9 +127,15 @@ CREATE TABLE IF NOT EXISTS workflow_events (
   payload_sha256 TEXT NOT NULL,
   excluded_from_learning INTEGER NOT NULL DEFAULT 0,
   quarantined INTEGER NOT NULL DEFAULT 0,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  -- Domain-pack classification (L1); NULL = unclassified, a valid state.
+  pack_domain TEXT,
+  domain_object TEXT,
+  domain_action TEXT,
+  classifier_confidence REAL
 );
 CREATE INDEX IF NOT EXISTS idx_events_occurred ON workflow_events (occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_pack_domain ON workflow_events (pack_domain);
 CREATE INDEX IF NOT EXISTS idx_events_expiry ON workflow_events (expires_at);
 CREATE TABLE IF NOT EXISTS workflow_episodes (
   episode_id TEXT PRIMARY KEY,
@@ -200,12 +206,22 @@ const COLUMN_MIGRATIONS: &[&str] = &[
     "ALTER TABLE pattern_candidates ADD COLUMN last_verified_at TEXT",
     // Encrypted per-run replay results (incl. divergence step). Local-only.
     "ALTER TABLE pattern_candidates ADD COLUMN verification_detail BLOB",
+    // Domain-pack classification (L1). Plaintext columns because they are typed
+    // abstractions in the same privacy class as app_category — pack taxonomy ids
+    // only, never content. NULL means unclassified, which is a valid state.
+    "ALTER TABLE workflow_events ADD COLUMN pack_domain TEXT",
+    "ALTER TABLE workflow_events ADD COLUMN domain_object TEXT",
+    "ALTER TABLE workflow_events ADD COLUMN domain_action TEXT",
+    "ALTER TABLE workflow_events ADD COLUMN classifier_confidence REAL",
 ];
 
 pub struct LocalStore {
     pool: SqlitePool,
     key: [u8; 32],
     owner_user_id: String,
+    /// Loaded domain packs, used to classify at ingest. Empty is valid and
+    /// simply means nothing gets classified — observation still works.
+    packs: Vec<crate::domain::DomainPack>,
 }
 
 /// Minimal decrypted projection for the "What Maman saw" timeline.
@@ -269,6 +285,16 @@ impl LocalStore {
         key_provider: &dyn KeyProvider,
         owner_user_id: &str,
     ) -> Result<Self, StoreError> {
+        Self::open_with_packs(db_path, key_provider, owner_user_id, Vec::new()).await
+    }
+
+    /// Same, with domain packs for the L1 classifier.
+    pub async fn open_with_packs(
+        db_path: &Path,
+        key_provider: &dyn KeyProvider,
+        owner_user_id: &str,
+        packs: Vec<crate::domain::DomainPack>,
+    ) -> Result<Self, StoreError> {
         let key = key_provider.get_or_create_key()?;
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
             .map_err(StoreError::Db)?
@@ -291,7 +317,13 @@ impl LocalStore {
             pool,
             key,
             owner_user_id: owner_user_id.to_string(),
+            packs,
         })
+    }
+
+    /// Loaded packs, for `packs_status`.
+    pub fn packs(&self) -> &[crate::domain::DomainPack] {
+        &self.packs
     }
 
     // ---- crypto ----
@@ -372,6 +404,13 @@ impl LocalStore {
             get(&["app", "domain"]).and_then(|v| v.as_str()),
         );
 
+        // Domain classification (L1) — post-redaction, pre-storage. Never forces
+        // a mapping: no match leaves every column NULL.
+        let classification = crate::domain::classify_event(
+            self.packs.as_slice(),
+            &crate::domain::input_from_payload(event, &app_category),
+        );
+
         let plaintext = serde_json::to_vec(event)
             .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
         let payload_sha256 = hex::encode(Sha256::digest(&plaintext));
@@ -383,8 +422,9 @@ impl LocalStore {
         sqlx::query(
             "INSERT OR REPLACE INTO workflow_events
              (event_id, occurred_at, source, app_category, app_hmac, event_type, sensitivity,
-              encrypted_payload, payload_sha256, excluded_from_learning, quarantined, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)",
+              encrypted_payload, payload_sha256, excluded_from_learning, quarantined, expires_at,
+              pack_domain, domain_object, domain_action, classifier_confidence)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)",
         )
         .bind(&event_id)
         .bind(&occurred_at)
@@ -396,6 +436,10 @@ impl LocalStore {
         .bind(&encrypted)
         .bind(&payload_sha256)
         .bind(&expires_at)
+        .bind(classification.as_ref().map(|c| c.domain.clone()))
+        .bind(classification.as_ref().and_then(|c| c.object.clone()))
+        .bind(classification.as_ref().and_then(|c| c.action.clone()))
+        .bind(classification.as_ref().map(|c| c.confidence))
         .execute(&self.pool)
         .await?;
 
@@ -480,7 +524,8 @@ impl LocalStore {
     pub async fn pattern_features(&self, limit: i64) -> Result<Vec<serde_json::Value>, StoreError> {
         let rows = sqlx::query(
             "SELECT event_id, occurred_at, source, app_category, event_type, sensitivity,
-                    encrypted_payload, excluded_from_learning, quarantined
+                    encrypted_payload, excluded_from_learning, quarantined,
+                    pack_domain, domain_object, domain_action, classifier_confidence
              FROM workflow_events
              ORDER BY occurred_at ASC LIMIT ?",
         )
@@ -537,9 +582,42 @@ impl LocalStore {
             if let Some(b) = bucket {
                 feature["item_count_bucket"] = serde_json::json!(b);
             }
+            // Domain classification, read from the plaintext columns. Named
+            // pack_domain (not domain) because in this projection `domain` means
+            // a WEB domain and must never appear — see the contracts tests.
+            if let Some(d) = row.get::<Option<String>, _>("pack_domain") {
+                feature["pack_domain"] = serde_json::json!(d);
+            }
+            if let Some(o) = row.get::<Option<String>, _>("domain_object") {
+                feature["domain_object"] = serde_json::json!(o);
+            }
+            if let Some(a) = row.get::<Option<String>, _>("domain_action") {
+                feature["domain_action"] = serde_json::json!(a);
+            }
+            if let Some(c) = row.get::<Option<f64>, _>("classifier_confidence") {
+                feature["classifier_confidence"] = serde_json::json!(c);
+            }
             features.push(feature);
         }
         Ok(features)
+    }
+
+    /// (classified, total) event counts over the trailing `days` window,
+    /// excluding quarantined rows — the packs_status coverage number.
+    pub async fn classifier_coverage(&self, days: i64) -> Result<(i64, i64), StoreError> {
+        let since = iso_days_from_now(-days);
+        let row = sqlx::query(
+            "SELECT
+               COUNT(*) AS total,
+               SUM(CASE WHEN pack_domain IS NOT NULL THEN 1 ELSE 0 END) AS classified
+             FROM workflow_events WHERE occurred_at >= ? AND quarantined = 0",
+        )
+        .bind(&since)
+        .fetch_one(&self.pool)
+        .await?;
+        let total: i64 = row.get("total");
+        let classified: i64 = row.try_get::<Option<i64>, _>("classified")?.unwrap_or(0);
+        Ok((classified, total))
     }
 
     pub async fn count_events(&self) -> Result<i64, StoreError> {
@@ -1507,5 +1585,136 @@ mod tests {
         assert_eq!(categorize_app("Microsoft Excel", None), "spreadsheet");
         assert_eq!(categorize_app("Microsoft Outlook", None), "email");
         assert_eq!(categorize_app("Calendar", None), "calendar");
+    }
+}
+
+#[cfg(test)]
+mod domain_ingest_tests {
+    //! Classification at ingest (L1): post-redaction, pre-storage, never forced.
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    const TEST_KEY: [u8; 32] = [9u8; 32];
+
+    fn packs() -> Vec<crate::domain::DomainPack> {
+        crate::domain::load_packs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../domain/packs"),
+        )
+    }
+
+    fn crm_event(id_suffix: u32, object_type: &str) -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "event_id": format!("0191bbbb-0000-7000-8000-0000000000{:02}", id_suffix),
+            "device_id": "0191bbbb-0000-7000-8000-000000000001",
+            "user_id": "0191bbbb-0000-7000-8000-000000000002",
+            "organization_id": "0191bbbb-0000-7000-8000-000000000003",
+            "occurred_at": now_iso(),
+            "monotonic_ms": 1000,
+            "source": "chrome",
+            "app": { "display_name": "Salesforce", "domain": "acme.lightning.force.com" },
+            "event_type": "record_opened",
+            "target": { "role": "row" },
+            "context": { "object_type": object_type },
+            "duration_ms": 1500,
+            "sensitivity": "internal",
+            "redaction": { "applied": false, "reasons": [] }
+        })
+    }
+
+    #[tokio::test]
+    async fn classification_persists_and_flows_to_pattern_features() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open_with_packs(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+            packs(),
+        )
+        .await
+        .unwrap();
+
+        // A CRM opportunity event classifies into revops…
+        store.insert_event(&crm_event(1, "opportunity"), 30).await.unwrap();
+        // …and an event with no domain signal stays NULL, never forced.
+        store.insert_event(&crm_event(2, "definitely_not_an_object"), 30).await.unwrap();
+
+        let features = store.pattern_features(10).await.unwrap();
+        assert_eq!(features.len(), 2);
+        let classified = features
+            .iter()
+            .find(|f| f["event_id"].as_str().unwrap().ends_with("01"))
+            .unwrap();
+        assert_eq!(classified["pack_domain"], "revops");
+        assert_eq!(classified["domain_object"], "opportunity");
+        assert!(classified["classifier_confidence"].as_f64().unwrap() > 0.0);
+        // The projection never carries a web domain under any name.
+        assert!(classified.get("domain").is_none());
+
+        let unclassified = features
+            .iter()
+            .find(|f| f["event_id"].as_str().unwrap().ends_with("02"))
+            .unwrap();
+        assert!(unclassified.get("pack_domain").is_none());
+        assert!(unclassified.get("domain_object").is_none());
+    }
+
+    #[tokio::test]
+    async fn no_packs_means_no_classification_and_ingest_still_works() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+        )
+        .await
+        .unwrap();
+        store.insert_event(&crm_event(3, "opportunity"), 30).await.unwrap();
+        let features = store.pattern_features(10).await.unwrap();
+        assert_eq!(features.len(), 1);
+        assert!(features[0].get("pack_domain").is_none());
+    }
+
+    #[tokio::test]
+    async fn classifier_coverage_counts_classified_vs_total() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open_with_packs(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+            packs(),
+        )
+        .await
+        .unwrap();
+        store.insert_event(&crm_event(4, "opportunity"), 30).await.unwrap();
+        store.insert_event(&crm_event(5, "definitely_not_an_object"), 30).await.unwrap();
+        let (classified, total) = store.classifier_coverage(7).await.unwrap();
+        assert_eq!((classified, total), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn migration_is_rerunnable_on_a_database_created_before_the_columns() {
+        // open() runs SCHEMA_SQL + COLUMN_MIGRATIONS; opening twice must not error
+        // (duplicate-column swallowed), and the columns must exist afterwards.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.sqlite");
+        for _ in 0..2 {
+            let store = LocalStore::open(&path, &StaticKeyProvider(TEST_KEY), "user-1")
+                .await
+                .unwrap();
+            drop(store);
+        }
+        let store = LocalStore::open_with_packs(
+            &path,
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+            packs(),
+        )
+        .await
+        .unwrap();
+        store.insert_event(&crm_event(6, "invoice"), 30).await.unwrap();
+        let (classified, total) = store.classifier_coverage(7).await.unwrap();
+        assert_eq!((classified, total), (1, 1));
     }
 }

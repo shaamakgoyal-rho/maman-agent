@@ -82,22 +82,36 @@ function objectCandidates(pack: DomainPack, input: ClassifierInput): Array<[Pack
 
   for (const object of pack.objects) {
     let score = 0;
+    // App category is CONTEXT, not identification: on its own it must never
+    // classify (otherwise every CRM event would be typed as some default
+    // object). At least one identifying signal is required.
+    let identified = false;
     const hints = object.detection_hints;
 
     // An already-derived object_type naming this object (or an alias) is the
     // strongest signal available without label text.
     const names = [object.id, ...object.aliases];
-    if (input.object_type && names.includes(input.object_type)) score += W_OBJECT_TYPE_MATCH;
+    if (input.object_type && names.includes(input.object_type)) {
+      score += W_OBJECT_TYPE_MATCH;
+      identified = true;
+    }
     if (input.semantic_type && names.some((n) => input.semantic_type!.includes(n))) {
       score += W_SEMANTIC_HINT;
+      identified = true;
     }
-    if (hints.label_patterns.some((p) => hits.has(p))) score += W_LABEL_HIT;
+    if (hints.label_patterns.some((p) => hits.has(p))) {
+      score += W_LABEL_HIT;
+      identified = true;
+    }
     if (input.app_category && hints.app_categories.includes(input.app_category)) {
       score += W_APP_CATEGORY;
     }
-    if (input.target_role && hints.target_roles.includes(input.target_role)) score += W_ROLE_HIT;
+    if (input.target_role && hints.target_roles.includes(input.target_role)) {
+      score += W_ROLE_HIT;
+      identified = true;
+    }
 
-    if (score > 0) scored.push([object, score]);
+    if (identified && score > 0) scored.push([object, score]);
   }
   // Deterministic ordering: score desc, then id asc so ties never depend on
   // pack authoring order.

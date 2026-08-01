@@ -40,6 +40,8 @@
     "schemas:check": "pnpm --filter @maman/contracts schemas:check",
     "packs:generate": "pnpm --filter @maman/domain-packs packs:generate",
     "packs:check": "pnpm --filter @maman/domain-packs packs:check",
+    "packs:conformance": "pnpm --filter @maman/domain-packs packs:conformance",
+    "packs:conformance:check": "pnpm --filter @maman/domain-packs packs:conformance:check",
     "audit:dependencies": "pnpm audit --audit-level high",
     "audit:licenses": "bash scripts/audit-licenses.sh",
     "audit:secrets": "bash scripts/audit-secrets.sh"

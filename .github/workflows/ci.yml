@@ -30,6 +30,7 @@ jobs:
       # Domain packs are authored in YAML and compiled to committed JSON that
       # both the Rust core and the webview read; fail if they drift apart.
       - run: pnpm packs:check
+      - run: pnpm packs:conformance:check
       - run: pnpm test:unit
       - run: pnpm build
 
