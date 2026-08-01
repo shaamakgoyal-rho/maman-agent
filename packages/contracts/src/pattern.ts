@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { appCategory, eventSource, sensitivity, utcTimestamp, uuid } from "./common.js";
-import { workflowEventType } from "./workflow-event.js";
+import { packIdentifier, workflowEventType } from "./workflow-event.js";
 
 /**
  * PatternFeatureEvent — the ONLY projection the local pattern engine (and the
@@ -22,6 +22,20 @@ export const patternFeatureEventSchema = z
     duration_ms: z.number().int().nonnegative().optional(),
     sensitivity,
     excluded_from_learning: z.boolean(),
+    /**
+     * Domain-pack classification, flattened for the engine. Same privacy class
+     * as `object_type`: pack taxonomy ids only. All optional — untyped events
+     * flow through the generic novel-pattern path exactly as before.
+     *
+     * NOT named `domain`: that name is reserved for a WEB domain, which this
+     * projection must keep rejecting (see the privacy tests). The id pattern
+     * also structurally excludes hostnames — dots and hyphens cannot appear —
+     * so a web domain can never ride in through these fields either.
+     */
+    pack_domain: packIdentifier.optional(),
+    domain_object: packIdentifier.optional(),
+    domain_action: packIdentifier.optional(),
+    classifier_confidence: z.number().min(0).max(1).optional(),
   })
   .strict();
 

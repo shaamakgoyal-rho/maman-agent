@@ -9,6 +9,26 @@ import { eventSource, schemaVersion1, sensitivity, utcTimestamp, uuid } from "./
  * schema is strict and only carries roles, hashes, categories, and counts.
  */
 
+/** Pack-taxonomy ids: lower_snake_case, matching the domain-pack identifier rule. */
+export const packIdentifier = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);
+
+/**
+ * Domain classification produced on-device by the pack classifier (L1).
+ *
+ * `confidence` is the classifier's own certainty, NOT a value extraction. Policy
+ * must treat low confidence as fail-closed (threshold exceeded), never as
+ * permission — see the amount/percent extractors.
+ */
+export const domainClassification = z
+  .object({
+    domain: packIdentifier,
+    object: packIdentifier.optional(),
+    action: packIdentifier.optional(),
+    confidence: z.number().min(0).max(1),
+  })
+  .strict();
+export type DomainClassification = z.infer<typeof domainClassification>;
+
 export const workflowEventType = z.enum([
   "app_activated",
   "window_focused",
@@ -63,6 +83,14 @@ export const workflowEventSchema = z
         item_count: z.number().int().nonnegative().optional(),
       })
       .strict(),
+    /**
+     * Domain-pack classification (L1). Typed abstractions in the same privacy
+     * class as `object_type` — ids drawn from a pack's declared taxonomy, never
+     * free text derived from content. Absent when nothing matched: an
+     * unclassified event stays unclassified rather than being forced into a
+     * domain.
+     */
+    classification: domainClassification.optional(),
     duration_ms: z.number().int().nonnegative().optional(),
     sensitivity,
     redaction: z
