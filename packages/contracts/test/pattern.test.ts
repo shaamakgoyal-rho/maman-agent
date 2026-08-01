@@ -33,6 +33,40 @@ describe("patternFeatureEventSchema (privacy projection)", () => {
     ).toBe(false);
   });
 
+  it("still rejects `domain` — that name means a WEB domain and must never reach the engine", () => {
+    // Domain-pack classification uses pack_domain precisely so this stays true.
+    expect(
+      patternFeatureEventSchema.safeParse({ ...valid, domain: "secret-tool.example" }).success,
+    ).toBe(false);
+  });
+
+  it("accepts pack taxonomy ids but structurally rejects a hostname in them", () => {
+    expect(
+      patternFeatureEventSchema.safeParse({
+        ...valid,
+        pack_domain: "finops",
+        domain_object: "invoice",
+        domain_action: "code_invoice",
+        classifier_confidence: 0.8,
+      }).success,
+    ).toBe(true);
+    // Dots and hyphens cannot appear in a pack id, so app identity cannot ride in.
+    for (const leak of ["secret-tool.example", "acme.lightning.force.com", "my-app"]) {
+      expect(patternFeatureEventSchema.safeParse({ ...valid, pack_domain: leak }).success).toBe(
+        false,
+      );
+      expect(patternFeatureEventSchema.safeParse({ ...valid, domain_object: leak }).success).toBe(
+        false,
+      );
+    }
+  });
+
+  it("rejects a confidence outside 0..1", () => {
+    expect(
+      patternFeatureEventSchema.safeParse({ ...valid, classifier_confidence: 1.5 }).success,
+    ).toBe(false);
+  });
+
   it("rejects record_id_hash", () => {
     expect(patternFeatureEventSchema.safeParse({ ...valid, record_id_hash: "h" }).success).toBe(
       false,

@@ -12,3 +12,11 @@ export {
   type PackWorkflow,
 } from "./schema.js";
 export { validatePack, alternatives, type PackIssue, type PackLoadResult } from "./validate.js";
+export { classifyEvent, type Classification, type ClassifierInput } from "./classify.js";
+export {
+  extractAmountUsd,
+  extractDiscountPct,
+  exceedsThreshold,
+  LOW_CONFIDENCE_THRESHOLD,
+  type Extraction,
+} from "./extract.js";

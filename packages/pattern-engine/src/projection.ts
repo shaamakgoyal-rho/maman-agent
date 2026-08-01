@@ -35,6 +35,17 @@ export function toPatternFeature(
       ? { item_count_bucket: bucketize(event.context.item_count)! }
       : {}),
     ...(event.duration_ms !== undefined ? { duration_ms: event.duration_ms } : {}),
+    // Domain classification, flattened. Carried through as-is: the projection
+    // never classifies (that happens on-device, pre-storage) and never invents
+    // a domain for an unclassified event.
+    ...(event.classification
+      ? {
+          pack_domain: event.classification.domain,
+          ...(event.classification.object ? { domain_object: event.classification.object } : {}),
+          ...(event.classification.action ? { domain_action: event.classification.action } : {}),
+          classifier_confidence: event.classification.confidence,
+        }
+      : {}),
     sensitivity: event.sensitivity,
     excluded_from_learning: excludedFromLearning,
   };
