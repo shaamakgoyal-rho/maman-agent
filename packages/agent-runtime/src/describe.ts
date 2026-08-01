@@ -110,3 +110,65 @@ export function describeAgentSpec(spec: AgentSpec): AgentDescription {
     limits,
   };
 }
+
+/**
+ * Description of a helper Maman is PROPOSING, before anything is compiled.
+ *
+ * At suggestion time no AgentSpec exists yet — the spec is only built when the
+ * worker accepts ("Try it") — so this derives from the pattern's required
+ * capabilities instead, and speaks in the conditional ("would") because nothing
+ * is committed. It deliberately reports LESS certainty than
+ * `describeAgentSpec`: no record/cost limits are claimed, since those are set at
+ * compile time.
+ *
+ * The approval claim is safe rather than optimistic: the compiler marks every
+ * write step approval-required and the policy engine independently requires
+ * approval for material writes, so a write-capable capability always implies an
+ * approval gate. `writes_need_approval_is_guaranteed` in the tests pins that.
+ */
+export type ProposedHelperDescription = {
+  /** One sentence in the conditional: what the helper would do if accepted. */
+  summary: string;
+  /** Where it would read from. */
+  reads: string[];
+  /** What it could change (empty = it could only read). */
+  changes: string[];
+  /** Whether it would ever change anything. */
+  read_only: boolean;
+};
+
+export function describeProposedHelper(capabilityIds: string[]): ProposedHelperDescription {
+  const reads: string[] = [];
+  const changes: string[] = [];
+
+  for (const id of capabilityIds) {
+    const capability = getCapability(id);
+    if (!capability) continue;
+    const label = CONNECTOR_LABELS[capability.connector] ?? capability.connector;
+    // A capability that can write is reported as a change; everything else reads.
+    if (capability.supported_modes.includes("write")) {
+      if (!changes.includes(label)) changes.push(label);
+    } else if (!reads.includes(label)) {
+      reads.push(label);
+    }
+  }
+
+  const readOnly = changes.length === 0;
+  if (reads.length === 0 && readOnly) {
+    return { summary: "", reads, changes, read_only: true };
+  }
+
+  const parts: string[] = [];
+  if (reads.length > 0) parts.push(`read ${humanList(reads)}`);
+  parts.push(
+    readOnly
+      ? "and change nothing at all"
+      : `show you every change first, then — only with your approval — update ${humanList(changes)}`,
+  );
+  return {
+    summary: `It would ${parts.join(", ")}.`,
+    reads,
+    changes,
+    read_only: readOnly,
+  };
+}

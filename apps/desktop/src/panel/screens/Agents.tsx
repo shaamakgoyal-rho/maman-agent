@@ -85,25 +85,17 @@ export function Agents() {
             </div>
             {/* What it DOES (derived from the compiled spec), then why it exists. */}
             <p className="text-sm text-ink">{described.summary}</p>
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {described.reads.length > 0 && (
-                <span className="rounded-full bg-line/60 px-2 py-0.5 text-muted">
-                  reads {described.reads.join(", ")}
-                </span>
+                <StatusPill tone="muted">reads {described.reads.join(", ")}</StatusPill>
               )}
-              <span
-                className={`rounded-full px-2 py-0.5 ${
-                  described.read_only ? "bg-success/10 text-success" : "bg-warning/10 text-warning"
-                }`}
-              >
+              <StatusPill tone={described.read_only ? "success" : "warning"}>
                 {described.read_only
                   ? "changes nothing"
                   : `changes ${described.changes.join(", ")}`}
-              </span>
+              </StatusPill>
               {described.requires_approval && (
-                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">
-                  needs your approval
-                </span>
+                <StatusPill tone="primary">needs your approval</StatusPill>
               )}
             </div>
             <Muted>Why: {latest.spec.description}</Muted>
