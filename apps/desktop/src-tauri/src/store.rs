@@ -19,6 +19,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 pub const EVENT_RETENTION_DAYS_DEFAULT: i64 = 30;
 pub const EPISODE_RETENTION_DAYS_DEFAULT: i64 = 90;
@@ -35,6 +37,8 @@ pub enum StoreError {
     ForbiddenField(String),
     #[error("key provider failure: {0}")]
     Key(String),
+    #[error("keychain access blocked or timed out — macOS did not release the store key")]
+    KeyTimeout,
 }
 
 /// Abstracts key acquisition so tests never touch the real Keychain.
@@ -77,6 +81,72 @@ pub struct StaticKeyProvider(pub [u8; 32]);
 impl KeyProvider for StaticKeyProvider {
     fn get_or_create_key(&self) -> Result<[u8; 32], StoreError> {
         Ok(self.0)
+    }
+}
+
+/// How long the first keychain attempt may block before store commands get an
+/// honest `KeyTimeout` instead of hanging on the store mutex.
+pub const KEY_FIRST_WAIT: Duration = Duration::from_secs(10);
+/// How long later store commands wait on the still-pending attempt before
+/// failing fast with the same honest error.
+pub const KEY_RETRY_WAIT: Duration = Duration::from_millis(500);
+
+/// Timeout-guarded, single-flight key acquisition.
+///
+/// macOS securityd can block a keyring call indefinitely — observed live when
+/// the "Always Allow" ACL confirmation dialog never rendered for the
+/// accessory-style app after a rebuild+re-sign. The keyring call therefore runs
+/// on a dedicated OS thread (never an async worker), and callers wait with a
+/// timeout so the store mutex is released and every store command surfaces an
+/// error the UI can render instead of hanging.
+///
+/// Single-flight: a timed-out attempt is parked, not abandoned — retries wait
+/// on the SAME thread, so at most one thread is ever stuck in securityd, and
+/// the moment the user approves access the pending attempt completes and the
+/// next store command opens the store without another prompt.
+pub struct GuardedKeyAcquire {
+    pending: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Result<[u8; 32], StoreError>>>>,
+}
+
+impl Default for GuardedKeyAcquire {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GuardedKeyAcquire {
+    pub fn new() -> Self {
+        Self { pending: std::sync::Mutex::new(None) }
+    }
+
+    pub async fn acquire(
+        &self,
+        provider: Arc<dyn KeyProvider>,
+        first_wait: Duration,
+        retry_wait: Duration,
+    ) -> Result<[u8; 32], StoreError> {
+        let (mut rx, wait) = {
+            let mut slot = self.pending.lock().expect("key acquire lock");
+            match slot.take() {
+                Some(rx) => (rx, retry_wait),
+                None => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(provider.get_or_create_key());
+                    });
+                    (rx, first_wait)
+                }
+            }
+        };
+        match tokio::time::timeout(wait, &mut rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(StoreError::Key("key acquisition thread died".into())),
+            Err(_) => {
+                // Still blocked in securityd: park the attempt for the next call.
+                *self.pending.lock().expect("key acquire lock") = Some(rx);
+                Err(StoreError::KeyTimeout)
+            }
+        }
     }
 }
 
@@ -293,6 +363,10 @@ impl LocalStore {
     }
 
     /// Same, with domain packs for the L1 classifier.
+    ///
+    /// NOTE: acquires the key synchronously on the calling task. The production
+    /// path uses `GuardedKeyAcquire` + `open_with_key` instead, so a keychain
+    /// call blocked in securityd can never hang the store mutex.
     pub async fn open_with_packs(
         db_path: &Path,
         key_provider: &dyn KeyProvider,
@@ -300,6 +374,16 @@ impl LocalStore {
         packs: Vec<crate::domain::DomainPack>,
     ) -> Result<Self, StoreError> {
         let key = key_provider.get_or_create_key()?;
+        Self::open_with_key(db_path, key, owner_user_id, packs).await
+    }
+
+    /// Opens the store with an already-acquired key.
+    pub async fn open_with_key(
+        db_path: &Path,
+        key: [u8; 32],
+        owner_user_id: &str,
+        packs: Vec<crate::domain::DomainPack>,
+    ) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
             .map_err(StoreError::Db)?
             .create_if_missing(true);
@@ -1776,5 +1860,83 @@ mod label_hit_ingest_tests {
         assert_eq!(features.len(), 1);
         assert_eq!(features[0]["pack_domain"], "finops");
         assert_eq!(features[0]["domain_object"], "invoice");
+    }
+}
+
+#[cfg(test)]
+mod key_acquire_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Mutex};
+
+    /// Blocks inside get_or_create_key until the test releases it — stands in
+    /// for securityd waiting on an ACL confirmation dialog that never renders.
+    struct BlockingProvider {
+        release: Mutex<mpsc::Receiver<[u8; 32]>>,
+        calls: AtomicUsize,
+    }
+
+    impl KeyProvider for BlockingProvider {
+        fn get_or_create_key(&self) -> Result<[u8; 32], StoreError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .map_err(|_| StoreError::Key("release channel closed".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_keychain_times_out_instead_of_deadlocking() {
+        let (release, rx) = mpsc::channel();
+        let provider = Arc::new(BlockingProvider {
+            release: Mutex::new(rx),
+            calls: AtomicUsize::new(0),
+        });
+        let acquire = GuardedKeyAcquire::new();
+        let first_wait = Duration::from_millis(100);
+        let retry_wait = Duration::from_millis(20);
+
+        // The blocked provider surfaces an honest KeyTimeout, promptly.
+        let started = std::time::Instant::now();
+        let first = acquire.acquire(provider.clone(), first_wait, retry_wait).await;
+        assert!(matches!(first, Err(StoreError::KeyTimeout)), "got {first:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "must not deadlock");
+
+        // Retries fail fast on the SAME in-flight attempt — never a second
+        // thread parked in securityd.
+        let second = acquire.acquire(provider.clone(), first_wait, retry_wait).await;
+        assert!(matches!(second, Err(StoreError::KeyTimeout)));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        // The user finally clicks "Always Allow": the parked attempt completes
+        // and the next call returns the key without prompting again.
+        release.send([7u8; 32]).unwrap();
+        let third = acquire
+            .acquire(provider.clone(), Duration::from_secs(5), Duration::from_secs(5))
+            .await;
+        assert_eq!(third.unwrap(), [7u8; 32]);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn key_errors_pass_through_and_allow_a_fresh_attempt() {
+        // A COMPLETED failure (not a timeout) must not stay parked: the next
+        // acquire tries the provider again (e.g. the user re-granted access).
+        let (release, rx) = mpsc::channel();
+        drop(release); // provider errors immediately
+        let provider = Arc::new(BlockingProvider {
+            release: Mutex::new(rx),
+            calls: AtomicUsize::new(0),
+        });
+        let acquire = GuardedKeyAcquire::new();
+        let wait = Duration::from_secs(5);
+
+        let first = acquire.acquire(provider.clone(), wait, wait).await;
+        assert!(matches!(first, Err(StoreError::Key(_))), "got {first:?}");
+        let second = acquire.acquire(provider.clone(), wait, wait).await;
+        assert!(matches!(second, Err(StoreError::Key(_))));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     }
 }

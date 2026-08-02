@@ -20,6 +20,7 @@ export function StatusBar() {
   const [health, setHealth] = useState<ObservationHealth>({
     observer: isTauri() ? "starting" : "observing", // web preview simulates observation
     paused: false,
+    store: "ok",
   });
   // The latest non-sticky beat, to fall back to when a sticky one expires.
   const fallback = useRef<StatusBeat>({ kind: "idle" });
@@ -61,7 +62,8 @@ export function StatusBar() {
         const raw = await loadSettingsRaw();
         const paused = raw ? Boolean(JSON.parse(raw).observation_paused) : false;
         const observer = isTauri() ? await invokeCommand<string>("observer_status") : "observing";
-        if (active) setHealth({ observer, paused });
+        const store = isTauri() ? await invokeCommand<string>("store_status") : "ok";
+        if (active) setHealth({ observer, paused, store });
       } catch {
         // Leave the previous health: a failed poll is not evidence of health.
       }

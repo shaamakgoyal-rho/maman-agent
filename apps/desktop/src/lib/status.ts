@@ -28,6 +28,8 @@ export type ObservationHealth = {
   /** observer_status command value: disabled|starting|observing|permission_required|failed */
   observer: string;
   paused: boolean;
+  /** store_status command value: ok|keychain_access_required|failed (absent in web preview). */
+  store?: string;
 };
 
 export type DotColor = "green" | "amber" | "gray" | "red";
@@ -39,7 +41,16 @@ export type StatusLine = {
   sticky: boolean;
 };
 
+/** Store states that freeze every surface (timeline, ingest, weekly stats). */
+const STORE_TEXT: Record<string, string> = {
+  keychain_access_required: "Maman needs keychain access — relaunch and click Always Allow",
+  failed: "Maman's local store is unavailable",
+};
+
 export function dotFor(health: ObservationHealth): DotColor {
+  // A blocked store outranks everything — even paused: nothing can be
+  // recorded or shown until the user re-grants keychain access.
+  if (health.store && STORE_TEXT[health.store]) return "red";
   if (health.paused) return "gray";
   switch (health.observer) {
     case "observing":
@@ -63,6 +74,13 @@ const DOT_TEXT: Record<DotColor, string> = {
 
 export function statusLine(beat: StatusBeat, health: ObservationHealth): StatusLine {
   const dot = dotFor(health);
+
+  // A blocked store names the exact fix — a generic "needs attention" would
+  // hide that the user has one specific action to take.
+  const storeText = health.store ? STORE_TEXT[health.store] : undefined;
+  if (storeText) {
+    return { dot: "red", text: storeText, sticky: false };
+  }
 
   // A broken/paused observer outranks pipeline beats: the bar must never say
   // "watching X" while nothing is actually being observed.

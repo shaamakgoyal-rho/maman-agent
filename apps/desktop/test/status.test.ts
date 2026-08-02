@@ -69,3 +69,44 @@ describe("statusLine", () => {
     expect(line).toEqual({ dot: "green", text: "Maman is observing", sticky: false });
   });
 });
+
+describe("store health (keychain)", () => {
+  it("a keychain-blocked store is red and names the exact fix", () => {
+    const health: ObservationHealth = {
+      observer: "observing",
+      paused: false,
+      store: "keychain_access_required",
+    };
+    expect(dotFor(health)).toBe("red");
+    const line = statusLine({ kind: "watching", title: "X", detail: "d" }, health);
+    expect(line.dot).toBe("red");
+    expect(line.text).toBe("Maman needs keychain access — relaunch and click Always Allow");
+    expect(line.sticky).toBe(false);
+  });
+
+  it("outranks paused and every pipeline beat: a frozen store is never hidden", () => {
+    const health: ObservationHealth = {
+      observer: "disabled",
+      paused: true,
+      store: "keychain_access_required",
+    };
+    expect(dotFor(health)).toBe("red");
+    expect(statusLine({ kind: "creating_agent", title: "X" }, health).text).toBe(
+      "Maman needs keychain access — relaunch and click Always Allow",
+    );
+  });
+
+  it("a failed store is red without overclaiming the cause", () => {
+    const health: ObservationHealth = { observer: "observing", paused: false, store: "failed" };
+    expect(dotFor(health)).toBe("red");
+    expect(statusLine({ kind: "idle" }, health).text).toBe("Maman's local store is unavailable");
+  });
+
+  it("store ok (or absent, in web preview) changes nothing", () => {
+    expect(dotFor({ ...OBSERVING, store: "ok" })).toBe("green");
+    expect(dotFor(OBSERVING)).toBe("green");
+    expect(statusLine({ kind: "idle" }, { ...OBSERVING, store: "ok" }).text).toBe(
+      "Maman is observing",
+    );
+  });
+});
