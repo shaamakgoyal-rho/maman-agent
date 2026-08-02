@@ -94,6 +94,14 @@ export const patternCandidateSchema = z
      * bar, never the safety bars — see the pattern engine.
      */
     template_id: z.string().optional(),
+    /**
+     * Distinct pack actions observed in this pattern's episodes, in first-seen
+     * order. This is what domain policy (L3) reasons about: an agent compiled
+     * from a workflow containing BOTH code_invoice and approve_invoice is the
+     * segregation-of-duties case, regardless of which capabilities the compiler
+     * chose. Pack taxonomy ids only.
+     */
+    domain_actions: z.array(packIdentifier).optional(),
   })
   .strict();
 

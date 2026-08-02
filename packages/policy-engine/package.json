@@ -16,6 +16,7 @@
   "dependencies": {
     "@maman/capability-catalog": "workspace:*",
     "@maman/contracts": "workspace:*",
+    "@maman/domain-packs": "workspace:*",
     "zod": "^3.24.1"
   },
   "devDependencies": {

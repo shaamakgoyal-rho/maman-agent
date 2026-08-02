@@ -284,6 +284,37 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
           </div>
         )}
 
+      {/* DOMAIN POLICY hold: the compliance beat. Not an approval the worker can
+          pass — policy says this agent may not do this at all (SoD) or needs a
+          second approver (dual control). Shown proudly: the cap is the feature. */}
+      {"policyHold" in runs && runs.policyHold && (
+        <div className="mt-2 card border-primary/40 bg-primary/5 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-ink">
+              {runs.policyHold.kind === "segregation_of_duties"
+                ? "Stopped by policy: a person must do this step"
+                : "Stopped by policy: needs a second approver"}
+            </p>
+            <StatusPill tone="primary">policy</StatusPill>
+          </div>
+          <ul className="mt-1 space-y-0.5 text-[11px] text-muted">
+            {runs.policyHold.reasons.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+          {runs.policyHold.ceiling && (
+            <p className="mt-1 text-[11px] text-muted">
+              Autonomy ceiling for this workflow: {runs.policyHold.ceiling.replace(/_/g, " ")}.
+            </p>
+          )}
+          <div className="mt-2">
+            <Button variant="secondary" onClick={() => runs.reset()}>
+              Done
+            </Button>
+          </div>
+        </div>
+      )}
+
       {runs.phase === "waiting_approval" && runs.pending && diff && (
         <div className="mt-2 card border-warning/40 bg-warning/5 p-2">
           <p className="text-xs font-medium">Approval required before any write</p>

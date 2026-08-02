@@ -15,3 +15,11 @@ export {
   effectiveStepRisk,
   type EvaluationContext,
 } from "./evaluate.js";
+export {
+  evaluatePackPolicy,
+  applyPackPolicy,
+  needsHumanApproval,
+  type PackPolicyStep,
+  type PackPolicyVerdict,
+  type PackPolicyReason,
+} from "./pack-policy.js";
