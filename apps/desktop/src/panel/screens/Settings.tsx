@@ -19,6 +19,14 @@ const OBSERVER_STATUS_LABEL: Record<string, string> = {
   failed: "Not observing — the observer could not start",
 };
 
+/** Local-store problems (only non-ok states render; "ok" shows nothing). */
+const STORE_STATUS_LABEL: Record<string, string> = {
+  keychain_access_required:
+    'Maman needs keychain access — relaunch and click "Always Allow" when macOS asks. ' +
+    "Until then nothing can be recorded or shown (the encrypted store is locked).",
+  failed: "The local store could not open. Nothing can be recorded or shown meanwhile.",
+};
+
 export function Settings() {
   const { settings, update } = useSettings();
   const enrollment = useEnrollment();
@@ -27,6 +35,7 @@ export function Settings() {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [connectOpened, setConnectOpened] = useState<string | null>(null);
   const [observerStatus, setObserverStatus] = useState<string | null>(null);
+  const [storeStatus, setStoreStatus] = useState<string | null>(null);
 
   useEffect(() => {
     void useEnrollment.getState().refresh();
@@ -40,6 +49,11 @@ export function Settings() {
       invokeCommand<string>("observer_status")
         .then((s) => {
           if (active) setObserverStatus(s);
+        })
+        .catch(() => {});
+      invokeCommand<string>("store_status")
+        .then((s) => {
+          if (active) setStoreStatus(s);
         })
         .catch(() => {});
     };
@@ -365,6 +379,9 @@ export function Settings() {
               <Muted>
                 The observer could not start. It will retry; nothing is observed meanwhile.
               </Muted>
+            )}
+            {storeStatus && STORE_STATUS_LABEL[storeStatus] && (
+              <p className="mt-2 text-xs text-danger">{STORE_STATUS_LABEL[storeStatus]}</p>
             )}
           </>
         )}
