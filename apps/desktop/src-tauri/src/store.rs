@@ -234,6 +234,27 @@ CREATE TABLE IF NOT EXISTS suggestion_history (
   reason TEXT,
   occurred_at TEXT NOT NULL
 );
+-- Layer 5 surfacing outcomes: what the user decided about a card, and the
+-- context it was shown in. This is the LOCAL training set for a future learned
+-- surfacing policy, so its privacy shape matters: pack taxonomy ids, enums and
+-- small integers only. There is deliberately no column that can hold a label,
+-- window title, account name or any other captured content, and nothing here is
+-- ever uploaded (no sync_outbox projection writes to it).
+CREATE TABLE IF NOT EXISTS suggestion_outcomes (
+  outcome_id TEXT PRIMARY KEY,
+  pattern_id TEXT NOT NULL,
+  workflow_id TEXT,
+  pack_domain TEXT,
+  cadence TEXT,
+  surface TEXT,
+  outcome TEXT NOT NULL,
+  reason TEXT,
+  local_dow INTEGER NOT NULL,
+  local_hour INTEGER NOT NULL,
+  cadence_phase TEXT,
+  seconds_since_trigger INTEGER,
+  occurred_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sync_outbox (
   outbox_id TEXT PRIMARY KEY,
   message_type TEXT NOT NULL,
@@ -1131,6 +1152,129 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Appends a Layer 5 surfacing outcome with its context features.
+    ///
+    /// Every field is validated or bounded before it lands: the caller is the
+    /// webview, so a bad `local_dow` or a stray content string must not become
+    /// a poisoned training row. Out-of-range numbers and over-long identifiers
+    /// are rejected rather than clamped — a wrong row is worse than no row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn suggestion_outcome_log(
+        &self,
+        pattern_id: &str,
+        workflow_id: Option<&str>,
+        pack_domain: Option<&str>,
+        cadence: Option<&str>,
+        surface: Option<&str>,
+        outcome: &str,
+        reason: Option<&str>,
+        local_dow: i64,
+        local_hour: i64,
+        cadence_phase: Option<&str>,
+        seconds_since_trigger: Option<i64>,
+    ) -> Result<(), StoreError> {
+        const OUTCOMES: [&str; 5] = ["accepted", "snoozed", "dismissed", "never_suggest", "wrong"];
+        const CADENCES: [&str; 5] = [
+            "continuous",
+            "fiscal_monthly",
+            "weekly",
+            "date_driven",
+            "event_driven",
+        ];
+        const SURFACES: [&str; 4] = [
+            "pre_close",
+            "on_trigger",
+            "same_weekday_observed",
+            "after_verification",
+        ];
+        const PHASES: [&str; 3] = ["pre_close", "in_close", "mid_period"];
+
+        fn taxonomy_ok(v: &str) -> bool {
+            !v.is_empty()
+                && v.len() <= 48
+                && v
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        }
+        fn one_of(v: Option<&str>, allowed: &[&str]) -> Result<(), StoreError> {
+            match v {
+                None => Ok(()),
+                Some(x) if allowed.contains(&x) => Ok(()),
+                Some(_) => Err(StoreError::InvalidPayload("value outside allowed set".into())),
+            }
+        }
+
+        if pattern_id.is_empty() || pattern_id.len() > 128 {
+            return Err(StoreError::InvalidPayload("pattern_id length".into()));
+        }
+        for taxonomy in [workflow_id, pack_domain] {
+            if let Some(v) = taxonomy {
+                if !taxonomy_ok(v) {
+                    return Err(StoreError::InvalidPayload("taxonomy id shape".into()));
+                }
+            }
+        }
+        if !OUTCOMES.contains(&outcome) {
+            return Err(StoreError::InvalidPayload("unknown outcome".into()));
+        }
+        one_of(cadence, &CADENCES)?;
+        one_of(surface, &SURFACES)?;
+        one_of(cadence_phase, &PHASES)?;
+        // Reason is a closed vocabulary, so it can never carry free-form content.
+        one_of(
+            reason,
+            &[
+                "not_useful",
+                "wrong_pattern",
+                "too_risky",
+                "not_now",
+                "never_suggest",
+                "other",
+            ],
+        )?;
+        if !(0..=6).contains(&local_dow) || !(0..=23).contains(&local_hour) {
+            return Err(StoreError::InvalidPayload("dow/hour out of range".into()));
+        }
+        if let Some(s) = seconds_since_trigger {
+            if s < 0 {
+                return Err(StoreError::InvalidPayload("negative seconds_since_trigger".into()));
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO suggestion_outcomes (
+               outcome_id, pattern_id, workflow_id, pack_domain, cadence, surface,
+               outcome, reason, local_dow, local_hour, cadence_phase,
+               seconds_since_trigger, occurred_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid_like_id())
+        .bind(pattern_id)
+        .bind(workflow_id)
+        .bind(pack_domain)
+        .bind(cadence)
+        .bind(surface)
+        .bind(outcome)
+        .bind(reason)
+        .bind(local_dow)
+        .bind(local_hour)
+        .bind(cadence_phase)
+        .bind(seconds_since_trigger)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// How many outcome rows are recorded (surfaced in Privacy so the user can
+    /// see the size of the local training set, and delete it).
+    pub async fn suggestion_outcome_count(&self) -> Result<i64, StoreError> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM suggestion_outcomes")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+
     /// Non-mutating peek at the next queued sync payloads (decrypted) so the
     /// user can see exactly what would leave the device. Read-only: no drain,
     /// no attempt bump.
@@ -1345,6 +1489,92 @@ mod tests {
 
         // Suggestion history ledger appends.
         store.suggestion_history_log("pat-1", "never", Some("not my workflow")).await.unwrap();
+        store.close().await;
+    }
+
+    /// The Layer 5 outcome ledger is a training set, so a poisoned row is worse
+    /// than a missing one: every field is validated before it lands.
+    #[tokio::test]
+    async fn suggestion_outcomes_reject_bad_rows_and_never_store_content() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+
+        store
+            .suggestion_outcome_log(
+                "pat-1",
+                Some("month_end_accruals"),
+                Some("finops"),
+                Some("fiscal_monthly"),
+                Some("pre_close"),
+                "accepted",
+                None,
+                3,
+                14,
+                Some("pre_close"),
+                Some(3600),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.suggestion_outcome_count().await.unwrap(), 1);
+
+        // A free-text "reason" is the obvious way content would leak in — the
+        // closed vocabulary refuses it.
+        let leak = store
+            .suggestion_outcome_log(
+                "pat-1",
+                None,
+                None,
+                None,
+                None,
+                "dismissed",
+                Some("Acme Corp invoice INV-4471 looked wrong"),
+                3,
+                14,
+                None,
+                None,
+            )
+            .await;
+        assert!(leak.is_err(), "free-form reason must be rejected");
+
+        // Unknown outcome, out-of-range clock fields, and a workflow_id that is
+        // really a sentence are all rejected.
+        for bad in [
+            store
+                .suggestion_outcome_log("p", None, None, None, None, "loved_it", None, 1, 1, None, None)
+                .await,
+            store
+                .suggestion_outcome_log("p", None, None, None, None, "accepted", None, 9, 1, None, None)
+                .await,
+            store
+                .suggestion_outcome_log("p", None, None, None, None, "accepted", None, 1, 99, None, None)
+                .await,
+            store
+                .suggestion_outcome_log(
+                    "p",
+                    Some("Reviewing Acme's renewal"),
+                    None,
+                    None,
+                    None,
+                    "accepted",
+                    None,
+                    1,
+                    1,
+                    None,
+                    None,
+                )
+                .await,
+            store
+                .suggestion_outcome_log("p", None, None, Some("hourly"), None, "accepted", None, 1, 1, None, None)
+                .await,
+            store
+                .suggestion_outcome_log("", None, None, None, None, "accepted", None, 1, 1, None, None)
+                .await,
+        ] {
+            assert!(bad.is_err(), "invalid outcome row must be rejected");
+        }
+
+        // Only the one good row survived.
+        assert_eq!(store.suggestion_outcome_count().await.unwrap(), 1);
         store.close().await;
     }
 
