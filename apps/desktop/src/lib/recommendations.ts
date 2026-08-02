@@ -12,7 +12,7 @@ import {
 import { patternGates, type FormingProgress } from "./forming.js";
 import { create } from "zustand";
 import { z } from "zod";
-import { invokeCommand, isTauri } from "./bridge.js";
+import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 import { getMemoryRawEvents } from "./events.js";
 import { canSurfaceSuggestion, snoozeUntil, type SnoozeOption } from "./suggestion-policy.js";
 import { useSettings } from "../state/settings.js";
@@ -323,6 +323,30 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
       });
     }
     forming.sort((a, b) => b.progress.ratio - a.progress.ratio);
+
+    // Status bar: the current top of the funnel, named after the workflow.
+    const freshItem = items.find((i) => i.entry.status === "new");
+    if (freshItem) {
+      await emitAppEvent({
+        type: "status_beat",
+        beat: {
+          kind: "suggested",
+          title: freshItem.entry.custom_title ?? freshItem.recommendation.title,
+        },
+      });
+    } else if (forming.length > 0) {
+      const top = forming[0]!;
+      await emitAppEvent({
+        type: "status_beat",
+        beat: {
+          kind: "watching",
+          title: top.title,
+          detail: `${top.progress.metCount} of ${top.progress.total} checks`,
+        },
+      });
+    } else {
+      await emitAppEvent({ type: "status_beat", beat: { kind: "idle" } });
+    }
 
     // Keep dismissed/accepted history entries visible in their filters even
     // when the engine no longer produces them (data deleted, cooldown, …).

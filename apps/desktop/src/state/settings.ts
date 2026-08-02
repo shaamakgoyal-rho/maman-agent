@@ -29,6 +29,8 @@ export const localSettingsSchema = z
     quiet_hours_start: z.string().default("18:00"),
     quiet_hours_end: z.string().default("08:30"),
     reduced_motion: z.enum(["system", "on", "off"]).default("system"),
+    /** The always-on-top subtitle bar showing what Maman is doing right now. */
+    statusbar_enabled: z.boolean().default(true),
     global_shortcut: z.string().default("Control+Alt+P"),
     // Replay-verification gate: a pattern becomes a suggestion card only after
     // the compiled candidate has been tested against the worker's own recorded

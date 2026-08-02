@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { z } from "zod";
-import { agentSpecSchema, uuidv7, type AgentSpec, type PatternCandidate } from "@maman/contracts";
+import {
+  agentSpecSchema,
+  patternCandidateSchema,
+  uuidv7,
+  type AgentSpec,
+  type PatternCandidate,
+} from "@maman/contracts";
 import {
   compileAgentSpec,
   renderPlainLanguagePlan,
@@ -9,7 +15,7 @@ import {
 } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DemoModelProvider } from "@maman/model-provider";
-import { invokeCommand, isTauri } from "./bridge.js";
+import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 
 /**
  * Local agent store (demo/local mode; server persistence joins at M7).
@@ -56,6 +62,10 @@ const agentRecordSchema = z
     // explicit grant changes anything. Never auto-promoted.
     approved_runs: z.number().int().nonnegative().default(0),
     draft_autonomy: z.boolean().default(false),
+    // The REAL detected candidate this agent was compiled from, so reruns
+    // recompile from the same evidence. Older records lack it and fall back
+    // to a minimal stand-in (Agents.tsx candidateFor).
+    source_candidate: patternCandidateSchema.optional(),
   })
   .strict();
 
@@ -92,6 +102,8 @@ type AgentsStore = {
     candidate: PatternCandidate,
     generalizedIntent: string,
     desiredOutcome: string,
+    /** The exact workflow name the card showed — becomes the agent's name. */
+    displayName?: string,
   ) => Promise<CreateDraftResult>;
   /** Material edit: new immutable version; agent returns to shadow. */
   editDescription: (agentId: string, description: string) => Promise<boolean>;
@@ -136,7 +148,11 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     set({ agents: [], hydrated: true });
   },
 
-  createDraft: async (candidate, generalizedIntent, desiredOutcome) => {
+  createDraft: async (candidate, generalizedIntent, desiredOutcome, displayName) => {
+    await emitAppEvent({
+      type: "status_beat",
+      beat: { kind: "creating_agent", title: displayName ?? "a new helper" },
+    });
     const result = await compileAgentSpec({
       candidate,
       generalized_intent: generalizedIntent,
@@ -157,12 +173,22 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     });
 
     if (result.status === "blocked") {
+      await emitAppEvent({
+        type: "status_beat",
+        beat: {
+          kind: "agent_failed",
+          title: displayName ?? "a new helper",
+          message: result.message,
+        },
+      });
       return { ok: false, message: result.message };
     }
 
     const agent: AgentRecord = {
       agent_id: result.spec.agent_id,
-      name: result.spec.name,
+      // Named after the exact workflow it automates (the card's title), not
+      // the compiler's generic copy.
+      name: displayName ?? result.spec.name,
       state: "draft", // never silently active
       versions: [
         {
@@ -175,6 +201,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
         },
       ],
       created_at: result.spec.created_at,
+      source_candidate: candidate,
       server_agent_id: null,
       generalized_intent: generalizedIntent,
       desired_outcome: desiredOutcome,
@@ -184,6 +211,10 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
     await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
     set({ agents });
+    await emitAppEvent({
+      type: "status_beat",
+      beat: { kind: "agent_ready", title: agent.name },
+    });
     return {
       ok: true,
       agent,

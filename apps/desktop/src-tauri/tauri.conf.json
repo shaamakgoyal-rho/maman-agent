@@ -41,6 +41,25 @@
         "visible": false,
         "decorations": true,
         "alwaysOnTop": true
+      },
+      {
+        "label": "statusbar",
+        "url": "statusbar.html",
+        "title": "Maman Status",
+        "width": 480,
+        "height": 40,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": false,
+        "visible": false,
+        "acceptFirstMouse": false
       }
     ],
     "security": {

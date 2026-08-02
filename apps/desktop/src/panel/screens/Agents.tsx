@@ -9,8 +9,12 @@ import { useEnrollment } from "../../state/enrollment.js";
 import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
 
-/** Minimal candidate for the reconciliation recipe (keys off intent). */
+/**
+ * The candidate reruns recompile from: the REAL detected candidate stored at
+ * creation, falling back to a minimal stand-in for records that predate it.
+ */
 function candidateFor(agent: AgentRecord): PatternCandidate {
+  if (agent.source_candidate) return agent.source_candidate;
   return {
     pattern_id: agent.versions[0]!.spec.source_pattern_id,
     owner_user_id: agent.versions[0]!.spec.owner_user_id,
@@ -209,12 +213,14 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
           candidateFor(agent),
           agent.generalized_intent,
           agent.desired_outcome,
+          agent.name,
         );
       else
         await localRuns.startSupervised(
           candidateFor(agent),
           agent.generalized_intent,
           agent.desired_outcome,
+          agent.name,
         );
       return;
     }

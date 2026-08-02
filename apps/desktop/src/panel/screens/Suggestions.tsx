@@ -392,13 +392,12 @@ function SuggestionCard({
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
               // The pattern's own derived intent selects the compiler recipe;
               // the legacy reconciliation intent stays the fallback.
-              const created = await useAgents
-                .getState()
-                .createDraft(
-                  item.candidate,
-                  rec.generalized_intent ?? "reconcile_account_list",
-                  rec.summary,
-                );
+              const created = await useAgents.getState().createDraft(
+                item.candidate,
+                rec.generalized_intent ?? "reconcile_account_list",
+                rec.summary,
+                title, // the exact workflow name on the card
+              );
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
               if (created.ok) {
                 await act(item.signature, { type: "accepted" });

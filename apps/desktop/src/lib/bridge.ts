@@ -16,12 +16,16 @@ export async function invokeCommand<T>(cmd: string, args?: Record<string, unknow
 
 // ---- cross-window app events ----
 
+import type { StatusBeat } from "./status.js";
+
 export type AppEvent =
   | { type: "observation_changed" }
   | { type: "settings_changed" }
   | { type: "pet_state_probe" }
   | { type: "pet_state_report"; state: string }
-  | { type: "simulate_pet_event"; event: string };
+  | { type: "simulate_pet_event"; event: string }
+  /** A pipeline moment for the status bar (see lib/status.ts). */
+  | { type: "status_beat"; beat: StatusBeat };
 
 type Listener = (event: AppEvent) => void;
 
