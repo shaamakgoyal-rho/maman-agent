@@ -334,7 +334,7 @@ pub fn input_from_payload(payload: &serde_json::Value, app_category: &str) -> Cl
         semantic_type: s("/target/semantic_type"),
         object_type: s("/context/object_type"),
         label_pattern_hits: payload
-            .pointer("/label_pattern_hits")
+            .pointer("/target/label_pattern_hits")
             .and_then(|v| v.as_array())
             .map(|a| {
                 a.iter()
