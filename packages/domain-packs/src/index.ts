@@ -20,3 +20,12 @@ export {
   LOW_CONFIDENCE_THRESHOLD,
   type Extraction,
 } from "./extract.js";
+export {
+  matchEpisode,
+  matchSignature,
+  templateReps,
+  MAX_NOISE_BETWEEN_STEPS,
+  type TemplateMatch,
+  type TemplateStepInput,
+} from "./template.js";
+export { SHIPPED_PACKS } from "./packs.generated.js";

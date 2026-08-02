@@ -154,7 +154,8 @@ CREATE TABLE IF NOT EXISTS pattern_candidates (
   payload_sha256 TEXT NOT NULL,
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
-  suppressed_until TEXT
+  suppressed_until TEXT,
+  template_id TEXT
 );
 CREATE TABLE IF NOT EXISTS suggestion_history (
   recommendation_local_id TEXT PRIMARY KEY,
@@ -213,6 +214,9 @@ const COLUMN_MIGRATIONS: &[&str] = &[
     "ALTER TABLE workflow_events ADD COLUMN domain_object TEXT",
     "ALTER TABLE workflow_events ADD COLUMN domain_action TEXT",
     "ALTER TABLE workflow_events ADD COLUMN classifier_confidence REAL",
+    // L2 template recognition: "<pack_domain>/<workflow_id>", NULL for novel
+    // patterns. Plaintext taxonomy id, same privacy class as app_category.
+    "ALTER TABLE pattern_candidates ADD COLUMN template_id TEXT",
 ];
 
 pub struct LocalStore {
@@ -934,16 +938,19 @@ impl LocalStore {
         let plaintext = serde_json::to_vec(candidate)
             .map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
         let blob = self.encrypt(&plaintext, &aad)?;
+        // Optional: present only for template-recognized candidates.
+        let template_id = candidate.get("template_id").and_then(|v| v.as_str());
         sqlx::query(
             "INSERT INTO pattern_candidates
-               (pattern_id, status, opportunity_score, encrypted_payload, payload_sha256, first_seen_at, last_seen_at)
-             VALUES (?, ?, ?, ?, '', ?, ?)
+               (pattern_id, status, opportunity_score, encrypted_payload, payload_sha256, first_seen_at, last_seen_at, template_id)
+             VALUES (?, ?, ?, ?, '', ?, ?, ?)
              ON CONFLICT(pattern_id) DO UPDATE SET
                status = excluded.status,
                opportunity_score = excluded.opportunity_score,
                encrypted_payload = excluded.encrypted_payload,
                first_seen_at = excluded.first_seen_at,
-               last_seen_at = excluded.last_seen_at",
+               last_seen_at = excluded.last_seen_at,
+               template_id = excluded.template_id",
         )
         .bind(pattern_id)
         .bind(status)
@@ -951,6 +958,7 @@ impl LocalStore {
         .bind(blob)
         .bind(first_seen_at)
         .bind(last_seen_at)
+        .bind(template_id)
         .execute(&self.pool)
         .await?;
         Ok(())

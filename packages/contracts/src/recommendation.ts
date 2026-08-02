@@ -50,6 +50,24 @@ export const recommendationSchema = z
      * — the compiler's recipe selector input. Optional for wire compatibility.
      */
     generalized_intent: z.string().optional(),
+    /**
+     * Present when this suggestion comes from a pack workflow TEMPLATE match
+     * rather than novel-pattern clustering. The card must present this as its
+     * own claim ("matches a known workflow, seen N×") and must NOT show a
+     * replay score until enough runs exist for one to mean anything — at
+     * small N the replay verifier is self-referential.
+     */
+    template: z
+      .object({
+        pack_domain: z.string(),
+        workflow_id: z.string(),
+        workflow_name: z.string(),
+        cadence: z.string(),
+        reps: z.number().int().nonnegative(),
+        min_reps: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
     evidence: recommendationEvidenceSchema,
     projected_minutes_saved_weekly: z.number().nonnegative(),
     expected_cost_usd_low: z.number().nonnegative(),

@@ -1,4 +1,5 @@
 import type { PatternCandidate, PatternFeatureEvent, Recommendation } from "@maman/contracts";
+import { SHIPPED_PACKS } from "@maman/domain-packs";
 import {
   effectiveEligibility,
   patternSignature,
@@ -176,6 +177,9 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
         event_gap_boundary_ms: settings.detect_event_gap_boundary_s * 1000,
         split_on_sequence_restart: settings.detect_split_on_sequence_restart,
       },
+      // Template-primed detection (L2): the same compiled packs the Rust core
+      // classifies with at ingest.
+      packs: SHIPPED_PACKS,
     });
 
     // ---- replay verification (client-side; traces never leave the device) ----
@@ -263,7 +267,14 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           custom_title: null,
         } satisfies SuggestionEntry);
 
-      if (passesGate(verification)) {
+      if (recommendation.template) {
+        // Template match: the engine already applied min_reps_with_template and
+        // the safety bars. The card makes the TEMPLATE claim ("matches a known
+        // workflow, seen N x"); replay numbers appear only once runs_tested
+        // clears the verify gate — at small N the verifier is self-referential
+        // and a 2/2 score would be noise dressed as proof.
+        items.push({ recommendation, candidate, signature, entry, verification });
+      } else if (passesGate(verification)) {
         // Proven: this becomes the card.
         items.push({ recommendation, candidate, signature, entry, verification });
       } else if (entry.status !== "dismissed" && entry.status !== "accepted") {
