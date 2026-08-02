@@ -8,6 +8,7 @@ import {
   type RecommendationWithState,
 } from "../../lib/recommendations.js";
 import type { SnoozeOption } from "../../lib/suggestion-policy.js";
+import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
 
 /**
@@ -236,6 +237,12 @@ function SuggestionCard({
   const [draftTitle, setDraftTitle] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
   const proposed = describeProposedHelper(rec.required_capabilities);
+  const settings = useSettings((s) => s.settings);
+  /** Replay numbers are only shown once enough runs exist for them to mean something. */
+  const replayProven =
+    v.runs_tested >= settings.verify_min_runs &&
+    v.runs_tested > 0 &&
+    v.runs_matched / v.runs_tested >= settings.verify_min_match_pct;
   const title = item.entry.custom_title ?? rec.title;
   const divergences = v.results.filter((r) => r.verdict !== "match");
 
@@ -273,15 +280,47 @@ function SuggestionCard({
             <SectionTitle>{title}</SectionTitle>
           </button>
         )}
-        <StatusPill tone="success">verified</StatusPill>
+        {/* A template match is its own honest claim: recognized, counted — not
+            "verified". The verified pill needs a replay score with enough runs
+            behind it to mean something; at small N the verifier is
+            self-referential and 2/2 would be noise dressed as proof. */}
+        {rec.template && !replayProven ? (
+          <StatusPill tone="primary">known workflow</StatusPill>
+        ) : (
+          <StatusPill tone="success">verified</StatusPill>
+        )}
       </div>
 
-      {/* The proof — every number here is a real replayed run. */}
-      <p className="mt-1 text-sm text-ink">
-        I can do this for you — I tested it against your last{" "}
-        <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
-        <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
-      </p>
+      {rec.template ? (
+        <>
+          {/* The template claim — recognition + honest rep count. */}
+          <p className="mt-1 text-sm text-ink">
+            This matches <span className="font-semibold">{rec.template.workflow_name}</span> — a
+            known {rec.template.pack_domain} workflow. Seen{" "}
+            <span className="font-semibold tabular-nums">{rec.template.reps}</span>×
+            {rec.template.cadence === "fiscal_monthly"
+              ? " (distinct month-ends)"
+              : rec.template.cadence === "weekly"
+                ? " (distinct weeks)"
+                : ""}
+            .
+          </p>
+          {replayProven && (
+            <p className="mt-1 text-sm text-ink">
+              I also tested it against your last{" "}
+              <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+              <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
+            </p>
+          )}
+        </>
+      ) : (
+        /* The proof — every number here is a real replayed run. */
+        <p className="mt-1 text-sm text-ink">
+          I can do this for you — I tested it against your last{" "}
+          <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+          <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
+        </p>
+      )}
       <Muted>
         ~{Math.round(rec.projected_minutes_saved_weekly)} min/week of repeated work, seen{" "}
         {rec.evidence.occurrence_count}× on {rec.evidence.distinct_day_count}{" "}

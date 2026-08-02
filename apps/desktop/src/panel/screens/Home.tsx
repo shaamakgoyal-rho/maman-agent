@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   demoHistoryFixture,
+  finopsThreeWayRepFixture,
   liveWorkflowRepFixture,
   reconciliationFixture,
 } from "@maman/demo-fixtures";
@@ -18,6 +19,8 @@ import { emitAppEvent } from "../../lib/bridge.js";
 // same-day, back-to-back sequence like real repeated work.
 let liveSimBaseAtMs: number | null = null;
 let liveSimRepIndex = 0;
+let domainSimBaseAtMs: number | null = null;
+let domainSimRepIndex = 0;
 
 export function Home({ petState }: { petState: PetStateName }) {
   const { settings, update } = useSettings();
@@ -25,6 +28,7 @@ export function Home({ petState }: { petState: PetStateName }) {
   const [demoResult, setDemoResult] = useState<IngestResult | null>(null);
   const [demoBusy, setDemoBusy] = useState(false);
   const [liveRepCount, setLiveRepCount] = useState(0);
+  const [finopsRepCount, setFinopsRepCount] = useState(0);
   const [capabilities, setCapabilities] = useState<CapabilityLine[]>([]);
 
   useEffect(() => {
@@ -66,6 +70,33 @@ export function Home({ petState }: { petState: PetStateName }) {
       );
       setDemoResult(result);
       setLiveRepCount(rep + 1);
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+      await useRecommendations.getState().refresh();
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
+  /**
+   * Simulated FinOps rep: one repetition of the finops three_way_match PACK
+   * workflow, classified by the real domain classifier. Two clicks make the
+   * template card appear — the L2 arc, drivable without an ERP login.
+   */
+  const simulateFinopsRep = async () => {
+    setDemoBusy(true);
+    try {
+      // Backdated an hour so several 11-minute-spaced reps land in the past.
+      domainSimBaseAtMs ??= Date.now() - 60 * 60_000;
+      const rep = domainSimRepIndex++;
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STARTED" });
+      const result = await ingestEvents(
+        finopsThreeWayRepFixture({ rep_index: rep, base_at_ms: domainSimBaseAtMs }),
+        { observationPaused: settings.observation_paused },
+      );
+      setDemoResult(result);
+      setFinopsRepCount(rep + 1);
       await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
       await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
       await useRecommendations.getState().refresh();
@@ -183,6 +214,9 @@ export function Home({ petState }: { petState: PetStateName }) {
           </Button>
           <Button variant="secondary" onClick={() => void simulateLiveRep()} disabled={demoBusy}>
             Simulate live workflow rep{liveRepCount > 0 ? ` (${liveRepCount})` : ""}
+          </Button>
+          <Button variant="secondary" onClick={() => void simulateFinopsRep()} disabled={demoBusy}>
+            Simulate FinOps rep{finopsRepCount > 0 ? ` (${finopsRepCount})` : ""}
           </Button>
           {demoResult && (
             <span className="text-xs text-muted tabular-nums">

@@ -88,6 +88,12 @@ export const patternCandidateSchema = z
     projected_minutes_saved_weekly: z.number().nonnegative(),
     opportunity_score: score,
     status: patternCandidateStatus,
+    /**
+     * Set when the candidate was recognized by a pack workflow template (L2):
+     * "<pack_domain>/<workflow_id>". Template recognition lowers the REPETITION
+     * bar, never the safety bars — see the pattern engine.
+     */
+    template_id: z.string().optional(),
   })
   .strict();
 

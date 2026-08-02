@@ -136,6 +136,9 @@ importers:
       '@maman/demo-fixtures':
         specifier: workspace:*
         version: link:../../packages/demo-fixtures
+      '@maman/domain-packs':
+        specifier: workspace:*
+        version: link:../../packages/domain-packs
       '@maman/model-provider':
         specifier: workspace:*
         version: link:../../packages/model-provider
@@ -625,6 +628,9 @@ importers:
       '@maman/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@maman/domain-packs':
+        specifier: workspace:*
+        version: link:../domain-packs
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -703,6 +709,9 @@ importers:
       '@maman/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@maman/domain-packs':
+        specifier: workspace:*
+        version: link:../domain-packs
     devDependencies:
       '@maman/demo-fixtures':
         specifier: workspace:*

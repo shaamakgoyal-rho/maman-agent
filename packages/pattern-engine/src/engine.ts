@@ -5,11 +5,18 @@ import {
   type Recommendation,
 } from "@maman/contracts";
 import {
+  matchEpisode,
+  templateReps,
+  type DomainPack,
+  type TemplateMatch,
+  type TemplateStepInput,
+} from "@maman/domain-packs";
+import {
   segmentEpisodes,
   type SegmentationOptions,
   type SegmentedEpisode,
 } from "./segmentation.js";
-import { clusterEpisodes, DEFAULT_SIMILARITY_THRESHOLD } from "./similarity.js";
+import { clusterEpisodes, sequenceSimilarity, DEFAULT_SIMILARITY_THRESHOLD } from "./similarity.js";
 import {
   distinctDayCount,
   ELIGIBILITY,
@@ -54,6 +61,13 @@ export type EngineOptions = {
   opportunity_threshold?: number;
   /** Episode boundary tuning (gap boundary, back-to-back repetition split). */
   segmentation?: SegmentationOptions;
+  /**
+   * Domain packs for template-primed detection (L2). Template recognition runs
+   * BEFORE novel clustering and lowers only the repetition bar
+   * (min_reps_with_template, counted per the workflow's cadence). The safety
+   * bars — feasibility and risk — apply to template candidates unchanged.
+   */
+  packs?: DomainPack[];
 };
 
 /** Effective bars: overrides merged over production defaults, clamped. */
@@ -112,8 +126,40 @@ export function runPatternEngine(
     (e) => !e.excluded_from_learning && e.sensitivity_max !== "restricted",
   );
 
+  const candidates: PatternCandidate[] = [];
+  const recommendations: Recommendation[] = [];
+  const watching: WatchingPattern[] = [];
+
+  // ---- L2: template-primed detection, BEFORE novel clustering ----
+  // Episodes recognized by a pack workflow are grouped per workflow and
+  // removed from the clustering input: they are already explained.
+  const templateGroups = new Map<string, { match: TemplateMatch; members: SegmentedEpisode[] }>();
+  const unexplained: SegmentedEpisode[] = [];
+  for (const episode of learnable) {
+    const match = options.packs?.length
+      ? matchEpisode(options.packs, episode.events.map(toTemplateStep))
+      : null;
+    if (match) {
+      const key = `${match.pack_domain}/${match.workflow_id}`;
+      const group = templateGroups.get(key) ?? { match, members: [] };
+      group.members.push(episode);
+      templateGroups.set(key, group);
+    } else {
+      unexplained.push(episode);
+    }
+  }
+
+  for (const [templateId, { match, members }] of [...templateGroups.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const built = buildTemplateCandidate(templateId, match, members, eligibility, options);
+    candidates.push(built.candidate);
+    if (built.recommendation) recommendations.push(built.recommendation);
+    else if (built.watching) watching.push(built.watching);
+  }
+
   const clusters = clusterEpisodes(
-    learnable.map((e) => ({
+    unexplained.map((e) => ({
       tokens: e.canonical_tokens,
       active_duration_ms: e.active_duration_ms,
       app_categories: e.app_categories,
@@ -121,12 +167,8 @@ export function runPatternEngine(
     threshold,
   );
 
-  const candidates: PatternCandidate[] = [];
-  const recommendations: Recommendation[] = [];
-  const watching: WatchingPattern[] = [];
-
   for (const cluster of clusters) {
-    const members = cluster.members.map((i) => learnable[i]!);
+    const members = cluster.members.map((i) => unexplained[i]!);
     if (members.length < 2) continue; // singletons are never candidates
 
     const scores = scorePattern(members, cluster.similarity_mean);
@@ -191,6 +233,151 @@ export function runPatternEngine(
   }
 
   return { episodes, candidates, recommendations, watching };
+}
+
+function toTemplateStep(event: PatternFeatureEvent): TemplateStepInput {
+  return {
+    ...(event.domain_action ? { domain_action: event.domain_action } : {}),
+    ...(event.domain_object ? { domain_object: event.domain_object } : {}),
+    ...(event.target_role ? { target_role: event.target_role } : {}),
+    event_type: event.event_type,
+  };
+}
+
+/** Mean pairwise sequence similarity — honest even for a 2-member group. */
+function meanSimilarity(members: SegmentedEpisode[]): number {
+  if (members.length < 2) return 1;
+  let total = 0;
+  let count = 0;
+  for (let a = 0; a < members.length; a++) {
+    for (let b = a + 1; b < members.length; b++) {
+      total += sequenceSimilarity(members[a]!.canonical_tokens, members[b]!.canonical_tokens);
+      count++;
+    }
+  }
+  return count === 0 ? 1 : total / count;
+}
+
+/**
+ * Builds the candidate (+ recommendation or watching entry) for one template
+ * group. Template recognition replaces the VOLUME bars with the workflow's
+ * cadence-aware `min_reps_with_template`; the SAFETY bars — feasibility and
+ * risk — are enforced unchanged (a template can never be a way around them),
+ * and suppression/dismissal are honored exactly like novel patterns.
+ */
+function buildTemplateCandidate(
+  templateId: string,
+  match: TemplateMatch,
+  members: SegmentedEpisode[],
+  eligibility: EligibilityThresholds,
+  options: EngineOptions,
+): {
+  candidate: PatternCandidate;
+  recommendation?: Recommendation;
+  watching?: WatchingPattern;
+} {
+  const similarityMean = meanSimilarity(members);
+  const scores = scorePattern(members, similarityMean);
+  const sequence = representativeSequence(members);
+  const durations = members.map((m) => m.active_duration_ms);
+  const firstSeen = members.map((m) => m.started_at).sort()[0]!;
+  const lastSeen = members
+    .map((m) => m.ended_at)
+    .sort()
+    .at(-1)!;
+  const signature = patternSignature(sequence);
+  const reps = templateReps(
+    members.map((m) => m.started_at),
+    match.cadence,
+  );
+
+  const suppressed = options.suppressed_signatures?.includes(signature) ?? false;
+  const dismissedRecently = options.recently_dismissed_signatures?.includes(signature) ?? false;
+  const safe =
+    scores.feasibility_score >= eligibility.min_feasibility &&
+    scores.risk_score <= eligibility.max_risk;
+  const surfaceable =
+    reps >= match.min_reps_with_template && safe && !suppressed && !dismissedRecently;
+
+  const candidate: PatternCandidate = {
+    pattern_id: uuidv7({ timestampMs: Date.parse(firstSeen), random: seeded(templateId) }),
+    owner_user_id: options.owner_user_id,
+    first_seen_at: firstSeen,
+    last_seen_at: lastSeen,
+    occurrence_count: members.length,
+    distinct_day_count: distinctDayCount(members),
+    median_duration_ms: Math.round(median(durations)),
+    p90_duration_ms: Math.round(percentile(durations, 90)),
+    canonical_sequence: sequence,
+    episode_ids: members.map((m) => m.episode_id),
+    similarity_mean: round5(similarityMean),
+    repeatability_score: round5(scores.repeatability_score),
+    feasibility_score: round5(scores.feasibility_score),
+    risk_score: round5(scores.risk_score),
+    projected_minutes_saved_weekly: Math.round(scores.projected_minutes_saved_weekly * 100) / 100,
+    opportunity_score: round5(scores.opportunity_score),
+    status: surfaceable ? "eligible" : "candidate",
+    template_id: templateId,
+  };
+
+  if (suppressed || dismissedRecently) return { candidate };
+
+  const naming = deterministicName(candidate, members);
+  const template = {
+    pack_domain: match.pack_domain,
+    workflow_id: match.workflow_id,
+    workflow_name: match.workflow_name,
+    cadence: match.cadence as string,
+    reps,
+    min_reps: match.min_reps_with_template,
+  };
+
+  if (!surfaceable) {
+    // Still forming (or blocked by a safety bar) — visible, with the template
+    // naming so the forming card can say what it recognized.
+    return {
+      candidate,
+      watching: {
+        candidate,
+        naming: { ...naming, title: match.workflow_name },
+      },
+    };
+  }
+
+  const medianMinutes = Math.round(candidate.median_duration_ms / 60_000);
+  const repWord =
+    match.cadence === "fiscal_monthly" ? "month" : match.cadence === "weekly" ? "week" : "time";
+  const recommendation: Recommendation = {
+    recommendation_id: uuidv7({ timestampMs: options.now().getTime(), random: seeded(templateId) }),
+    pattern_id: candidate.pattern_id,
+    owner_user_id: candidate.owner_user_id,
+    title: match.workflow_name,
+    summary:
+      `This matches ${match.workflow_name}, a known ${match.pack_domain} workflow — ` +
+      `I've seen you do it ${reps} ${repWord}${reps === 1 ? "" : "s"} in a row` +
+      `${medianMinutes > 0 ? `, about ${medianMinutes} minutes each` : ""}. ` +
+      `I can draft a helper and show you what it would do before anything changes.`,
+    generalized_intent: naming.generalized_intent,
+    template,
+    evidence: {
+      occurrence_count: candidate.occurrence_count,
+      distinct_day_count: candidate.distinct_day_count,
+      median_duration_ms: candidate.median_duration_ms,
+      redacted_steps: naming.redacted_steps,
+    },
+    projected_minutes_saved_weekly: candidate.projected_minutes_saved_weekly,
+    expected_cost_usd_low: 0.02,
+    expected_cost_usd_high: 0.25,
+    // Confidence reflects template recognition + observed reps, capped well
+    // below certainty at the minimum rep count.
+    confidence: round5(Math.min(1, 0.5 + 0.1 * reps)),
+    risk_level:
+      candidate.risk_score <= 0.3 ? "low" : candidate.risk_score <= 0.6 ? "medium" : "high",
+    required_capabilities: naming.required_capabilities,
+    status: "new",
+    created_at: options.now().toISOString(),
+  };
+  return { candidate, recommendation };
 }
 
 function buildRecommendation(
