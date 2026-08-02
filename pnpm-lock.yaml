@@ -737,6 +737,9 @@ importers:
       '@maman/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@maman/domain-packs':
+        specifier: workspace:*
+        version: link:../domain-packs
       zod:
         specifier: ^3.24.1
         version: 3.25.76

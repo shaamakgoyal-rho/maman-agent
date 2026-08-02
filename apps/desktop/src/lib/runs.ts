@@ -8,7 +8,12 @@ import {
   type ProposedDiff,
   type RunState,
 } from "@maman/agent-runtime";
-import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
+import {
+  DEFAULT_ORG_POLICY,
+  evaluatePackPolicy,
+  type PackPolicyVerdict,
+} from "@maman/policy-engine";
+import { SHIPPED_PACKS } from "@maman/domain-packs";
 import { DemoModelProvider } from "@maman/model-provider";
 import { computeReceiptRoi } from "@maman/roi-engine";
 import {
@@ -45,11 +50,28 @@ export type RunPhase =
 
 export type PendingApproval = { step_id: string; diff: ProposedDiff; diff_sha256: string };
 
+/**
+ * A run blocked by DOMAIN POLICY (L3) before anything executed. Distinct from
+ * an approval: an approval is a gate the worker can pass, while a policy hold
+ * means this agent may not perform the step at all (segregation of duties) or
+ * needs a second approver (dual control). Policy is evaluated BEFORE the run
+ * starts and before any autonomy consideration — it can only restrict.
+ */
+export type PolicyHold = {
+  kind: "segregation_of_duties" | "dual_control";
+  /** Worker-facing explanations straight from the pack rules. */
+  reasons: string[];
+  /** The strictest autonomy ceiling policy imposed, if any. */
+  ceiling?: string;
+};
+
 type RunsStore = {
   phase: RunPhase;
   mode: "shadow" | "supervised";
   diff: ProposedDiff | null;
   pending: PendingApproval | null;
+  /** Set when domain policy blocked the run before execution. */
+  policyHold: PolicyHold | null;
   receipt: ExecutionReceipt | null;
   receiptSummary: string | null;
   error: string | null;
@@ -118,6 +140,45 @@ let activeAgentName = "your helper";
 
 async function beat(beatValue: StatusBeat): Promise<void> {
   await emitAppEvent({ type: "status_beat", beat: beatValue });
+}
+
+/**
+ * Evaluates domain policy for the agent's observed actions BEFORE the run.
+ *
+ * The SoD case is exactly "this agent would perform two conflicting actions":
+ * every observed action is passed as a sibling, so a workflow containing both
+ * code_invoice and approve_invoice trips the rule regardless of which
+ * capabilities the compiler picked.
+ */
+function evaluateRunPolicy(candidate: PatternCandidate): {
+  hold: PolicyHold | null;
+  verdicts: PackPolicyVerdict[];
+} {
+  const actions = candidate.domain_actions ?? [];
+  if (actions.length === 0) return { hold: null, verdicts: [] };
+
+  const verdicts = actions.map((action, index) =>
+    evaluatePackPolicy(
+      SHIPPED_PACKS,
+      { step_id: `a${index}`, domain_action: action },
+      {
+        sibling_actions: actions.filter((a) => a !== action),
+      },
+    ),
+  );
+
+  const blocking = verdicts.find((v) => v.requires_human) ?? verdicts.find((v) => v.dual_control);
+  if (!blocking) return { hold: null, verdicts };
+
+  const ceiling = verdicts.map((v) => v.ceiling).find((c) => c !== undefined);
+  return {
+    hold: {
+      kind: blocking.requires_human ? "segregation_of_duties" : "dual_control",
+      reasons: [...new Set(verdicts.flatMap((v) => v.reasons.map((r) => r.message)))],
+      ...(ceiling ? { ceiling } : {}),
+    },
+    verdicts,
+  };
 }
 
 /** A read-only run proposes nothing; the receipt must say 0, not crash. */
@@ -204,6 +265,7 @@ export const useRuns = create<RunsStore>((set) => ({
   mode: "shadow",
   diff: null,
   pending: null,
+  policyHold: null,
   receipt: null,
   receiptSummary: null,
   error: null,
@@ -267,7 +329,34 @@ export const useRuns = create<RunsStore>((set) => ({
     agentName,
   ) => {
     activeAgentName = agentName ?? "your helper";
-    set({ phase: "running_read", mode: "supervised", diff: null, receipt: null, error: null });
+    // DOMAIN POLICY FIRST: before any step runs, and before autonomy is
+    // considered at all. A hold stops the run rather than gating it.
+    const { hold } = evaluateRunPolicy(candidate);
+    if (hold) {
+      set({
+        phase: "cancelled",
+        mode: "supervised",
+        diff: null,
+        pending: null,
+        policyHold: hold,
+        receipt: null,
+        error: null,
+      });
+      await beat({
+        kind: "run_failed",
+        title: agentName ?? "your helper",
+      });
+      return;
+    }
+    set({
+      phase: "running_read",
+      mode: "supervised",
+      diff: null,
+      pending: null,
+      policyHold: null,
+      receipt: null,
+      error: null,
+    });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
     await beat({ kind: "running", title: activeAgentName, phase: "reading" });
     try {
@@ -379,6 +468,7 @@ export const useRuns = create<RunsStore>((set) => ({
       phase: "idle",
       diff: null,
       pending: null,
+      policyHold: null,
       receipt: null,
       receiptSummary: null,
       error: null,

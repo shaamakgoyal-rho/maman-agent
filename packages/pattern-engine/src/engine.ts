@@ -220,6 +220,9 @@ export function runPatternEngine(
       projected_minutes_saved_weekly: Math.round(scores.projected_minutes_saved_weekly * 100) / 100,
       opportunity_score: round5(scores.opportunity_score),
       status: surfaceable ? "eligible" : "candidate",
+      ...(observedDomainActions(members).length > 0
+        ? { domain_actions: observedDomainActions(members) }
+        : {}),
     };
     candidates.push(candidate);
 
@@ -242,6 +245,18 @@ function toTemplateStep(event: PatternFeatureEvent): TemplateStepInput {
     ...(event.target_role ? { target_role: event.target_role } : {}),
     event_type: event.event_type,
   };
+}
+
+/** Distinct pack actions across an episode group, in first-seen order. */
+function observedDomainActions(members: SegmentedEpisode[]): string[] {
+  const seen: string[] = [];
+  for (const episode of members) {
+    for (const event of episode.events) {
+      const action = event.domain_action;
+      if (action && !seen.includes(action)) seen.push(action);
+    }
+  }
+  return seen;
 }
 
 /** Mean pairwise sequence similarity — honest even for a 2-member group. */
@@ -318,6 +333,9 @@ function buildTemplateCandidate(
     opportunity_score: round5(scores.opportunity_score),
     status: surfaceable ? "eligible" : "candidate",
     template_id: templateId,
+    ...(observedDomainActions(members).length > 0
+      ? { domain_actions: observedDomainActions(members) }
+      : {}),
   };
 
   if (suppressed || dismissedRecently) return { candidate };
