@@ -67,7 +67,9 @@ public enum ObserverError: Error {
 
 /// Core → observer control messages (stdin), one JSON object per line.
 public enum ObserverControl: Equatable {
-    case configure(allowlistBundles: [String], allowlistDomains: [String], privateApps: [String])
+    case configure(
+        allowlistBundles: [String], allowlistDomains: [String], privateApps: [String],
+        labelPatterns: [String])
     case pause
     case resume
     case teachModeStart(maxSeconds: Int)
@@ -84,7 +86,8 @@ public enum ObserverControl: Equatable {
             return .configure(
                 allowlistBundles: json["allowlist_bundles"] as? [String] ?? [],
                 allowlistDomains: json["allowlist_domains"] as? [String] ?? [],
-                privateApps: json["private_apps"] as? [String] ?? []
+                privateApps: json["private_apps"] as? [String] ?? [],
+                labelPatterns: json["label_patterns"] as? [String] ?? []
             )
         case "pause": return .pause
         case "resume": return .resume

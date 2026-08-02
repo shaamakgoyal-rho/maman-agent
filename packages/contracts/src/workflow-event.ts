@@ -72,6 +72,13 @@ export const workflowEventSchema = z
         semantic_type: z.string().optional(),
         stable_id_hash: z.string().optional(),
         label_hash: z.string().optional(),
+        /**
+         * Pack label-pattern strings that matched the (pre-hash) label inside
+         * the observer — pack constants from committed YAML, never label text.
+         * Same privacy class as object_type: reveals pack membership only.
+         * Bounded: the observer caps at 8 hits.
+         */
+        label_pattern_hits: z.array(z.string().min(1).max(64)).max(8).optional(),
       })
       .strict(),
     context: z

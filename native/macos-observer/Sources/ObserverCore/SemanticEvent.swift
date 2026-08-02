@@ -36,15 +36,22 @@ public struct SemanticEvent: Encodable {
         public var semanticType: String?
         public var stableIdHash: String?
         public var labelHash: String?
+        /// Pack label-pattern strings that matched the (pre-hash) label — pack
+        /// constants only, never label text. See LabelPatterns.swift.
+        public var labelPatternHits: [String]?
         enum CodingKeys: String, CodingKey {
             case role, semanticType = "semantic_type", stableIdHash = "stable_id_hash",
-                labelHash = "label_hash"
+                labelHash = "label_hash", labelPatternHits = "label_pattern_hits"
         }
-        public init(role: String?, semanticType: String?, stableIdHash: String?, labelHash: String?) {
+        public init(
+            role: String?, semanticType: String?, stableIdHash: String?, labelHash: String?,
+            labelPatternHits: [String]? = nil
+        ) {
             self.role = role
             self.semanticType = semanticType
             self.stableIdHash = stableIdHash
             self.labelHash = labelHash
+            self.labelPatternHits = labelPatternHits
         }
     }
     public struct Context: Encodable {

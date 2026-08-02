@@ -14,6 +14,7 @@ import ObserverCore
 
 final class ObserverRuntime {
     private var allowlistBundles: [String] = []
+    private var labelPatterns: [String] = []
     private var privateApps: [String] = []
     private var paused = true // observe nothing until configured
     private var eventsEmitted = 0
@@ -82,8 +83,9 @@ final class ObserverRuntime {
     private func handleControl(line: String) {
         guard let control = ObserverControl.parse(line: line) else { return }
         switch control {
-        case let .configure(bundles, _, privates):
+        case let .configure(bundles, _, privates, patterns):
             allowlistBundles = bundles
+            labelPatterns = patterns
             privateApps = privates
         case .pause: paused = true
         case .resume: paused = false
@@ -142,7 +144,14 @@ final class ObserverRuntime {
                 role: role,
                 semanticType: nil,
                 stableIdHash: role.map { stableHash("\(app.bundleIdentifier ?? ""):\($0)") },
-                labelHash: label.flatMap { Redaction.isSensitiveLabel($0) ? nil : stableHash($0) }
+                labelHash: label.flatMap { Redaction.isSensitiveLabel($0) ? nil : stableHash($0) },
+                // Same sensitivity guard as the hash: a sensitive label is never
+                // pattern-matched. Only pack pattern STRINGS are emitted.
+                labelPatternHits: label.flatMap { text in
+                    if Redaction.isSensitiveLabel(text) { return nil }
+                    let hits = matchLabelPatterns(label: text, patterns: labelPatterns)
+                    return hits.isEmpty ? nil : hits
+                }
             ),
             context: .init(),
             durationMs: nil,

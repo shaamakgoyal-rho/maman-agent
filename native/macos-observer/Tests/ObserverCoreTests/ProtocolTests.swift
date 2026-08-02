@@ -58,8 +58,32 @@ final class ProtocolTests: XCTestCase {
             ObserverControl.parse(
                 line: #"{"type":"configure","allowlist_bundles":["a"],"allowlist_domains":[],"private_apps":["b"]}"#
             ),
-            .configure(allowlistBundles: ["a"], allowlistDomains: [], privateApps: ["b"])
+            .configure(
+                allowlistBundles: ["a"], allowlistDomains: [], privateApps: ["b"],
+                labelPatterns: []),
+            "a configure line without label_patterns still parses (older cores)"
         )
+        XCTAssertEqual(
+            ObserverControl.parse(
+                line: #"{"type":"configure","allowlist_bundles":["a"],"allowlist_domains":[],"private_apps":[],"label_patterns":["invoice","INV-"]}"#
+            ),
+            .configure(
+                allowlistBundles: ["a"], allowlistDomains: [], privateApps: [],
+                labelPatterns: ["invoice", "INV-"])
+        )
+    }
+
+    func testLabelPatternMatchingEmitsOnlyPatternStrings() {
+        let patterns = ["invoice", "INV-", "amount due"]
+        // Case-insensitive substring match; output sorted and drawn ONLY from
+        // the configured pattern constants — never from the label text.
+        let hits = matchLabelPatterns(label: "Invoice INV-2041 — Acme Corp", patterns: patterns)
+        XCTAssertEqual(hits, ["INV-", "invoice"])
+        for hit in hits { XCTAssertTrue(patterns.contains(hit)) }
+        XCTAssertFalse(hits.contains { $0.contains("Acme") || $0.contains("2041") })
+        XCTAssertEqual(matchLabelPatterns(label: "Quarterly report", patterns: patterns), [])
+        XCTAssertEqual(matchLabelPatterns(label: "", patterns: patterns), [])
+        XCTAssertEqual(matchLabelPatterns(label: "invoice", patterns: []), [])
     }
 
     func testTeachModeIsTimeBoxed() {

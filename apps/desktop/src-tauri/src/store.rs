@@ -1726,3 +1726,55 @@ mod domain_ingest_tests {
         assert_eq!((classified, total), (1, 1));
     }
 }
+
+#[cfg(test)]
+mod label_hit_ingest_tests {
+    //! Label-pattern hits (observer → ingest): the strongest L1 signal.
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn label_hits_classify_an_event_that_has_no_other_domain_signal() {
+        let dir = tempdir().unwrap();
+        let packs = crate::domain::load_packs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../domain/packs"),
+        );
+        let store = LocalStore::open_with_packs(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider([11u8; 32]),
+            "user-1",
+            packs,
+        )
+        .await
+        .unwrap();
+
+        // An AX event with NO object_type/semantic hint — only the pattern
+        // strings the observer matched pre-hash. This is exactly what the
+        // Swift hook emits for e.g. a NetSuite invoice window.
+        let event = json!({
+            "schema_version": 1,
+            "event_id": "0191cccc-0000-7000-8000-000000000001",
+            "device_id": "0191cccc-0000-7000-8000-000000000002",
+            "user_id": "0191cccc-0000-7000-8000-000000000003",
+            "organization_id": "0191cccc-0000-7000-8000-000000000004",
+            "occurred_at": now_iso(),
+            "monotonic_ms": 1000,
+            "source": "macos_ax",
+            "app": { "display_name": "NetSuite", "bundle_id": "com.netsuite.app" },
+            "event_type": "element_focused",
+            "target": {
+                "role": "AXTextField",
+                "label_pattern_hits": ["invoice", "amount due"]
+            },
+            "context": {},
+            "sensitivity": "internal",
+            "redaction": { "applied": false, "reasons": [] }
+        });
+        store.insert_event(&event, 30).await.unwrap();
+        let features = store.pattern_features(10).await.unwrap();
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0]["pack_domain"], "finops");
+        assert_eq!(features[0]["domain_object"], "invoice");
+    }
+}

@@ -140,7 +140,7 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
 /// string doubles as a change fingerprint. "Observe every app" sends the "*"
 /// wildcard; the Swift observer's hard-deny / private / secure-field boundaries
 /// still run first.
-fn observer_configure_line(settings: &GateSettings) -> String {
+fn observer_configure_line(settings: &GateSettings, label_patterns: &[String]) -> String {
     let bundles: Vec<String> = if settings.observe_all_apps {
         vec!["*".to_string()]
     } else {
@@ -151,6 +151,10 @@ fn observer_configure_line(settings: &GateSettings) -> String {
         "allowlist_bundles": bundles,
         "allowlist_domains": settings.allowlist_domains,
         "private_apps": settings.private_apps,
+        // Pack label_patterns, pushed as plain strings: the observer matches
+        // them against pre-hash label text and emits ONLY the pattern strings
+        // that fired. No YAML and no new dependency enters the observer.
+        "label_patterns": label_patterns,
     })
     .to_string()
 }
@@ -1632,7 +1636,11 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             // it: this binding drops (closing the pipe) at the end of the
             // iteration, after the child has exited — no per-respawn FD leak.
             let mut control_stdin = child.stdin.take();
-            let mut last_config = observer_configure_line(&load_gate_settings(&app));
+            // Pack label patterns change only with the bundled packs, so load once.
+            let label_patterns =
+                domain::label_patterns(&domain::load_packs(&domain_packs_dir(&app)));
+            let mut last_config =
+                observer_configure_line(&load_gate_settings(&app), &label_patterns);
             if let Some(stdin) = control_stdin.as_mut() {
                 let _ = stdin.write_all(format!("{last_config}\n").as_bytes()).await;
                 let _ = stdin.write_all(b"{\"type\":\"resume\"}\n").await;
@@ -1657,7 +1665,8 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                     }
                     // Live reconfigure: push a fresh allowlist / observe-all /
                     // private config within ~2s of a settings change — no restart.
-                    let current_config = observer_configure_line(&load_gate_settings(&app));
+                    let current_config =
+                        observer_configure_line(&load_gate_settings(&app), &label_patterns);
                     if current_config != last_config {
                         last_config = current_config.clone();
                         if let Some(stdin) = control_stdin.as_mut() {
@@ -2044,5 +2053,42 @@ mod panel_close_tests {
             "panel close must be prevented, never allowed to destroy the window"
         );
         assert!(branch.contains(".hide()"), "panel close must hide the window");
+    }
+}
+
+#[cfg(test)]
+mod label_pattern_tests {
+    use super::{observer_configure_line, GateSettings};
+
+    #[test]
+    fn configure_line_carries_pack_label_patterns_as_plain_strings() {
+        let settings = GateSettings {
+            observation_paused: false,
+            private_apps: vec![],
+            allowlist_domains: vec!["salesforce.com".into()],
+            allowlist_bundles: vec!["com.google.Chrome".into()],
+            observe_all_apps: false,
+        };
+        let line = observer_configure_line(&settings, &["INV-".into(), "invoice".into()]);
+        let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(json["type"], "configure");
+        assert_eq!(json["label_patterns"], serde_json::json!(["INV-", "invoice"]));
+        // No patterns → empty array, never absent (stable change fingerprint).
+        let bare = observer_configure_line(&settings, &[]);
+        let json: serde_json::Value = serde_json::from_str(&bare).unwrap();
+        assert_eq!(json["label_patterns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn real_pack_patterns_reach_the_configure_line() {
+        let packs = crate::domain::load_packs(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../domain/packs"),
+        );
+        let patterns = crate::domain::label_patterns(&packs);
+        assert!(patterns.iter().any(|p| p == "invoice"));
+        let settings = GateSettings::default();
+        let line = observer_configure_line(&settings, &patterns);
+        assert!(line.contains("label_patterns"));
+        assert!(line.contains("invoice"));
     }
 }

@@ -150,3 +150,30 @@ check(ObserverControl.parse(line: #"{"type":"capture_keystrokes"}"#) == nil,
 
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
 exit(failures == 0 ? 0 : 1)
+
+// --- label-pattern matching (domain packs, L1 hint) ---
+check(
+    ObserverControl.parse(
+        line: #"{"type":"configure","allowlist_bundles":["a"],"allowlist_domains":[],"private_apps":[],"label_patterns":["invoice","INV-"]}"#
+    ) == .configure(
+        allowlistBundles: ["a"], allowlistDomains: [], privateApps: [],
+        labelPatterns: ["invoice", "INV-"]),
+    "configure carries label_patterns"
+)
+check(
+    ObserverControl.parse(
+        line: #"{"type":"configure","allowlist_bundles":["a"],"allowlist_domains":[],"private_apps":[]}"#
+    ) == .configure(allowlistBundles: ["a"], allowlistDomains: [], privateApps: [], labelPatterns: []),
+    "configure without label_patterns still parses"
+)
+let packPatterns = ["invoice", "INV-", "amount due"]
+let patternHits = matchLabelPatterns(label: "Invoice INV-2041 — Acme Corp", patterns: packPatterns)
+check(patternHits == ["INV-", "invoice"], "pattern hits are sorted matched pattern strings")
+check(
+    patternHits.allSatisfy { packPatterns.contains($0) },
+    "hits are drawn only from configured pattern constants (never label text)"
+)
+check(
+    matchLabelPatterns(label: "Quarterly report", patterns: packPatterns).isEmpty,
+    "non-matching label yields no hits"
+)
