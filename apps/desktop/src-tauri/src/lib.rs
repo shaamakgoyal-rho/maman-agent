@@ -47,6 +47,69 @@ fn api_base_url() -> String {
 /// Managed state: the encrypted local store (initialized on first use).
 pub struct StoreState(pub Mutex<Option<LocalStore>>);
 
+/// Managed state: the single-flight keychain acquisition (see GuardedKeyAcquire).
+pub struct KeyAcquireState(pub store::GuardedKeyAcquire);
+
+/// Honest local-store health, ObserverStatus-style: a keychain-blocked store
+/// must render as needing attention, never hang silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreStatus {
+    /// Opened (or not yet needed) — store commands work normally.
+    Ok,
+    /// The keychain never released (or refused) the store key: the user must
+    /// approve access. Never "fixed" by deleting/recreating the key — that
+    /// would orphan the encrypted store.
+    KeychainAccessRequired,
+    /// Open failed for a non-keychain reason (disk, migration).
+    Failed,
+}
+
+pub struct StoreHealth(pub std::sync::Mutex<StoreStatus>);
+
+fn store_status_label(status: StoreStatus) -> &'static str {
+    match status {
+        StoreStatus::Ok => "ok",
+        StoreStatus::KeychainAccessRequired => "keychain_access_required",
+        StoreStatus::Failed => "failed",
+    }
+}
+
+/// Maps a store-open error to the status the UI should show. Any key-provider
+/// failure — timeout OR error — means the user must (re-)grant keychain access.
+fn store_status_for_error(e: &store::StoreError) -> StoreStatus {
+    match e {
+        store::StoreError::KeyTimeout | store::StoreError::Key(_) => {
+            StoreStatus::KeychainAccessRequired
+        }
+        _ => StoreStatus::Failed,
+    }
+}
+
+fn set_store_status<R: Runtime>(app: &AppHandle<R>, status: StoreStatus) {
+    let changed = app
+        .try_state::<StoreHealth>()
+        .and_then(|state| {
+            state.0.lock().ok().map(|mut guard| {
+                let changed = *guard != status;
+                *guard = status;
+                changed
+            })
+        })
+        .unwrap_or(true);
+    if changed {
+        let _ = app.emit("store:status", store_status_label(status));
+    }
+}
+
+/// Current local-store health for the panel and status bar (poll + event).
+#[tauri::command]
+fn store_status<R: Runtime>(app: AppHandle<R>) -> String {
+    app.try_state::<StoreHealth>()
+        .and_then(|s| s.0.lock().ok().map(|g| store_status_label(*g)))
+        .unwrap_or("ok")
+        .to_string()
+}
+
 /// Lazily initializes and returns the store guard. Callers keep the guard for
 /// the duration of their operation (the mutex serializes store access).
 async fn store_guard<'a, R: Runtime>(
@@ -60,22 +123,45 @@ async fn store_guard<'a, R: Runtime>(
             .app_data_dir()
             .map_err(|e| format!("data dir unavailable: {e}"))?;
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let provider = KeychainKeyProvider {
+        // The keychain call runs on its own thread with a timeout: macOS
+        // securityd can block it forever (observed live: the "Always Allow"
+        // ACL dialog never rendered for the accessory-style app after a
+        // rebuild+re-sign), and blocking here would freeze every store command
+        // while holding the store mutex.
+        let provider = Arc::new(KeychainKeyProvider {
             service: KEYCHAIN_SERVICE.to_string(),
             account: KEYCHAIN_ACCOUNT.to_string(),
+        });
+        let acquire = app.state::<KeyAcquireState>();
+        let key = match acquire
+            .0
+            .acquire(provider, store::KEY_FIRST_WAIT, store::KEY_RETRY_WAIT)
+            .await
+        {
+            Ok(key) => key,
+            Err(e) => {
+                let status = store_status_for_error(&e);
+                set_store_status(app, status);
+                return Err(match status {
+                    StoreStatus::KeychainAccessRequired => format!(
+                        "keychain_access_required: {e} — relaunch Maman and click \"Always Allow\""
+                    ),
+                    _ => format!("store key unavailable: {e}"),
+                });
+            }
         };
         // Domain packs for the L1 classifier. Resolved from the bundled resource
         // dir, falling back to the repo checkout in dev. Missing packs are fine:
         // nothing gets classified and observation is unaffected.
         let packs = domain::load_packs(&domain_packs_dir(app));
-        let store = LocalStore::open_with_packs(
-            &dir.join("maman-local.sqlite"),
-            &provider,
-            "local-user",
-            packs,
-        )
-        .await
-        .map_err(|e| format!("store open failed: {e}"))?;
+        let store =
+            LocalStore::open_with_key(&dir.join("maman-local.sqlite"), key, "local-user", packs)
+                .await
+                .map_err(|e| {
+                    set_store_status(app, StoreStatus::Failed);
+                    format!("store open failed: {e}")
+                })?;
+        set_store_status(app, StoreStatus::Ok);
         *guard = Some(store);
     }
     Ok(guard)
@@ -1778,6 +1864,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(StoreState(Mutex::new(None)))
+        .manage(KeyAcquireState(store::GuardedKeyAcquire::new()))
+        .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
         .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
         .invoke_handler(tauri::generate_handler![
             settings_load,
@@ -1824,6 +1912,7 @@ pub fn run() {
             resolve_dev_identity,
             connector_authorize,
             observer_status,
+            store_status,
             packs_status,
             statusbar_set_visible,
             open_accessibility_settings
@@ -1971,6 +2060,35 @@ mod gate_tests {
             gate_event(&settings(), &event("Google Sheets", Some("docs.google.com"), "chrome"))
                 .unwrap(),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod store_status_tests {
+    use super::{store_status_for_error, store_status_label, StoreStatus};
+    use crate::store::StoreError;
+
+    #[test]
+    fn keychain_failures_surface_access_required() {
+        // Both a hung securityd (timeout) and an explicit denial map to the
+        // honest "grant keychain access" state — never a silent hang, never an
+        // auto-recreated key (that would orphan the encrypted store).
+        assert_eq!(
+            store_status_for_error(&StoreError::KeyTimeout),
+            StoreStatus::KeychainAccessRequired
+        );
+        assert_eq!(
+            store_status_for_error(&StoreError::Key("user canceled".into())),
+            StoreStatus::KeychainAccessRequired
+        );
+        assert_eq!(
+            store_status_for_error(&StoreError::InvalidPayload("x".into())),
+            StoreStatus::Failed
+        );
+        assert_eq!(
+            store_status_label(StoreStatus::KeychainAccessRequired),
+            "keychain_access_required"
         );
     }
 }
