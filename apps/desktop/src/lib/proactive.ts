@@ -190,8 +190,7 @@ export function proactiveCards(input: {
 }
 
 export type ProactiveGate =
-  | { surface: true }
-  | { surface: false; reason: string; queued_until?: string | undefined };
+  { surface: true } | { surface: false; reason: string; queued_until?: string | undefined };
 
 /**
  * The generic gate decides first, always. A quiet period then QUEUES the card

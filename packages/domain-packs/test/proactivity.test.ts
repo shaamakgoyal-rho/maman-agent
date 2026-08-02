@@ -96,8 +96,12 @@ describe("fiscal calendar", () => {
   });
 
   it("counts calendar days across month boundaries", () => {
-    expect(daysBetween({ year: 2026, month: 8, day: 29 }, { year: 2026, month: 9, day: 1 })).toBe(3);
-    expect(daysBetween({ year: 2026, month: 9, day: 2 }, { year: 2026, month: 9, day: 1 })).toBe(-1);
+    expect(daysBetween({ year: 2026, month: 8, day: 29 }, { year: 2026, month: 9, day: 1 })).toBe(
+      3,
+    );
+    expect(daysBetween({ year: 2026, month: 9, day: 2 }, { year: 2026, month: 9, day: 1 })).toBe(
+      -1,
+    );
   });
 });
 
@@ -399,7 +403,9 @@ describe("dismissal learning", () => {
         workflow_id: w.id,
         runs_matched: 9,
         runs_tested: 10,
-        decisions: [{ action: "never_suggest", occurred_at: "2026-07-01T10:00:00.000Z", workflow_id: w.id }],
+        decisions: [
+          { action: "never_suggest", occurred_at: "2026-07-01T10:00:00.000Z", workflow_id: w.id },
+        ],
       })),
     });
     expect(decisions.every((d) => !d.fires)).toBe(true);
@@ -409,9 +415,9 @@ describe("dismissal learning", () => {
 
 describe("copy never fabricates evidence", () => {
   it("renders when every placeholder is supplied", () => {
-    expect(renderCopy("matched {runs_matched}/{runs_tested}", { runs_matched: 9, runs_tested: 10 })).toEqual(
-      { text: "matched 9/10" },
-    );
+    expect(
+      renderCopy("matched {runs_matched}/{runs_tested}", { runs_matched: 9, runs_tested: 10 }),
+    ).toEqual({ text: "matched 9/10" });
   });
 
   it("refuses — and names what was missing — rather than guessing", () => {

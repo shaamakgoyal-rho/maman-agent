@@ -6,7 +6,11 @@ export {
   type FixtureOptions,
 } from "./reconciliation.js";
 export { liveWorkflowRepFixture, type LiveRepOptions } from "./live.js";
-export { finopsThreeWayRepFixture, type DomainRepOptions } from "./domain-demo.js";
+export {
+  finopsThreeWayRepFixture,
+  finopsMonthEndRepFixture,
+  type DomainRepOptions,
+} from "./domain-demo.js";
 export {
   DEMO_CSV_ROWS,
   DEMO_SF_ACCOUNTS,

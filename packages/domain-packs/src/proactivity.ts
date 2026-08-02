@@ -97,7 +97,7 @@ export function nextCloseStart(from: CalendarDate, cal: FiscalCalendar): Calenda
  */
 export function fiscalPeriod(date: CalendarDate, cal: FiscalCalendar): number {
   const offset = date.month - cal.fiscal_year_start_month;
-  return ((offset % 12) + 12) % 12 + 1;
+  return (((offset % 12) + 12) % 12) + 1;
 }
 
 /**
@@ -291,10 +291,7 @@ export function renderCopy(template: string, vars: CopyVars): RenderedCopy {
 
 /** How a card was triggered. Mirrors the pack's `surface` vocabulary. */
 export type ProactiveSurface =
-  | "pre_close"
-  | "on_trigger"
-  | "same_weekday_observed"
-  | "after_verification";
+  "pre_close" | "on_trigger" | "same_weekday_observed" | "after_verification";
 
 export type ProactiveCard = {
   pack_domain: string;
@@ -398,7 +395,12 @@ export function evaluateProactivity(
     for (const wf of workflows) {
       const signal = ctx.signals.find((s) => s.workflow_id === wf.id);
       if (!signal) {
-        out.push({ fires: false, pack_domain: pack.domain, workflow_id: wf.id, reason: "no_signal" });
+        out.push({
+          fires: false,
+          pack_domain: pack.domain,
+          workflow_id: wf.id,
+          reason: "no_signal",
+        });
         continue;
       }
 
@@ -511,7 +513,8 @@ function timingFor(
 
   switch (wf.cadence) {
     case "fiscal_monthly": {
-      if (pack.proactivity.calendar !== "fiscal") return { due: false, reason: "calendar_not_fiscal" };
+      if (pack.proactivity.calendar !== "fiscal")
+        return { due: false, reason: "calendar_not_fiscal" };
       const lead = timing?.days_before ?? wf.pre_stage?.days_before_close;
       if (lead === undefined) return { due: false, reason: "not_due" };
       const close = nextCloseStart(today, cal);

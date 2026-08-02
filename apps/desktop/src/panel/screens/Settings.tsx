@@ -154,6 +154,8 @@ export function Settings() {
         </div>
       </Card>
 
+      <FiscalCalendarCard />
+
       <Card>
         <SectionTitle>Detection tuning</SectionTitle>
         <Muted>
@@ -465,5 +467,171 @@ export function Settings() {
         </Muted>
       </Card>
     </div>
+  );
+}
+
+/**
+ * Fiscal calendar + quiet periods (Layer 5). A domain pack declares that its
+ * workflows are fiscal-periodic; only the company knows WHEN its periods land,
+ * so that lives here rather than in pack content.
+ */
+function FiscalCalendarCard() {
+  const { settings, update } = useSettings();
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [label, setLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const addPeriod = () => {
+    // Validate here so a bad range never silently swallows suggestions.
+    const isDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
+    if (!isDate(start) || !isDate(end)) {
+      setError("Both dates are required, as YYYY-MM-DD.");
+      return;
+    }
+    if (start > end) {
+      setError("The start date has to come before the end date.");
+      return;
+    }
+    setError(null);
+    const trimmed = label.trim().slice(0, 60);
+    void update({
+      quiet_periods: [
+        ...settings.quiet_periods,
+        trimmed ? { start, end, label: trimmed } : { start, end },
+      ],
+    });
+    setStart("");
+    setEnd("");
+    setLabel("");
+  };
+
+  const removePeriod = (index: number) => {
+    void update({ quiet_periods: settings.quiet_periods.filter((_, i) => i !== index) });
+  };
+
+  const MONTHS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+
+  return (
+    <Card>
+      <SectionTitle>Fiscal calendar</SectionTitle>
+      <Muted>
+        Domain packs schedule some workflows against your close, not against the clock. These two
+        values are the only thing Maman needs to know to time a pre-close card.
+      </Muted>
+
+      <div className="mt-2 flex items-center justify-between gap-3 py-1">
+        <div>
+          <p className="text-sm">Fiscal year starts</p>
+          <Muted>Used to number your fiscal periods.</Muted>
+        </div>
+        <select
+          aria-label="Fiscal year start month"
+          value={settings.fiscal_year_start_month}
+          onChange={(e) => void update({ fiscal_year_start_month: Number(e.target.value) })}
+          className="rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+        >
+          {MONTHS.map((m, i) => (
+            <option key={m} value={i + 1}>
+              {m}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 py-1">
+        <div>
+          <p className="text-sm">Close opens on day</p>
+          <Muted>Day of the month your close period begins.</Muted>
+        </div>
+        <select
+          aria-label="Close start day"
+          value={settings.fiscal_close_start_day}
+          onChange={(e) => void update({ fiscal_close_start_day: Number(e.target.value) })}
+          className="rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+        >
+          {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="mt-3 border-t border-line pt-2">
+        <p className="text-sm">Quiet periods</p>
+        <Muted>
+          Audit weeks, board prep — stretches where Maman must not interrupt. Cards still form and
+          are held, then released the day after the period ends. Nothing is dropped.
+        </Muted>
+
+        {settings.quiet_periods.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {settings.quiet_periods.map((p, i) => (
+              <li
+                key={`${p.start}-${p.end}-${i}`}
+                className="flex items-center justify-between rounded-lg border border-line px-2 py-1 text-xs"
+              >
+                <span>
+                  <span className="tabular-nums">
+                    {p.start} → {p.end}
+                  </span>
+                  {p.label ? <span className="text-muted"> · {p.label}</span> : null}
+                </span>
+                <button
+                  onClick={() => removePeriod(i)}
+                  aria-label={`Remove quiet period ${p.start} to ${p.end}`}
+                  className="text-muted hover:text-ink"
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <input
+            type="date"
+            aria-label="Quiet period start"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+          />
+          <span className="text-xs text-muted">to</span>
+          <input
+            type="date"
+            aria-label="Quiet period end"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+          />
+          <input
+            type="text"
+            aria-label="Quiet period label"
+            placeholder="Label (optional)"
+            value={label}
+            maxLength={60}
+            onChange={(e) => setLabel(e.target.value)}
+            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+          />
+          <Button onClick={addPeriod}>Add</Button>
+        </div>
+        {error && <p className="mt-1 text-xs text-warning">{error}</p>}
+      </div>
+    </Card>
   );
 }

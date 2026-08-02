@@ -7,6 +7,7 @@ import {
   type FormingItem,
   type RecommendationWithState,
 } from "../../lib/recommendations.js";
+import type { ProactiveItem } from "../../lib/proactive.js";
 import type { SnoozeOption } from "../../lib/suggestion-policy.js";
 import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
@@ -28,7 +29,7 @@ const FILTER_STATUS: Record<Filter, string[]> = {
 };
 
 export function Suggestions() {
-  const { items, forming, hydrated, refresh, act } = useRecommendations();
+  const { items, forming, proactive, hydrated, refresh, act } = useRecommendations();
   const [filter, setFilter] = useState<Filter>("New");
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -75,6 +76,21 @@ export function Suggestions() {
         />
       )}
 
+      {filter === "New" && proactive.length > 0 && (
+        <div className="space-y-2">
+          <div>
+            <SectionTitle>Coming up — on your calendar</SectionTitle>
+            <Muted>
+              These are workflows your domain pack schedules, not new patterns. Timing comes from
+              your fiscal calendar and the dates on the records themselves.
+            </Muted>
+          </div>
+          {proactive.map((p) => (
+            <ProactiveCardView key={`${p.card.pack_domain}/${p.card.workflow_id}`} item={p} />
+          ))}
+        </div>
+      )}
+
       {visible.map((item) => (
         <SuggestionCard
           key={item.signature}
@@ -105,6 +121,53 @@ export function Suggestions() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A pack-scheduled card (Layer 5). Three things are stated plainly rather than
+ * implied: WHY it is here (the pack's own copy, or an honest fallback when the
+ * helper has not been verified yet), that it is queued if a quiet period is
+ * holding it, and the autonomy ceiling it would run under.
+ */
+function ProactiveCardView({ item }: { item: ProactiveItem }) {
+  const { card } = item;
+  const queued = card.queued_until !== undefined;
+  return (
+    <Card>
+      <div className="flex items-start justify-between gap-2">
+        <SectionTitle>{card.workflow_name}</SectionTitle>
+        <StatusPill tone={queued ? "muted" : "primary"}>
+          {queued ? "Queued" : card.surface === "pre_close" ? "Pre-close" : "Due"}
+        </StatusPill>
+      </div>
+
+      {card.copy ? (
+        <p className="mt-1 text-xs text-ink">{card.copy}</p>
+      ) : (
+        // No verified match rate yet, so the pack's copy would have to invent
+        // one. Say what is actually true instead.
+        <p className="mt-1 text-xs text-ink">
+          {card.pack_domain} scheduled this for {card.due_date}. I have not tested a helper against
+          enough of your own runs to quote a match rate yet, so there is nothing to claim.
+        </p>
+      )}
+
+      {queued && (
+        <Muted>
+          Held until {card.queued_until}
+          {card.quiet_period_label ? ` — ${card.quiet_period_label}` : ""}. Nothing is lost; it
+          returns when the quiet period ends.
+        </Muted>
+      )}
+
+      {card.ceiling && (
+        <Muted>
+          Would run at <span className="text-ink">{card.ceiling.replace(/_/g, " ")}</span> — pack
+          policy caps it there, and only you can take it further.
+        </Muted>
+      )}
+    </Card>
   );
 }
 

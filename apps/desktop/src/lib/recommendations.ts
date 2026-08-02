@@ -19,7 +19,6 @@ import {
   familySuppressed,
   outcomeFor,
   proactiveCards,
-  templateWorkflow,
   type ProactiveInput,
   type ProactiveItem,
 } from "./proactive.js";
@@ -545,7 +544,11 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
                   : action.type === "accepted"
                     ? "accepted"
                     : "dismissed",
-          reason: LEDGER_REASONS.has(reason ?? "") ? reason : action.type === "dismissed" ? "other" : null,
+          reason: LEDGER_REASONS.has(reason ?? "")
+            ? reason
+            : action.type === "dismissed"
+              ? "other"
+              : null,
           now,
           card,
           triggered_at: card ? `${card.due_date}T00:00:00.000Z` : undefined,
