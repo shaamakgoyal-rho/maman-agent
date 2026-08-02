@@ -18,6 +18,7 @@ export default defineConfig({
       input: {
         panel: resolve(__dirname, "index.html"),
         pet: resolve(__dirname, "pet.html"),
+        statusbar: resolve(__dirname, "statusbar.html"),
         // Developer-only Pet Lab (not referenced by any Tauri window).
         lab: resolve(__dirname, "lab.html"),
       },

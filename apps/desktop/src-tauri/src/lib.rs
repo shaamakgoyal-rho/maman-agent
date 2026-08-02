@@ -349,11 +349,55 @@ fn persist_and_snap_pet<R: Runtime>(app: &AppHandle<R>) {
 /// (the frontmost-app change that a Space switch triggers is what the observer
 /// tracks); this only fixes window presence.
 fn make_windows_visible_on_all_spaces<R: Runtime>(app: &AppHandle<R>) {
-    for label in ["pet", "panel"] {
+    for label in ["pet", "panel", "statusbar"] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.set_visible_on_all_workspaces(true);
         }
     }
+}
+
+/// Places the status bar bottom-center of the primary display and makes it
+/// click-through: it is a read-only subtitle, never an interaction target.
+/// Shown only when `statusbar_enabled` (default on).
+fn setup_statusbar<R: Runtime>(app: &AppHandle<R>) {
+    let Some(bar) = app.get_webview_window("statusbar") else { return };
+    let _ = bar.set_ignore_cursor_events(true);
+    if let (Ok(Some(monitor)), Ok(size)) = (bar.primary_monitor(), bar.outer_size()) {
+        let screen = monitor.size();
+        let position = monitor.position();
+        let x = position.x + (screen.width as i32 - size.width as i32) / 2;
+        let y = position.y + screen.height as i32 - size.height as i32 - 12;
+        let _ = bar.set_position(PhysicalPosition::new(x, y));
+    }
+    let enabled = statusbar_enabled_setting(app);
+    if enabled {
+        let _ = bar.show();
+    }
+}
+
+/// Reads statusbar_enabled from settings.json (default true), fail-open to
+/// visible: a corrupt settings file should not silently hide a health surface.
+fn statusbar_enabled_setting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    config_path(app, SETTINGS_FILE)
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("statusbar_enabled").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
+/// Panel-only toggle for the status bar window.
+#[tauri::command]
+fn statusbar_set_visible<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    visible: bool,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    let Some(bar) = app.get_webview_window("statusbar") else {
+        return Err("statusbar window unavailable".into());
+    };
+    if visible { bar.show().map_err(|e| e.to_string()) } else { bar.hide().map_err(|e| e.to_string()) }
 }
 
 fn restore_pet_position<R: Runtime>(app: &AppHandle<R>) {
@@ -1781,10 +1825,12 @@ pub fn run() {
             connector_authorize,
             observer_status,
             packs_status,
+            statusbar_set_visible,
             open_accessibility_settings
         ])
         .setup(|app| {
             make_windows_visible_on_all_spaces(&app.handle().clone());
+            setup_statusbar(&app.handle().clone());
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
             start_sync_loop(app.handle().clone());

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "statusbar-window",
+  "description": "Minimal surface for the status bar: listen to cross-window app events and read observation status. Deliberately excludes store writes, connectors, filesystem, shell, and HTTP. The window itself is click-through and non-focusable.",
+  "windows": ["statusbar"],
+  "permissions": ["core:default", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

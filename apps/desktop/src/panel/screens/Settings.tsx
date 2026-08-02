@@ -231,6 +231,20 @@ export function Settings() {
       </Card>
 
       <Card>
+        <SectionTitle>Status bar</SectionTitle>
+        <Toggle
+          id="statusbar-enabled"
+          checked={settings.statusbar_enabled}
+          onChange={(on) => {
+            void update({ statusbar_enabled: on });
+            if (isTauri()) void invokeCommand("statusbar_set_visible", { visible: on });
+          }}
+          label="Show the status bar while you work"
+          description="A small always-on-top line: a green dot when Maman is genuinely observing, plus what it's watching, which agent is being created, and any run waiting for your approval."
+        />
+      </Card>
+
+      <Card>
         <SectionTitle>Motion</SectionTitle>
         <div className="flex items-center justify-between py-1">
           <div>

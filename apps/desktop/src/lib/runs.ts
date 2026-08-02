@@ -19,6 +19,7 @@ import {
   type PatternCandidate,
 } from "@maman/contracts";
 import { emitAppEvent } from "./bridge.js";
+import type { StatusBeat } from "./status.js";
 
 /**
  * Desktop-local run executor (Journeys E & F). Drives the SAME pure run engine
@@ -56,11 +57,13 @@ type RunsStore = {
     candidate: PatternCandidate,
     generalizedIntent?: string,
     desiredOutcome?: string,
+    agentName?: string,
   ) => Promise<void>;
   startSupervised: (
     candidate: PatternCandidate,
     generalizedIntent?: string,
     desiredOutcome?: string,
+    agentName?: string,
   ) => Promise<void>;
   approve: () => Promise<void>;
   reject: () => Promise<void>;
@@ -110,6 +113,25 @@ let activeSpec: AgentSpec | null = null;
 let activeState: RunState | null = null;
 let activeRunId = "";
 let interventionStart = 0;
+// The running agent's workflow name, for the status bar.
+let activeAgentName = "your helper";
+
+async function beat(beatValue: StatusBeat): Promise<void> {
+  await emitAppEvent({ type: "status_beat", beat: beatValue });
+}
+
+/** A read-only run proposes nothing; the receipt must say 0, not crash. */
+const EMPTY_DIFF: ProposedDiff = {
+  summary: {
+    input_rows: 0,
+    confident_matches: 0,
+    ambiguous_skipped: 0,
+    missing: 0,
+    change_count: 0,
+    accounts_affected: 0,
+  },
+  changes: [],
+};
 
 function buildReceipt(
   spec: AgentSpec,
@@ -190,9 +212,12 @@ export const useRuns = create<RunsStore>((set) => ({
     candidate,
     generalizedIntent = DEFAULT_INTENT,
     desiredOutcome = DEFAULT_OUTCOME,
+    agentName,
   ) => {
+    activeAgentName = agentName ?? "your helper";
     set({ phase: "running_read", mode: "shadow", diff: null, receipt: null, error: null });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
+    await beat({ kind: "running", title: activeAgentName, phase: "reading" });
     try {
       activeWorld = demoWorld();
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
@@ -214,17 +239,23 @@ export const useRuns = create<RunsStore>((set) => ({
         if (result.kind === "proposed") diff = result.diff;
       }
       await emitAppEvent({ type: "simulate_pet_event", event: "REVIEW_STARTED" });
-      const receipt = buildReceipt(activeSpec, "shadow", diff!, null, 0);
+      const receipt = buildReceipt(activeSpec, "shadow", diff ?? EMPTY_DIFF, null, 0);
       await emitAppEvent({ type: "simulate_pet_event", event: "REVIEW_FINISHED" });
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_SUCCEEDED" });
+      await beat({
+        kind: "run_done",
+        title: activeAgentName,
+        summary: `proposed ${(diff ?? EMPTY_DIFF).summary.change_count} changes, wrote nothing`,
+      });
       set({
         phase: "completed",
-        diff,
+        diff: diff ?? EMPTY_DIFF,
         receipt,
         receiptSummary: petReceiptSummary(receipt),
       });
     } catch (e) {
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
+      await beat({ kind: "run_failed", title: activeAgentName });
       set({ phase: "failed", error: e instanceof Error ? e.message : "run failed" });
     }
   },
@@ -233,9 +264,12 @@ export const useRuns = create<RunsStore>((set) => ({
     candidate,
     generalizedIntent = DEFAULT_INTENT,
     desiredOutcome = DEFAULT_OUTCOME,
+    agentName,
   ) => {
+    activeAgentName = agentName ?? "your helper";
     set({ phase: "running_read", mode: "supervised", diff: null, receipt: null, error: null });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
+    await beat({ kind: "running", title: activeAgentName, phase: "reading" });
     try {
       activeWorld = demoWorld();
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
@@ -262,11 +296,31 @@ export const useRuns = create<RunsStore>((set) => ({
           };
         }
       }
+      if (!pending) {
+        // Nothing to approve: the agent is read-only. Complete honestly as a
+        // supervised run that changed nothing rather than crash or fake a gate.
+        const receipt = buildReceipt(activeSpec, "shadow", EMPTY_DIFF, null, 0);
+        await emitAppEvent({ type: "simulate_pet_event", event: "RUN_SUCCEEDED" });
+        await beat({
+          kind: "run_done",
+          title: activeAgentName,
+          summary: "read-only run — nothing to approve, nothing changed",
+        });
+        set({
+          phase: "completed",
+          diff: EMPTY_DIFF,
+          receipt,
+          receiptSummary: petReceiptSummary(receipt),
+        });
+        return;
+      }
       interventionStart = Date.now();
       await emitAppEvent({ type: "simulate_pet_event", event: "APPROVAL_REQUIRED" });
-      set({ phase: "waiting_approval", diff: pending!.diff, pending });
+      await beat({ kind: "approval_needed", title: activeAgentName });
+      set({ phase: "waiting_approval", diff: pending.diff, pending });
     } catch (e) {
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
+      await beat({ kind: "run_failed", title: activeAgentName });
       set({ phase: "failed", error: e instanceof Error ? e.message : "run failed" });
     }
   },
@@ -298,6 +352,11 @@ export const useRuns = create<RunsStore>((set) => ({
           : { completed: 0, verified: false };
       const receipt = buildReceipt(activeSpec, "supervised", pending.diff, writes, interventionMs);
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_SUCCEEDED" });
+      await beat({
+        kind: "run_done",
+        title: activeAgentName,
+        summary: `applied ${writes.completed} approved changes`,
+      });
       set({
         phase: writes.verified ? "completed" : "completed_with_warnings",
         receipt,
@@ -305,6 +364,7 @@ export const useRuns = create<RunsStore>((set) => ({
       });
     } catch (e) {
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
+      await beat({ kind: "run_failed", title: activeAgentName });
       set({ phase: "failed", error: e instanceof Error ? e.message : "write failed" });
     }
   },

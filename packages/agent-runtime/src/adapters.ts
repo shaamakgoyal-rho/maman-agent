@@ -244,6 +244,24 @@ export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
 export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, CapabilityAdapter> {
   const registry = pureReconciliationAdapters();
 
+  // Read-only browser capabilities: compiled specs for patterns observed on
+  // generic (non-CRM) surfaces resolve to these. Deterministic canned reads so
+  // a read-only agent can complete a run instead of dying on a missing adapter.
+  registry.set("browser.extract_table", {
+    id: "browser.extract_table",
+    read: async () => {
+      await world.guard("browser.extract_table");
+      return DEMO_CSV_ROWS;
+    },
+  });
+  registry.set("browser.extract_structured_fields", {
+    id: "browser.extract_structured_fields",
+    read: async () => {
+      await world.guard("browser.extract_structured_fields");
+      return DEMO_CSV_ROWS.slice(0, 1);
+    },
+  });
+
   registry.set("salesforce.query_records", {
     id: "salesforce.query_records",
     read: async (inputs) => {
