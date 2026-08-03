@@ -445,20 +445,76 @@ fn make_windows_visible_on_all_spaces<R: Runtime>(app: &AppHandle<R>) {
 /// Places the status bar bottom-center of the primary display and makes it
 /// click-through: it is a read-only subtitle, never an interaction target.
 /// Shown only when `statusbar_enabled` (default on).
+///
+/// POSITIONING USES THE WORK AREA, NOT THE FULL SCREEN. The Dock is drawn at a
+/// higher window level than an ordinary always-on-top window, so a bar placed
+/// against the physical bottom edge is COMPLETELY HIDDEN behind it — which is
+/// exactly how this shipped and why the health surface appeared to be missing on
+/// a machine with the Dock at the bottom and auto-hide off. The work area
+/// excludes the Dock and the menu bar, so anchoring to it puts the bar just
+/// above the Dock wherever the user keeps it.
 fn setup_statusbar<R: Runtime>(app: &AppHandle<R>) {
     let Some(bar) = app.get_webview_window("statusbar") else { return };
     let _ = bar.set_ignore_cursor_events(true);
-    if let (Ok(Some(monitor)), Ok(size)) = (bar.primary_monitor(), bar.outer_size()) {
-        let screen = monitor.size();
-        let position = monitor.position();
-        let x = position.x + (screen.width as i32 - size.width as i32) / 2;
-        let y = position.y + screen.height as i32 - size.height as i32 - 12;
-        let _ = bar.set_position(PhysicalPosition::new(x, y));
-    }
+    position_statusbar(&bar);
     let enabled = statusbar_enabled_setting(app);
     if enabled {
         let _ = bar.show();
     }
+}
+
+/// Bottom-center of the primary monitor's WORK AREA, with a small gap.
+///
+/// Falls back to the full screen minus a Dock-sized margin if the platform
+/// reports no usable work area: an approximate position keeps the surface
+/// visible, whereas trusting a zero-sized work area would park it off-screen.
+fn position_statusbar<R: Runtime>(bar: &tauri::WebviewWindow<R>) {
+    let (Ok(Some(monitor)), Ok(size)) = (bar.primary_monitor(), bar.outer_size()) else {
+        return;
+    };
+    let area = monitor.work_area();
+    let (x, y) = statusbar_origin(
+        (area.position.x, area.position.y),
+        (area.size.width as i32, area.size.height as i32),
+        (monitor.position().x, monitor.position().y),
+        (monitor.size().width as i32, monitor.size().height as i32),
+        (size.width as i32, size.height as i32),
+    );
+    let _ = bar.set_position(PhysicalPosition::new(x, y));
+}
+
+/// Gap between the bar and the bottom of the usable area (physical px).
+const STATUSBAR_GAP: i32 = 8;
+/// Dock-sized allowance used only when the work area is unusable.
+const DOCK_FALLBACK: i32 = 96;
+
+/// Pure placement arithmetic, extracted so it is testable without a display.
+///
+/// Anchors to the WORK AREA (excludes Dock and menu bar). Falls back to the full
+/// screen minus a Dock-sized margin when the reported work area is too small to
+/// be believable — an approximate position keeps the bar on screen, whereas
+/// trusting a zero-sized work area would park it at the very bottom, behind the
+/// Dock, which is the bug this function exists to prevent.
+fn statusbar_origin(
+    area_origin: (i32, i32),
+    area_size: (i32, i32),
+    screen_origin: (i32, i32),
+    screen_size: (i32, i32),
+    window: (i32, i32),
+) -> (i32, i32) {
+    let usable = if area_size.1 > window.1 {
+        (area_origin.0, area_origin.1, area_size.0, area_size.1)
+    } else {
+        (
+            screen_origin.0,
+            screen_origin.1,
+            screen_size.0,
+            screen_size.1 - DOCK_FALLBACK,
+        )
+    };
+    let x = usable.0 + (usable.2 - window.0) / 2;
+    let y = usable.1 + usable.3 - window.1 - STATUSBAR_GAP;
+    (x, y)
 }
 
 /// Reads statusbar_enabled from settings.json (default true), fail-open to
@@ -483,7 +539,14 @@ fn statusbar_set_visible<R: Runtime>(
     let Some(bar) = app.get_webview_window("statusbar") else {
         return Err("statusbar window unavailable".into());
     };
-    if visible { bar.show().map_err(|e| e.to_string()) } else { bar.hide().map_err(|e| e.to_string()) }
+    if visible {
+        // Re-place before showing: the Dock or display arrangement may have
+        // changed since launch, and a bar behind the Dock reads as "broken".
+        position_statusbar(&bar);
+        bar.show().map_err(|e| e.to_string())
+    } else {
+        bar.hide().map_err(|e| e.to_string())
+    }
 }
 
 fn restore_pet_position<R: Runtime>(app: &AppHandle<R>) {
@@ -2339,5 +2402,71 @@ mod label_pattern_tests {
         let line = observer_configure_line(&settings, &patterns);
         assert!(line.contains("label_patterns"));
         assert!(line.contains("invoice"));
+    }
+}
+
+#[cfg(test)]
+mod statusbar_placement_tests {
+    //! The status bar shipped positioned against the physical bottom edge, which
+    //! on macOS puts it BEHIND the Dock (the Dock draws above ordinary
+    //! always-on-top windows). The health surface was therefore invisible on any
+    //! machine with a bottom Dock and auto-hide off — it looked like the feature
+    //! had never been built. These tests pin the placement so that cannot recur.
+    use super::{statusbar_origin, DOCK_FALLBACK, STATUSBAR_GAP};
+
+    /// A 13" MacBook in its default scaled mode, Dock at the bottom.
+    const SCREEN: (i32, i32) = (2560, 1664);
+    const WINDOW: (i32, i32) = (836, 70); // 480x40 logical at ~1.74x
+    /// macOS reports a work area that excludes the menu bar and the Dock.
+    const WORK_SIZE: (i32, i32) = (2560, 1470);
+
+    #[test]
+    fn sits_inside_the_work_area_never_in_the_dock_strip() {
+        let (x, y) = statusbar_origin((0, 44), WORK_SIZE, (0, 0), SCREEN, WINDOW);
+        // Bottom edge of the bar must stay within the work area…
+        assert!(y + WINDOW.1 <= 44 + WORK_SIZE.1, "bar overflows the work area");
+        // …and must NOT reach into the strip the Dock occupies.
+        let dock_top = 44 + WORK_SIZE.1;
+        assert!(y + WINDOW.1 <= dock_top, "bar would be hidden behind the Dock");
+        // Horizontally centered.
+        assert_eq!(x, (SCREEN.0 - WINDOW.0) / 2);
+    }
+
+    #[test]
+    fn is_flush_against_the_bottom_of_the_usable_area() {
+        let (_, y) = statusbar_origin((0, 44), WORK_SIZE, (0, 0), SCREEN, WINDOW);
+        assert_eq!(y, 44 + WORK_SIZE.1 - WINDOW.1 - STATUSBAR_GAP);
+    }
+
+    #[test]
+    fn respects_a_dock_on_the_left_by_using_the_work_area_origin() {
+        // A left Dock shifts the work area's x origin and narrows it.
+        let (x, _) = statusbar_origin((160, 44), (2400, 1620), (0, 0), SCREEN, WINDOW);
+        assert_eq!(x, 160 + (2400 - WINDOW.0) / 2);
+        assert!(x > 160, "bar must start right of a left-hand Dock");
+    }
+
+    #[test]
+    fn falls_back_to_a_dock_sized_margin_when_the_work_area_is_unusable() {
+        // Platforms that report a zero/absurd work area must not park the bar at
+        // the very bottom — that is exactly the original bug.
+        for bad in [(0, 0), (2560, 10)] {
+            let (_, y) = statusbar_origin((0, 0), bad, (0, 0), SCREEN, WINDOW);
+            assert_eq!(y, SCREEN.1 - DOCK_FALLBACK - WINDOW.1 - STATUSBAR_GAP);
+            assert!(
+                y + WINDOW.1 < SCREEN.1 - 60,
+                "fallback must still clear a Dock-sized strip"
+            );
+        }
+    }
+
+    #[test]
+    fn handles_a_secondary_monitor_with_a_negative_origin() {
+        // A display left of the primary has negative coordinates; the bar must
+        // land on THAT display, not at x≈0 on the primary.
+        let (x, y) = statusbar_origin((-1920, 0), (1920, 1080), (-1920, 0), (1920, 1080), WINDOW);
+        assert!(x < 0, "bar must stay on the left-hand display");
+        assert_eq!(x, -1920 + (1920 - WINDOW.0) / 2);
+        assert_eq!(y, 1080 - WINDOW.1 - STATUSBAR_GAP);
     }
 }
