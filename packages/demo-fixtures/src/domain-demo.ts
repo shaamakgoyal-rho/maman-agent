@@ -1,4 +1,4 @@
-import { classifyEvent, SHIPPED_PACKS } from "@maman/domain-packs";
+import { classifyEvent, extractDateIso, SHIPPED_PACKS, usableDate } from "@maman/domain-packs";
 import { uuidv7, workflowEventSchema, type WorkflowEvent } from "@maman/contracts";
 import { mulberry32 } from "./reconciliation.js";
 
@@ -24,6 +24,17 @@ export type DomainRepOptions = {
 // Reps are spaced past the default 10-minute episode boundary: real invoice
 // work recurs across a day, not back-to-back, and the template arc must work
 // under PRODUCTION segmentation, not only under the live-demo preset.
+/**
+ * Every pack object's label patterns, collected exactly as the Rust core does
+ * before pushing them to the observer — so the fixture matches labels with the
+ * same constants production uses, rather than a hand-picked list.
+ */
+const PACK_LABEL_PATTERNS: string[] = [
+  ...new Set(
+    SHIPPED_PACKS.flatMap((p) => p.objects.flatMap((o) => o.detection_hints.label_patterns)),
+  ),
+];
+
 const REP_SPACING_MS = 11 * 60_000;
 const STEP_SPACING_MS = 15_000;
 
@@ -182,6 +193,110 @@ export function finopsMonthEndRepFixture(options: DomainRepOptions): WorkflowEve
         ...(step.role ? { role: step.role } : {}),
         ...(step.semantic_type ? { semantic_type: step.semantic_type } : {}),
         stable_id_hash: `h_me_${step.event_type}_${step.role ?? "none"}`,
+      },
+      context: { object_type: step.object_type },
+      ...(classification
+        ? {
+            classification: {
+              domain: classification.domain,
+              ...(classification.object ? { object: classification.object } : {}),
+              ...(classification.action ? { action: classification.action } : {}),
+              confidence: classification.confidence,
+            },
+          }
+        : {}),
+      sensitivity: "internal",
+      redaction: { applied: false, reasons: [] },
+    } satisfies WorkflowEvent);
+  });
+}
+
+/**
+ * Mirrors revops `renewal_motion` — a DATE_DRIVEN workflow, which is what makes
+ * the Layer 5 renewal arc drivable: it fires off a date read from a record, not
+ * off a calendar.
+ *
+ * The `label_dates` on the second step is the SAME shape the Swift observer
+ * emits: it runs the real date extractor over a realistic label and keeps only
+ * the normalized date, exactly as `DateExtraction.swift` does inside the
+ * observer boundary. The label text itself never enters the event — this fixture
+ * would be lying about the privacy boundary if it did.
+ */
+const RENEWAL_STEPS: Array<DomainStep & { app_category: string; label?: string }> = [
+  {
+    app_category: "crm",
+    event_type: "record_opened",
+    role: "row",
+    semantic_type: "renewal",
+    object_type: "renewal",
+    label: "Northwind Traders — renewal",
+  },
+  {
+    app_category: "crm",
+    event_type: "table_read",
+    role: "table",
+    semantic_type: "term_end",
+    object_type: "renewal",
+    // The date the card will count down to, carried the way a real label does.
+    label: "Term end 2026-08-25",
+  },
+  {
+    app_category: "email",
+    event_type: "value_committed",
+    role: "textarea",
+    semantic_type: "renewal_email",
+    object_type: "email",
+  },
+];
+
+export function revopsRenewalRepFixture(options: DomainRepOptions): WorkflowEvent[] {
+  const {
+    rep_index,
+    base_at_ms,
+    device_id = "00000000-0000-7000-8000-00000000d002",
+    user_id = "00000000-0000-7000-8000-000000000001",
+    organization_id = "00000000-0000-7000-8000-000000000002",
+  } = options;
+  const rand = mulberry32(0xf3c0 + rep_index);
+  const start = base_at_ms + rep_index * REP_SPACING_MS;
+
+  return RENEWAL_STEPS.map((step, i) => {
+    const t = start + i * STEP_SPACING_MS;
+    // Pattern hits and dates are derived the way the observer derives them:
+    // patterns from the pack, the date from the real extractor, and only when
+    // a pattern matched — never harvested from unrelated labels.
+    const patternHits = step.label
+      ? PACK_LABEL_PATTERNS.filter((p) => step.label!.toLowerCase().includes(p.toLowerCase()))
+      : [];
+    const read = step.label && patternHits.length > 0 ? extractDateIso(step.label) : null;
+    const usable = read ? usableDate(read) : { date: null };
+    const classification = classifyEvent(SHIPPED_PACKS, {
+      app_category: step.app_category,
+      event_type: step.event_type,
+      ...(step.role ? { target_role: step.role } : {}),
+      ...(step.semantic_type ? { semantic_type: step.semantic_type } : {}),
+      object_type: step.object_type,
+      ...(patternHits.length > 0 ? { label_pattern_hits: patternHits } : {}),
+    });
+    return workflowEventSchema.parse({
+      schema_version: 1,
+      event_id: uuidv7({ timestampMs: t, random: rand }),
+      device_id,
+      user_id,
+      organization_id,
+      occurred_at: new Date(t).toISOString(),
+      monotonic_ms: rep_index * REP_SPACING_MS + i * STEP_SPACING_MS + 1000,
+      source: "chrome",
+      app: { display_name: "Salesforce", domain: "acme.lightning.force.com" },
+      event_type: step.event_type,
+      target: {
+        ...(step.role ? { role: step.role } : {}),
+        ...(step.semantic_type ? { semantic_type: step.semantic_type } : {}),
+        stable_id_hash: `h_rn_${step.event_type}_${step.role ?? "none"}`,
+        ...(patternHits.length > 0 ? { label_pattern_hits: patternHits } : {}),
+        ...(usable.date && read
+          ? { label_dates: [{ date: usable.date, confidence: read.confidence }] }
+          : {}),
       },
       context: { object_type: step.object_type },
       ...(classification

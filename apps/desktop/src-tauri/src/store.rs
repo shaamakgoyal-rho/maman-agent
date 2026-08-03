@@ -1152,6 +1152,70 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Dates read from labels inside the observer, paired with the pack
+    /// classification of the event they came from (Layer 5 date-driven triggers).
+    ///
+    /// This is a SEPARATE read path from `pattern_features` on purpose. Feature
+    /// projections are the learning/sync-shaped view and must not carry a value
+    /// read off the user's record; this one is explicitly local — nothing calls
+    /// it but the panel, and no sync projection reads from it.
+    ///
+    /// Only classified events are returned: an unclassified date has no pack
+    /// trigger to belong to, so surfacing it would serve no purpose.
+    pub async fn watched_dates(&self, limit: i64) -> Result<Vec<serde_json::Value>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT event_id, occurred_at, encrypted_payload, pack_domain, domain_object
+             FROM workflow_events
+             WHERE quarantined = 0 AND pack_domain IS NOT NULL AND domain_object IS NOT NULL
+             ORDER BY occurred_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let event_id: String = row.get("event_id");
+            let blob: Vec<u8> = row.get("encrypted_payload");
+            let aad = self.aad("workflow_events", &event_id, 1);
+            let Some(payload) = self
+                .decrypt(&blob, &aad)
+                .ok()
+                .and_then(|pt| serde_json::from_slice::<serde_json::Value>(&pt).ok())
+            else {
+                continue;
+            };
+            let Some(dates) = payload
+                .pointer("/target/label_dates")
+                .and_then(|v| v.as_array())
+            else {
+                continue;
+            };
+            for entry in dates {
+                // Re-validate on the way out: the shape is bounded here too, so a
+                // payload written by an older build cannot widen what is exposed.
+                let Some(date) = entry.get("date").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if date.len() != 10 || !date.is_char_boundary(10) {
+                    continue;
+                }
+                let confidence = entry
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                out.push(serde_json::json!({
+                    "occurred_at": row.get::<String, _>("occurred_at"),
+                    "pack_domain": row.get::<Option<String>, _>("pack_domain"),
+                    "domain_object": row.get::<Option<String>, _>("domain_object"),
+                    "date": date,
+                    "confidence": confidence,
+                }));
+            }
+        }
+        Ok(out)
+    }
+
     /// Appends a Layer 5 surfacing outcome with its context features.
     ///
     /// Every field is validated or bounded before it lands: the caller is the
@@ -1943,6 +2007,69 @@ mod domain_ingest_tests {
             "sensitivity": "internal",
             "redaction": { "applied": false, "reasons": [] }
         })
+    }
+
+    /// Dates read from labels must reach Layer 5 WITHOUT entering the learning
+    /// projection — that separation is the whole privacy argument for emitting
+    /// them at all, so it is pinned here rather than left to code review.
+    #[tokio::test]
+    async fn watched_dates_are_local_only_and_never_in_pattern_features() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open_with_packs(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+            packs(),
+        )
+        .await
+        .unwrap();
+
+        let mut event = crm_event(11, "renewal");
+        event["target"] = json!({
+            "role": "row",
+            "label_pattern_hits": ["renewal"],
+            "label_dates": [{ "date": "2026-08-25", "confidence": 0.95 }]
+        });
+        store.insert_event(&event, 30).await.unwrap();
+
+        // Local path: the date arrives with the pack classification it belongs to.
+        let watched = store.watched_dates(50).await.unwrap();
+        assert_eq!(watched.len(), 1, "expected one watched date, got {watched:?}");
+        assert_eq!(watched[0]["date"], "2026-08-25");
+        assert_eq!(watched[0]["pack_domain"], "revops");
+        assert_eq!(watched[0]["domain_object"], "renewal");
+
+        // Learning projection: the date must appear NOWHERE in it.
+        let features = store.pattern_features(50).await.unwrap();
+        let serialized = serde_json::to_string(&features).unwrap();
+        assert!(
+            !serialized.contains("2026-08-25"),
+            "a value read off a record must not enter the feature projection: {serialized}"
+        );
+        assert!(!serialized.contains("label_dates"));
+    }
+
+    /// An unclassified event's date has no pack trigger to belong to, so it is
+    /// never surfaced.
+    #[tokio::test]
+    async fn watched_dates_skips_unclassified_events() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open_with_packs(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+            packs(),
+        )
+        .await
+        .unwrap();
+
+        let mut event = crm_event(12, "definitely_not_an_object");
+        event["target"] = json!({
+            "label_dates": [{ "date": "2026-08-25", "confidence": 0.95 }]
+        });
+        store.insert_event(&event, 30).await.unwrap();
+
+        assert!(store.watched_dates(50).await.unwrap().is_empty());
     }
 
     #[tokio::test]

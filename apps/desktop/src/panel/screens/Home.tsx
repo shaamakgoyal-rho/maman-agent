@@ -4,6 +4,7 @@ import {
   finopsMonthEndRepFixture,
   finopsThreeWayRepFixture,
   liveWorkflowRepFixture,
+  revopsRenewalRepFixture,
   reconciliationFixture,
 } from "@maman/demo-fixtures";
 import { useRecommendations } from "../../lib/recommendations.js";
@@ -24,6 +25,8 @@ let domainSimBaseAtMs: number | null = null;
 let domainSimRepIndex = 0;
 let monthEndSimBaseAtMs: number | null = null;
 let monthEndSimRepIndex = 0;
+let renewalSimBaseAtMs: number | null = null;
+let renewalSimRepIndex = 0;
 
 export function Home({ petState }: { petState: PetStateName }) {
   const { settings, update } = useSettings();
@@ -33,6 +36,7 @@ export function Home({ petState }: { petState: PetStateName }) {
   const [liveRepCount, setLiveRepCount] = useState(0);
   const [finopsRepCount, setFinopsRepCount] = useState(0);
   const [monthEndRepCount, setMonthEndRepCount] = useState(0);
+  const [renewalRepCount, setRenewalRepCount] = useState(0);
   const [capabilities, setCapabilities] = useState<CapabilityLine[]>([]);
 
   useEffect(() => {
@@ -128,6 +132,33 @@ export function Home({ petState }: { petState: PetStateName }) {
       );
       setDemoResult(result);
       setMonthEndRepCount(rep + 1);
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+      await useRecommendations.getState().refresh();
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
+  /**
+   * Simulated renewal rep: one repetition of the revops `renewal_motion` PACK
+   * workflow. This is the DATE_DRIVEN cadence — it fires off a term-end date read
+   * from the record itself, so it exercises the observer's date extractor and the
+   * local watched-date path rather than the fiscal calendar.
+   */
+  const simulateRenewalRep = async () => {
+    setDemoBusy(true);
+    try {
+      renewalSimBaseAtMs ??= Date.now() - 120 * 60_000;
+      const rep = renewalSimRepIndex++;
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STARTED" });
+      const result = await ingestEvents(
+        revopsRenewalRepFixture({ rep_index: rep, base_at_ms: renewalSimBaseAtMs }),
+        { observationPaused: settings.observation_paused },
+      );
+      setDemoResult(result);
+      setRenewalRepCount(rep + 1);
       await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
       await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
       await useRecommendations.getState().refresh();
@@ -255,6 +286,9 @@ export function Home({ petState }: { petState: PetStateName }) {
             disabled={demoBusy}
           >
             Simulate month-end rep{monthEndRepCount > 0 ? ` (${monthEndRepCount})` : ""}
+          </Button>
+          <Button variant="secondary" onClick={() => void simulateRenewalRep()} disabled={demoBusy}>
+            Simulate renewal rep{renewalRepCount > 0 ? ` (${renewalRepCount})` : ""}
           </Button>
           {demoResult && (
             <span className="text-xs text-muted tabular-nums">

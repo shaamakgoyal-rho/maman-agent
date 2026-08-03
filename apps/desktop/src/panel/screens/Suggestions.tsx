@@ -145,11 +145,16 @@ function ProactiveCardView({ item }: { item: ProactiveItem }) {
       {card.copy ? (
         <p className="mt-1 text-xs text-ink">{card.copy}</p>
       ) : (
-        // No verified match rate yet, so the pack's copy would have to invent
-        // one. Say what is actually true instead.
+        // The pack's copy wanted something we will not invent — a match rate
+        // before verification, or an account name the observer deliberately does
+        // not emit. State the facts we DO have instead of a templated guess.
         <p className="mt-1 text-xs text-ink">
-          {card.pack_domain} scheduled this for {card.due_date}. I have not tested a helper against
-          enough of your own runs to quote a match rate yet, so there is nothing to claim.
+          {card.days_out !== undefined && card.reference_date
+            ? `${card.days_out === 0 ? "Due today" : `${card.days_out} day${card.days_out === 1 ? "" : "s"} out`} — ${card.reference_date}. `
+            : `${card.pack_domain} scheduled this for ${card.due_date}. `}
+          {card.copy_missing.includes("account")
+            ? "I read the date off the record but not who it belongs to, so I cannot name the account."
+            : "I have not tested a helper against enough of your own runs to quote a match rate yet, so there is nothing to claim."}
         </p>
       )}
 

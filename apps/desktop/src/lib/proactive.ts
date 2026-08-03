@@ -1,8 +1,11 @@
 import {
   buildOutcome,
+  DATE_CONFIDENCE_FLOOR,
   evaluateDismissal,
   evaluateProactivity,
+  localDate,
   SHIPPED_PACKS,
+  toIsoDate,
   type DismissalAction,
   type DomainPack,
   type FiscalCalendar,
@@ -113,6 +116,75 @@ export type ProactiveInput = {
   watched?: { object: string; date: string; subject?: string } | undefined;
 };
 
+/**
+ * One date read from a label inside the observer, paired with the pack object it
+ * was classified against. This is the raw shape the local `watched_dates`
+ * command returns.
+ */
+export type WatchedDateRow = {
+  occurred_at: string;
+  pack_domain: string | null;
+  domain_object: string | null;
+  date: string;
+  confidence: number;
+};
+
+/**
+ * Reduces many observed dates to at most one per pack object: the SOONEST date
+ * that has not already passed.
+ *
+ * Two judgement calls, both in the safe direction. A date in the past is
+ * dropped — a renewal that already lapsed is not something to offer help with,
+ * and the lead-day arithmetic would fire on every stale record forever.
+ * Confidence below the floor never gets here (the observer drops it) but is
+ * re-checked anyway, since an older build may have written a weaker read.
+ */
+export function nearestWatchedDates(
+  rows: WatchedDateRow[],
+  now: Date,
+  minConfidence = DATE_CONFIDENCE_FLOOR,
+): Map<string, { date: string; confidence: number }> {
+  const today = toIsoDate(localDate(now));
+  const best = new Map<string, { date: string; confidence: number }>();
+  for (const row of rows) {
+    if (!row.domain_object) continue;
+    if (row.confidence < minConfidence) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(row.date)) continue;
+    if (row.date < today) continue; // already lapsed
+    const current = best.get(row.domain_object);
+    // ISO dates compare lexicographically, so this is a plain string min.
+    if (!current || row.date < current.date) {
+      best.set(row.domain_object, { date: row.date, confidence: row.confidence });
+    }
+  }
+  return best;
+}
+
+/**
+ * Which pack object a workflow's date triggers watch, and the date observed for
+ * it — resolved from the PACK, never from a hardcoded field name. A pack that
+ * watches something else needs no code change here.
+ *
+ * No `subject` is ever attached: the observer emits a date but deliberately not
+ * the account it belongs to, so a card says "a renewal is 23 days out" rather
+ * than naming a customer.
+ */
+function observedFor(
+  packs: DomainPack[],
+  workflow_id: string,
+  observed: Map<string, { date: string; confidence: number }> | undefined,
+): { object: string; date: string } | undefined {
+  if (!observed || observed.size === 0) return undefined;
+  for (const pack of packs) {
+    if (!pack.workflows.some((w) => w.id === workflow_id)) continue;
+    for (const trigger of pack.proactivity.event_triggers) {
+      const hit = observed.get(trigger.watch);
+      if (hit) return { object: trigger.watch, date: hit.date };
+    }
+  }
+  return undefined;
+}
+
 export type ProactiveItem = {
   card: ProactiveCard;
   /** The pattern this card would run, when one is already tracked. */
@@ -131,6 +203,12 @@ export function proactiveCards(input: {
   calendar: FiscalCalendar;
   quiet_periods: QuietPeriod[];
   patterns: ProactiveInput[];
+  /**
+   * Dates observed per pack object (from `nearestWatchedDates`). A date_driven
+   * workflow whose watched object is absent here simply does not fire — the
+   * scheduler never invents a date.
+   */
+  watched_dates?: Map<string, { date: string; confidence: number }>;
   packs?: DomainPack[];
 }): { items: ProactiveItem[]; decisions: ProactiveDecision[] } {
   const packs = input.packs ?? (SHIPPED_PACKS as DomainPack[]);
@@ -155,7 +233,10 @@ export function proactiveCards(input: {
     const decisions = group
       .map((p) => entryDecision(workflow_id, p.pattern_id, p.entry))
       .filter((d): d is SuggestionDecision => d !== null);
-    const watched = group.find((p) => p.watched)?.watched;
+    // An explicit per-pattern date wins; otherwise use what was actually
+    // observed for whichever pack object this workflow's triggers watch.
+    const explicit = group.find((p) => p.watched)?.watched;
+    const watched = explicit ?? observedFor(packs, workflow_id, input.watched_dates);
     signals.push({
       workflow_id,
       pattern_id: lead.pattern_id,
@@ -164,7 +245,10 @@ export function proactiveCards(input: {
       observed_dow: modeWeekday(group.flatMap((p) => p.episode_weekdays)),
       watched_object: watched?.object,
       watched_date: watched?.date,
-      subject: watched?.subject,
+      // Only an explicitly-supplied subject (demo fixtures) is ever used. A date
+      // observed live carries no account name, by design — so a live card reads
+      // "a renewal is 23 days out", never a customer's name.
+      subject: explicit?.subject,
       decisions,
     });
   }

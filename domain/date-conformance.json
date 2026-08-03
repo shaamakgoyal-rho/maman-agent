@@ -1,0 +1,282 @@
+[
+  {
+    "name": "iso year first",
+    "text": "Term end 2026-08-25",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "year first with slashes",
+    "text": "expires 2026/08/25",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "year first with dots",
+    "text": "expires 2026.08.25",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "year first single digit parts",
+    "text": "2026-1-5",
+    "expected": {
+      "date": "2026-01-05",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "year first impossible day",
+    "text": "2026-02-30",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "year first impossible month",
+    "text": "2026-13-01",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "real leap day",
+    "text": "2028-02-29",
+    "expected": {
+      "date": "2028-02-29",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "fake leap day",
+    "text": "2027-02-29",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "year below plausible window",
+    "text": "1889-08-25",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "year above plausible window",
+    "text": "2999-08-25",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "day month-name year",
+    "text": "Renewal: 25 Aug 2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "day full-month year with comma",
+    "text": "Renewal: 25 August, 2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "month-name day year",
+    "text": "Renewal: Aug 25, 2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "month-name day year no comma",
+    "text": "Renewal: August 25 2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "sept abbreviation",
+    "text": "Renewal: Sept 1, 2026",
+    "expected": {
+      "date": "2026-09-01",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "ordinal suffix",
+    "text": "term end Aug 25th, 2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.9
+    }
+  },
+  {
+    "name": "month name two digit year",
+    "text": "term end 25 Aug 26",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "month name impossible day",
+    "text": "Feb 30, 2026",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "word that is not a month",
+    "text": "25 Renewal 2026",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "quarter is not a month",
+    "text": "Quarter 3, 2026",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "numeric day first resolved",
+    "text": "expires 25/08/2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.8
+    }
+  },
+  {
+    "name": "numeric month first resolved",
+    "text": "expires 08/25/2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.8
+    }
+  },
+  {
+    "name": "numeric ambiguous both under 13",
+    "text": "expires 03/04/2026",
+    "expected": {
+      "date": "2026-03-04",
+      "confidence": 0.35
+    }
+  },
+  {
+    "name": "numeric two digit year",
+    "text": "expires 25/08/26",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.5
+    }
+  },
+  {
+    "name": "numeric impossible day",
+    "text": "31/02/2026",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "numeric dashes",
+    "text": "expires 25-08-2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.8
+    }
+  },
+  {
+    "name": "two year-first dates",
+    "text": "start 2026-01-01 term end 2026-08-25",
+    "expected": {
+      "date": "2026-01-01",
+      "confidence": 0.7
+    }
+  },
+  {
+    "name": "two numeric dates",
+    "text": "25/08/2026 and 26/09/2026",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.55
+    }
+  },
+  {
+    "name": "empty",
+    "text": "",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "invoice id is not a date",
+    "text": "INV-2041",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "bare year",
+    "text": "2026",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "amount is not a date",
+    "text": "$4,500.00",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "no digits at all",
+    "text": "amount due",
+    "expected": {
+      "date": null,
+      "confidence": 0
+    }
+  },
+  {
+    "name": "label with account and email",
+    "text": "Northwind Traders — renewal term end 2026-08-25 (owner: dana@example.com)",
+    "expected": {
+      "date": "2026-08-25",
+      "confidence": 0.95
+    }
+  },
+  {
+    "name": "crm field summary",
+    "text": "Term End Date: 2027-03-31",
+    "expected": {
+      "date": "2027-03-31",
+      "confidence": 0.95
+    }
+  }
+]

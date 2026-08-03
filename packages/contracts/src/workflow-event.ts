@@ -79,6 +79,33 @@ export const workflowEventSchema = z
          * Bounded: the observer caps at 8 hits.
          */
         label_pattern_hits: z.array(z.string().min(1).max(64)).max(8).optional(),
+        /**
+         * Calendar dates read from the (pre-hash) label inside the observer, for
+         * Layer 5 date-driven triggers (a renewal's `term_end`).
+         *
+         * This is a NARROWER but REAL disclosure, unlike label_pattern_hits: a
+         * date is a value read off the user's record, not a pack constant. The
+         * rules that keep it defensible are structural, not conventional:
+         *  - only the NORMALIZED date and a confidence — never a substring of
+         *    the label, and never the account or record it belongs to;
+         *  - emitted only for labels that already matched a pack pattern, so
+         *    dates are not harvested from unrelated UI;
+         *  - bounded at 4, and absent entirely when nothing was read;
+         *  - deliberately NOT carried into PatternFeatureEvent, which is the
+         *    learning/sync-shaped projection. This value stays in the local
+         *    encrypted event payload and is read by an explicitly local command.
+         */
+        label_dates: z
+          .array(
+            z
+              .object({
+                date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+                confidence: z.number().min(0).max(1),
+              })
+              .strict(),
+          )
+          .max(4)
+          .optional(),
       })
       .strict(),
     context: z

@@ -4,10 +4,12 @@ import {
   familySuppressed,
   gateProactiveCard,
   modeWeekday,
+  nearestWatchedDates,
   outcomeFor,
   proactiveCards,
   templateWorkflow,
   type ProactiveInput,
+  type WatchedDateRow,
 } from "../src/lib/proactive.js";
 import type { SurfacingContext } from "../src/lib/suggestion-policy.js";
 
@@ -333,5 +335,101 @@ describe("outcome rows", () => {
       outcome: "accepted",
     });
     expect(outcome.local_hour).toBe(items[0]!.card.features.local_hour);
+  });
+});
+
+describe("watched dates observed from labels", () => {
+  const row = (over: Partial<WatchedDateRow> = {}): WatchedDateRow => ({
+    occurred_at: "2026-08-02T10:00:00.000Z",
+    pack_domain: "revops",
+    domain_object: "renewal",
+    date: "2026-08-25",
+    confidence: 0.95,
+    ...over,
+  });
+
+  it("keeps the SOONEST future date per pack object", () => {
+    const m = nearestWatchedDates(
+      [row({ date: "2026-11-01" }), row({ date: "2026-08-25" }), row({ date: "2026-09-15" })],
+      at(2026, 8, 2),
+    );
+    expect(m.get("renewal")?.date).toBe("2026-08-25");
+  });
+
+  it("drops dates that have already passed", () => {
+    const m = nearestWatchedDates([row({ date: "2026-07-01" })], at(2026, 8, 2));
+    expect(m.size).toBe(0);
+  });
+
+  it("keeps a date falling today", () => {
+    const m = nearestWatchedDates([row({ date: "2026-08-02" })], at(2026, 8, 2));
+    expect(m.get("renewal")?.date).toBe("2026-08-02");
+  });
+
+  it("re-checks confidence even though the observer already filtered", () => {
+    expect(nearestWatchedDates([row({ confidence: 0.35 })], at(2026, 8, 2)).size).toBe(0);
+  });
+
+  it("ignores unclassified rows and malformed dates", () => {
+    expect(nearestWatchedDates([row({ domain_object: null })], at(2026, 8, 2)).size).toBe(0);
+    expect(nearestWatchedDates([row({ date: "next tuesday" })], at(2026, 8, 2)).size).toBe(0);
+  });
+
+  it("separates dates by pack object", () => {
+    const m = nearestWatchedDates(
+      [row(), row({ domain_object: "invoice", date: "2026-08-10" })],
+      at(2026, 8, 2),
+    );
+    expect(m.get("renewal")?.date).toBe("2026-08-25");
+    expect(m.get("invoice")?.date).toBe("2026-08-10");
+  });
+
+  it("fires a renewal card from an OBSERVED date, resolved via the pack trigger", () => {
+    // revops event_triggers watch `renewal` with lead_days 30; nothing here
+    // names term_end in code — the pack does.
+    const { items } = proactiveCards({
+      now: at(2026, 8, 2),
+      calendar: CAL,
+      quiet_periods: [],
+      patterns: [
+        input({
+          template_id: "revops/renewal_motion",
+          verified: { runs_matched: 4, runs_tested: 5 },
+        }),
+      ],
+      watched_dates: nearestWatchedDates([row()], at(2026, 8, 2)),
+    });
+    expect(items.length).toBe(1);
+    expect(items[0]!.card.workflow_id).toBe("renewal_motion");
+    expect(items[0]!.card.surface).toBe("on_trigger");
+    expect(items[0]!.card.days_out).toBe(23);
+    expect(items[0]!.card.reference_date).toBe("2026-08-25");
+  });
+
+  it("does NOT name an account, because none is observed", () => {
+    const { items } = proactiveCards({
+      now: at(2026, 8, 2),
+      calendar: CAL,
+      quiet_periods: [],
+      patterns: [input({ template_id: "revops/renewal_motion" })],
+      watched_dates: nearestWatchedDates([row()], at(2026, 8, 2)),
+    });
+    // The pack copy wants {account}; with no subject observed it is refused
+    // rather than rendered with a placeholder.
+    expect(items[0]!.card.copy).toBeNull();
+    expect(items[0]!.card.copy_missing).toContain("account");
+    // …but the real day count is still available to state honestly.
+    expect(items[0]!.card.days_out).toBe(23);
+  });
+
+  it("does not fire when no date was observed — never invents one", () => {
+    const { items } = proactiveCards({
+      now: at(2026, 8, 2),
+      calendar: CAL,
+      quiet_periods: [],
+      patterns: [input({ template_id: "revops/renewal_motion" })],
+      watched_dates: new Map(),
+    });
+    expect(items).toEqual([]);
   });
 });

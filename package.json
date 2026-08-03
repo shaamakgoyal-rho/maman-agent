@@ -44,7 +44,8 @@
     "packs:conformance:check": "pnpm --filter @maman/domain-packs packs:conformance:check",
     "audit:dependencies": "pnpm audit --audit-level high",
     "audit:licenses": "bash scripts/audit-licenses.sh",
-    "audit:secrets": "bash scripts/audit-secrets.sh"
+    "audit:secrets": "bash scripts/audit-secrets.sh",
+    "packs:date-conformance:check": "pnpm --filter @maman/domain-packs packs:date-conformance:check"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
