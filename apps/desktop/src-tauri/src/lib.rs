@@ -470,12 +470,44 @@ fn make_windows_visible_on_all_spaces<R: Runtime>(app: &AppHandle<R>) {
 /// above the Dock wherever the user keeps it.
 fn setup_statusbar<R: Runtime>(app: &AppHandle<R>) {
     let Some(bar) = app.get_webview_window("statusbar") else { return };
-    let _ = bar.set_ignore_cursor_events(true);
-    position_statusbar(&bar);
+    // Click-through and draggable are mutually exclusive: a window that ignores
+    // cursor events never receives the mouse, so it cannot be grabbed. The
+    // setting picks which one the user wants; dragging is the default.
+    let _ = bar.set_ignore_cursor_events(statusbar_click_through_setting(app));
+    if let Some((x, y)) = saved_statusbar_position(app, &bar) {
+        // A position the user chose by hand wins over any automatic placement.
+        let _ = bar.set_position(PhysicalPosition::new(x, y));
+    } else {
+        position_statusbar(&bar);
+    }
     let enabled = statusbar_enabled_setting(app);
     if enabled {
         let _ = bar.show();
     }
+}
+
+/// The key a manually-placed bar is stored under, per display, alongside the
+/// pet's own positions. Prefixed so it can never collide with a monitor name.
+fn statusbar_position_key<R: Runtime>(bar: &WebviewWindow<R>) -> String {
+    statusbar_position_key_for(&monitor_key(bar))
+}
+
+/// The pure half, so the namespacing rule is testable without a display.
+fn statusbar_position_key_for(monitor: &str) -> String {
+    format!("statusbar@{monitor}")
+}
+
+/// A hand-placed position for this display, if the user moved the bar AND still
+/// has following turned off. Both conditions matter: re-enabling "follow" must
+/// resume docking even though the stored position is still on disk.
+fn saved_statusbar_position<R: Runtime>(
+    app: &AppHandle<R>,
+    bar: &WebviewWindow<R>,
+) -> Option<(i32, i32)> {
+    if statusbar_follow_setting(app) {
+        return None;
+    }
+    load_positions(app).0.get(&statusbar_position_key(bar)).copied()
 }
 
 /// Bottom-center of the primary monitor's WORK AREA, with a small gap.
@@ -545,6 +577,11 @@ fn dock_statusbar<R: Runtime>(app: &AppHandle<R>, frame: Option<observer::Window
     if !bar.is_visible().unwrap_or(false) {
         return;
     }
+    // The user dragged it somewhere: leave it alone. Automatic placement fighting
+    // a deliberate choice is worse than no automatic placement at all.
+    if !statusbar_should_auto_place(statusbar_follow_setting(app)) {
+        return;
+    }
     let Some(frame) = frame else {
         position_statusbar(&bar);
         return;
@@ -589,6 +626,16 @@ fn dock_statusbar<R: Runtime>(app: &AppHandle<R>, frame: Option<observer::Window
 /// Inset from the monitored window's bottom edge (logical points).
 const DOCK_INSET: f64 = 6.0;
 
+/// Whether automatic placement may move the bar.
+///
+/// Exists as a named function because it encodes a product rule rather than a
+/// detail: a position the user chose by hand outranks every automatic placement,
+/// including docking to the monitored window. Anything that moves the bar on its
+/// own must ask this first.
+fn statusbar_should_auto_place(follow_window: bool) -> bool {
+    follow_window
+}
+
 /// Bottom-center of the monitored window, clamped to stay inside the work area.
 ///
 /// The clamp is what keeps this honest: a window can be dragged half off-screen,
@@ -616,6 +663,27 @@ fn statusbar_origin_in_window(
     (x, y)
 }
 
+/// Reads a boolean from settings.json with an explicit default. Fail-open to the
+/// default: a corrupt settings file must not silently change bar behaviour.
+fn settings_bool<R: Runtime>(app: &AppHandle<R>, key: &str, default: bool) -> bool {
+    config_path(app, SETTINGS_FILE)
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
+        .unwrap_or(default)
+}
+
+/// Whether the bar docks to the monitored window (default on).
+fn statusbar_follow_setting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    settings_bool(app, "statusbar_follow_window", true)
+}
+
+/// Whether clicks pass through the bar (default off, so it can be dragged).
+fn statusbar_click_through_setting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    settings_bool(app, "statusbar_click_through", false)
+}
+
 /// Reads statusbar_enabled from settings.json (default true), fail-open to
 /// visible: a corrupt settings file should not silently hide a health surface.
 fn statusbar_enabled_setting<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -625,6 +693,58 @@ fn statusbar_enabled_setting<R: Runtime>(app: &AppHandle<R>) -> bool {
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| v.get("statusbar_enabled").and_then(|b| b.as_bool()))
         .unwrap_or(true)
+}
+
+/// Persists wherever the user just dragged the bar to, for THIS display.
+///
+/// Callable from the status bar itself (not panel-only): the bar is the window
+/// being dragged, so it is the only surface that knows the drag finished. It can
+/// write nothing but its own position — no settings, no store.
+#[tauri::command]
+fn statusbar_position_save<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<(), String> {
+    if window.label() != "statusbar" {
+        return Err("only the status bar may save its own position".into());
+    }
+    let Some(bar) = app.get_webview_window("statusbar") else {
+        return Err("statusbar window unavailable".into());
+    };
+    let pos = bar.outer_position().map_err(|e| e.to_string())?;
+    let mut positions = load_positions(&app);
+    positions
+        .0
+        .insert(statusbar_position_key(&bar), (pos.x, pos.y));
+    save_positions(&app, &positions);
+    Ok(())
+}
+
+/// Forgets a hand-placed position so the bar resumes automatic placement.
+/// Panel-only: this is a Settings action, not something the bar does to itself.
+#[tauri::command]
+fn statusbar_position_reset<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<(), String> {
+    require_panel(&window)?;
+    let Some(bar) = app.get_webview_window("statusbar") else {
+        return Err("statusbar window unavailable".into());
+    };
+    let mut positions = load_positions(&app);
+    positions.0.remove(&statusbar_position_key(&bar));
+    save_positions(&app, &positions);
+    position_statusbar(&bar);
+    Ok(())
+}
+
+/// Applies the click-through setting to the live window, so the toggle takes
+/// effect immediately instead of at the next launch.
+#[tauri::command]
+fn statusbar_apply_click_through<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    click_through: bool,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    let Some(bar) = app.get_webview_window("statusbar") else {
+        return Err("statusbar window unavailable".into());
+    };
+    bar.set_ignore_cursor_events(click_through).map_err(|e| e.to_string())
 }
 
 /// Panel-only toggle for the status bar window.
@@ -2175,6 +2295,9 @@ pub fn run() {
             store_status,
             packs_status,
             statusbar_set_visible,
+            statusbar_position_save,
+            statusbar_position_reset,
+            statusbar_apply_click_through,
             open_accessibility_settings
         ])
         .setup(|app| {
@@ -2732,5 +2855,41 @@ mod self_observation_tests {
     fn an_empty_identifier_adds_nothing_rather_than_a_blank_entry() {
         let line = observer_configure_line(&settings(true, vec![]), &[], "");
         assert!(private_list(&line).is_empty(), "blank id must not be added");
+    }
+}
+
+#[cfg(test)]
+mod statusbar_manual_position_tests {
+    //! A hand-placed bar must stay where the user put it.
+    //!
+    //! The bar is draggable, which means two placement authorities now exist: the
+    //! automatic one (dock to the monitored window, else the screen anchor) and
+    //! the user. The user wins. Without that rule the bar would snap back on the
+    //! next focus change and dragging would look broken.
+    use super::{statusbar_position_key_for, statusbar_should_auto_place};
+
+    #[test]
+    fn automatic_placement_is_allowed_only_while_following() {
+        assert!(statusbar_should_auto_place(true), "following: docking may move it");
+        assert!(
+            !statusbar_should_auto_place(false),
+            "hand-placed: nothing may move it"
+        );
+    }
+
+    #[test]
+    fn position_key_is_namespaced_per_display() {
+        // Stored beside the pet's positions, so it must not collide with a
+        // monitor name used as a bare key.
+        assert_eq!(statusbar_position_key_for("Built-in Retina Display"), "statusbar@Built-in Retina Display");
+        assert_ne!(statusbar_position_key_for("primary"), "primary");
+    }
+
+    #[test]
+    fn each_display_remembers_its_own_spot() {
+        assert_ne!(
+            statusbar_position_key_for("Built-in Retina Display"),
+            statusbar_position_key_for("DELL U2720Q"),
+        );
     }
 }
