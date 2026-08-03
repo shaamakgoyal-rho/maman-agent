@@ -55,7 +55,11 @@ describe("primary demo fixture (M5 gate)", () => {
 
   it("uses calm factual copy (never bragging or surveillance-toned)", () => {
     const rec = result.recommendations[0]!;
-    expect(rec.summary).toMatch(/I noticed you completed a similar workflow 6 times/);
+    // The summary now LEADS with what the workflow consists of, then the
+    // evidence — "a similar workflow N times" described the detector, not the
+    // work, so a reader could not tell which of their habits it meant.
+    expect(rec.summary).toMatch(/^You .+\. I saw this 6 times across /);
+    expect(rec.summary).toMatch(/median run took \d+ minutes/);
     for (const banned of [
       "I watched you",
       "inefficient",
