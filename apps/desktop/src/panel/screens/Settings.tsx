@@ -258,6 +258,46 @@ export function Settings() {
           label="Show the status bar while you work"
           description="A small always-on-top line: a green dot when Maman is genuinely observing, plus what it's watching, which agent is being created, and any run waiting for your approval."
         />
+        <Toggle
+          id="statusbar-follow"
+          checked={settings.statusbar_follow_window}
+          onChange={(on) => {
+            void update({ statusbar_follow_window: on });
+            // Turning following back on puts the bar where it belongs right away
+            // and forgets the hand-placed spot, so the two cannot disagree.
+            if (on && isTauri()) void invokeCommand("statusbar_position_reset").catch(() => {});
+          }}
+          label="Dock it to the window I'm working in"
+          description="The bar sits at the bottom of the window being monitored and follows it. Drag the bar anywhere and this turns itself off, so a spot you chose is never yanked back."
+        />
+        <Toggle
+          id="statusbar-click-through"
+          checked={settings.statusbar_click_through}
+          onChange={(on) => {
+            void update({ statusbar_click_through: on });
+            if (isTauri()) {
+              void invokeCommand("statusbar_apply_click_through", { clickThrough: on }).catch(
+                () => {},
+              );
+            }
+          }}
+          label="Let clicks pass through it"
+          description="Clicks reach the window underneath instead of the bar. This also makes the bar impossible to drag — a window that ignores the mouse can't be grabbed — so turn it off if you want to move the bar."
+        />
+        {!settings.statusbar_follow_window && (
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <Muted>The bar is where you put it, and stays there.</Muted>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                void update({ statusbar_follow_window: true });
+                if (isTauri()) void invokeCommand("statusbar_position_reset").catch(() => {});
+              }}
+            >
+              Reset position
+            </Button>
+          </div>
+        )}
       </Card>
 
       <Card>

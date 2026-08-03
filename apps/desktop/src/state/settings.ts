@@ -52,6 +52,18 @@ export const localSettingsSchema = z
     reduced_motion: z.enum(["system", "on", "off"]).default("system"),
     /** The always-on-top subtitle bar showing what Maman is doing right now. */
     statusbar_enabled: z.boolean().default(true),
+    /**
+     * Whether the bar docks to the window being monitored. Dragging the bar turns
+     * this OFF: a position you chose by hand must not be yanked back on the next
+     * focus change. "Reset position" turns it on again.
+     */
+    statusbar_follow_window: z.boolean().default(true),
+    /**
+     * Let clicks pass through the bar to the window underneath. Mutually
+     * exclusive with dragging — a click-through window never receives the mouse,
+     * so it cannot be grabbed. Off by default so the bar can be moved.
+     */
+    statusbar_click_through: z.boolean().default(false),
     global_shortcut: z.string().default("Control+Alt+P"),
     // Replay-verification gate: a pattern becomes a suggestion card only after
     // the compiled candidate has been tested against the worker's own recorded
