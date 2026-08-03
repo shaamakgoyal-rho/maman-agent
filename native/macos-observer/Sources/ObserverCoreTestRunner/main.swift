@@ -236,6 +236,29 @@ check(
     "only the normalized date is returned, never label text"
 )
 
+// --- window frame (docked subtitle bar) ---
+// Transient UI geometry: a rectangle, no app identity, no content.
+let framed = (try? ObserverMessage.windowFrame(
+    frame: .init(x: 120, y: 80, width: 900, height: 600),
+    occurredAt: "2026-08-03T21:00:00.000Z"
+).jsonLine()) ?? ""
+check(framed.contains("\"type\":\"window_frame\""), "window_frame line uses the wire type")
+for key in ["\"x\":120", "\"y\":80", "\"width\":900", "\"height\":600"] {
+    check(framed.contains(key), "window_frame carries \(key)")
+}
+check(
+    !framed.contains("bundle") && !framed.contains("display_name")
+        && !framed.contains("title") && !framed.contains("label"),
+    "window_frame carries NO app identity and no content — geometry only"
+)
+let cleared = (try? ObserverMessage.windowFrame(
+    frame: nil, occurredAt: "2026-08-03T21:00:00.000Z"
+).jsonLine()) ?? ""
+check(
+    cleared.contains("\"frame\":null"),
+    "a cleared frame is an explicit null, so the core detaches the bar"
+)
+
 // The summary MUST stay at the very end of this file: it exits the process, so
 // any check written below it never runs (that silently disabled the
 // label-pattern and date checks until 2026-08-03).
