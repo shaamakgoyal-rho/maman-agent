@@ -14,6 +14,12 @@ export {
 export { validatePack, alternatives, type PackIssue, type PackLoadResult } from "./validate.js";
 export { classifyEvent, type Classification, type ClassifierInput } from "./classify.js";
 export {
+  DATE_CONFIDENCE_FLOOR,
+  extractDateIso,
+  usableDate,
+  type DateExtraction,
+} from "./extract-date.js";
+export {
   extractAmountUsd,
   extractDiscountPct,
   exceedsThreshold,

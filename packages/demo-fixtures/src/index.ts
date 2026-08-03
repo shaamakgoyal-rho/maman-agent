@@ -9,6 +9,7 @@ export { liveWorkflowRepFixture, type LiveRepOptions } from "./live.js";
 export {
   finopsThreeWayRepFixture,
   finopsMonthEndRepFixture,
+  revopsRenewalRepFixture,
   type DomainRepOptions,
 } from "./domain-demo.js";
 export {

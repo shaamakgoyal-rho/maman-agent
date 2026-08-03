@@ -301,6 +301,15 @@ export type ProactiveCard = {
   surface: ProactiveSurface;
   /** Local date the card becomes due. */
   due_date: string;
+  /**
+   * The date the card counts down TO (the close start, or the watched record
+   * date), and how many days out it is. Present so a caller can state the real
+   * facts even when the pack's copy could not be rendered — a renewal card whose
+   * copy wants an account name we deliberately do not emit can still say
+   * "23 days out" truthfully.
+   */
+  reference_date: string | undefined;
+  days_out: number | undefined;
   /** Rendered pack copy, or null when the pack copy could not be honoured. */
   copy: string | null;
   /** Placeholders the pack copy wanted but we could not supply. */
@@ -469,6 +478,8 @@ export function evaluateProactivity(
           cadence: wf.cadence,
           surface: timing.surface,
           due_date: toIsoDate(today),
+          reference_date: timing.reference_date,
+          days_out: timing.days_out,
           copy: rendered.text,
           copy_missing: "missing" in rendered ? rendered.missing : [],
           ceiling,

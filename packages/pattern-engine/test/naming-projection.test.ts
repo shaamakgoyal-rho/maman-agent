@@ -134,6 +134,31 @@ describe("projection branches", () => {
     expect(json).not.toContain("force.com");
     expect(json).not.toMatch(/label|hash|bundle/);
   });
+
+  /**
+   * Dates read off a record (Layer 5 `term_end` triggers) are the one VALUE the
+   * observer emits. They must stay in the local encrypted event and never enter
+   * this projection, which is the learning/sync-shaped view. The Rust store has
+   * the mirror of this assertion; both exist because "we just won't add it"
+   * is not a boundary.
+   */
+  it("projection never carries a date read off a record", () => {
+    const withDate = toPatternFeature({
+      ...base,
+      target: {
+        label_pattern_hits: ["renewal"],
+        label_dates: [{ date: "2026-08-25", confidence: 0.95 }],
+      },
+      classification: { domain: "revops", object: "renewal", confidence: 0.9 },
+    });
+    const json = JSON.stringify(withDate);
+    expect(json).not.toContain("2026-08-25");
+    expect(json).not.toContain("label_dates");
+    // The pack taxonomy it was classified against is still carried — that is the
+    // abstraction layer, and it is what makes the date usable without leaking it.
+    expect(withDate.pack_domain).toBe("revops");
+    expect(withDate.domain_object).toBe("renewal");
+  });
 });
 
 describe("representative sequence", () => {

@@ -151,6 +151,21 @@ final class ObserverRuntime {
                     if Redaction.isSensitiveLabel(text) { return nil }
                     let hits = matchLabelPatterns(label: text, patterns: labelPatterns)
                     return hits.isEmpty ? nil : hits
+                },
+                // A date is a VALUE off the user's record, so it is minimized
+                // twice: the same sensitivity guard as above, and only for labels
+                // that already matched a pack pattern — no pattern hit means no
+                // pack workflow cares, so there is no reason to read a date at
+                // all. Unusable reads (ambiguous order, two-digit year) are
+                // dropped here rather than emitted for someone else to filter.
+                labelDates: label.flatMap { text in
+                    if Redaction.isSensitiveLabel(text) { return nil }
+                    if matchLabelPatterns(label: text, patterns: labelPatterns).isEmpty {
+                        return nil
+                    }
+                    let read = extractDateIso(text)
+                    guard let date = usableDate(read) else { return nil }
+                    return [SemanticEvent.Target.LabelDate(date: date, confidence: read.confidence)]
                 }
             ),
             context: .init(),

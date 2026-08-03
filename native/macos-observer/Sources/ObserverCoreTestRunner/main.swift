@@ -148,8 +148,6 @@ check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":901
 check(ObserverControl.parse(line: #"{"type":"capture_keystrokes"}"#) == nil,
       "unknown control types rejected (no keystroke channel)")
 
-print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
-exit(failures == 0 ? 0 : 1)
 
 // --- label-pattern matching (domain packs, L1 hint) ---
 check(
@@ -177,3 +175,69 @@ check(
     matchLabelPatterns(label: "Quarterly report", patterns: packPatterns).isEmpty,
     "non-matching label yields no hits"
 )
+
+// --- date extraction: the SAME fixture the TypeScript suite asserts ---
+// domain/date-conformance.json is generated from the TS specification. If this
+// Swift mirror ever disagrees, this check fails rather than a wrong renewal date
+// shipping quietly. Located relative to this source file so the runner works
+// from any working directory.
+let conformancePath = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()  // main.swift -> ObserverCoreTestRunner
+    .deletingLastPathComponent()  // -> Sources
+    .deletingLastPathComponent()  // -> macos-observer
+    .deletingLastPathComponent()  // -> native
+    .deletingLastPathComponent()  // -> repo root
+    .appendingPathComponent("domain/date-conformance.json")
+
+struct DateCase: Decodable {
+    struct Expected: Decodable {
+        let date: String?
+        let confidence: Double
+    }
+    let name: String
+    let text: String
+    let expected: Expected
+}
+
+if let data = try? Data(contentsOf: conformancePath),
+    let cases = try? JSONDecoder().decode([DateCase].self, from: data)
+{
+    check(cases.count > 20, "date conformance fixture has cases (\(cases.count))")
+    var mismatches: [String] = []
+    for c in cases {
+        let got = extractDateIso(c.text)
+        if got.date != c.expected.date || abs(got.confidence - c.expected.confidence) > 0.0001 {
+            mismatches.append(
+                "\(c.name): got \(got.date ?? "nil")@\(got.confidence), "
+                    + "want \(c.expected.date ?? "nil")@\(c.expected.confidence)")
+        }
+    }
+    check(
+        mismatches.isEmpty,
+        "swift date extractor matches the TypeScript oracle on every case"
+            + (mismatches.isEmpty ? "" : " — \(mismatches.joined(separator: "; "))"))
+} else {
+    // A missing or unreadable fixture must FAIL: silently skipping the drift
+    // contract is how the two implementations diverge unnoticed.
+    check(false, "date conformance fixture is readable at \(conformancePath.path)")
+}
+
+// The fail-safe direction, asserted directly rather than only via the fixture.
+check(
+    usableDate(extractDateIso("expires 03/04/2026")) == nil,
+    "an ambiguous numeric date is never acted on"
+)
+check(
+    usableDate(extractDateIso("term end 2026-08-25")) == "2026-08-25",
+    "an unambiguous date is usable"
+)
+check(
+    extractDateIso("Northwind Traders — renewal 2026-08-25 (dana@example.com)").date == "2026-08-25",
+    "only the normalized date is returned, never label text"
+)
+
+// The summary MUST stay at the very end of this file: it exits the process, so
+// any check written below it never runs (that silently disabled the
+// label-pattern and date checks until 2026-08-03).
+print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
+exit(failures == 0 ? 0 : 1)

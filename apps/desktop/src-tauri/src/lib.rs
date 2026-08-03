@@ -1022,6 +1022,27 @@ async fn suggestion_history_log<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// Dates read from labels inside the observer, with the pack classification of
+/// the event they came from — the signal Layer 5 date-driven triggers (renewal
+/// `term_end`) schedule against. Panel-only and explicitly local: no sync
+/// projection reads this.
+#[tauri::command]
+async fn watched_dates<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .watched_dates(limit.clamp(1, 5_000))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Appends a Layer 5 surfacing outcome (decision + context features) to the
 /// local `suggestion_outcomes` ledger. The store validates every field against
 /// a closed vocabulary, so a malformed call is rejected, not stored.
@@ -1953,6 +1974,7 @@ pub fn run() {
             verification_report,
             suggestion_history_log,
             suggestion_outcome_log,
+            watched_dates,
             suggestion_outcome_count,
             sync_preview,
             hard_denied_list,

@@ -17,10 +17,12 @@ import { getMemoryRawEvents } from "./events.js";
 import { canSurfaceSuggestion, snoozeUntil, type SnoozeOption } from "./suggestion-policy.js";
 import {
   familySuppressed,
+  nearestWatchedDates,
   outcomeFor,
   proactiveCards,
   type ProactiveInput,
   type ProactiveItem,
+  type WatchedDateRow,
 } from "./proactive.js";
 import { useSettings } from "../state/settings.js";
 
@@ -391,6 +393,33 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
     );
     const visibleForming = forming.filter((f) => !hiddenByFamily(f.candidate));
 
+    // Dates the observer read from labels (renewal term ends and the like).
+    // Local-only read: this never touches the feature projection, and a failure
+    // to fetch simply means no date-driven card, never a fabricated one.
+    let watchedRows: WatchedDateRow[] = [];
+    if (isTauri()) {
+      try {
+        watchedRows = await invokeCommand<WatchedDateRow[]>("watched_dates", { limit: 2000 });
+      } catch {
+        watchedRows = [];
+      }
+    } else {
+      // Web preview: derive the same rows from in-memory events, applying the
+      // SAME filter as the Rust query (classified events only) so the preview
+      // and the device cannot tell different stories.
+      watchedRows = getMemoryRawEvents()
+        .flatMap((e) =>
+          (e.target.label_dates ?? []).map((d) => ({
+            occurred_at: e.occurred_at,
+            pack_domain: e.classification?.domain ?? null,
+            domain_object: e.classification?.object ?? null,
+            date: d.date,
+            confidence: d.confidence,
+          })),
+        )
+        .filter((r) => r.pack_domain !== null && r.domain_object !== null);
+    }
+
     const { items: proactive } = proactiveCards({
       now,
       calendar: {
@@ -399,6 +428,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
       },
       quiet_periods: settings.quiet_periods,
       patterns: proactiveInputs,
+      watched_dates: nearestWatchedDates(watchedRows, now),
     });
 
     // Status bar: the current top of the funnel, named after the workflow.

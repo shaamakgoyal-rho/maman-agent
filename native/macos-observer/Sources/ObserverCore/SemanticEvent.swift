@@ -39,19 +39,37 @@ public struct SemanticEvent: Encodable {
         /// Pack label-pattern strings that matched the (pre-hash) label — pack
         /// constants only, never label text. See LabelPatterns.swift.
         public var labelPatternHits: [String]?
+        /// Calendar dates read from the (pre-hash) label for Layer 5 date-driven
+        /// triggers. Normalized date + confidence ONLY — never a substring of the
+        /// label, never the record it belongs to. See DateExtraction.swift.
+        public var labelDates: [LabelDate]?
+
+        /// One date read from a label. Deliberately has no field for the text it
+        /// came from: there is no shape here that could carry content.
+        public struct LabelDate: Encodable, Equatable {
+            public let date: String
+            public let confidence: Double
+            public init(date: String, confidence: Double) {
+                self.date = date
+                self.confidence = confidence
+            }
+        }
+
         enum CodingKeys: String, CodingKey {
             case role, semanticType = "semantic_type", stableIdHash = "stable_id_hash",
-                labelHash = "label_hash", labelPatternHits = "label_pattern_hits"
+                labelHash = "label_hash", labelPatternHits = "label_pattern_hits",
+                labelDates = "label_dates"
         }
         public init(
             role: String?, semanticType: String?, stableIdHash: String?, labelHash: String?,
-            labelPatternHits: [String]? = nil
+            labelPatternHits: [String]? = nil, labelDates: [LabelDate]? = nil
         ) {
             self.role = role
             self.semanticType = semanticType
             self.stableIdHash = stableIdHash
             self.labelHash = labelHash
             self.labelPatternHits = labelPatternHits
+            self.labelDates = labelDates
         }
     }
     public struct Context: Encodable {
