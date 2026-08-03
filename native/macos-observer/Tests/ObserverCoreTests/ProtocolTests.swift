@@ -101,4 +101,35 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNil(ObserverControl.parse(line: #"{"type":"capture_keystrokes"}"#))
         XCTAssertNil(ObserverControl.parse(line: "not json"))
     }
+
+    /// Window geometry for the docked subtitle bar. The privacy property is that
+    /// this message is a RECTANGLE and nothing else — no app identity, no title,
+    /// no label — because it exists only to position a bar.
+    func testWindowFrameCarriesGeometryOnly() throws {
+        let line = try ObserverMessage.windowFrame(
+            frame: .init(x: 120, y: 80, width: 900, height: 600),
+            occurredAt: "2026-08-03T21:00:00.000Z"
+        ).jsonLine()
+        let json = try decode(line)
+        XCTAssertEqual(json["type"] as? String, "window_frame")
+        let frame = try XCTUnwrap(json["frame"] as? [String: Any])
+        XCTAssertEqual(frame["x"] as? Double, 120)
+        XCTAssertEqual(frame["y"] as? Double, 80)
+        XCTAssertEqual(frame["width"] as? Double, 900)
+        XCTAssertEqual(frame["height"] as? Double, 600)
+        // Only the wire keys we intend, nothing that could identify or describe.
+        XCTAssertEqual(Set(json.keys), Set(["type", "occurred_at", "frame"]))
+        XCTAssertEqual(Set(frame.keys), Set(["x", "y", "width", "height"]))
+    }
+
+    /// "Nothing is being monitored" must be an explicit null so the core detaches
+    /// the bar instead of leaving it pinned to a stale rectangle.
+    func testClearedWindowFrameIsExplicitNull() throws {
+        let line = try ObserverMessage.windowFrame(
+            frame: nil, occurredAt: "2026-08-03T21:00:00.000Z"
+        ).jsonLine()
+        XCTAssertTrue(line.contains("\"frame\":null"), "expected an explicit null: \(line)")
+        let json = try decode(line)
+        XCTAssertTrue(json["frame"] is NSNull)
+    }
 }

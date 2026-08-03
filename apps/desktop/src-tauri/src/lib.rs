@@ -226,17 +226,32 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
 /// string doubles as a change fingerprint. "Observe every app" sends the "*"
 /// wildcard; the Swift observer's hard-deny / private / secure-field boundaries
 /// still run first.
-fn observer_configure_line(settings: &GateSettings, label_patterns: &[String]) -> String {
+fn observer_configure_line(
+    settings: &GateSettings,
+    label_patterns: &[String],
+    self_bundle_id: &str,
+) -> String {
     let bundles: Vec<String> = if settings.observe_all_apps {
         vec!["*".to_string()]
     } else {
         settings.allowlist_bundles.clone()
     };
+    // MAMAN MUST NEVER OBSERVE ITSELF. With observe_all_apps ("*") it otherwise
+    // watches its own panel, pet, and status bar: that pollutes the event store
+    // with Maman's own UI as if it were the user's work, and — once the subtitle
+    // bar started docking to the monitored window — created a feedback loop where
+    // moving the bar produced a window-moved notification that moved it again,
+    // walking it up the screen 6pt at a time. Excluded via private_apps, the
+    // existing "never observe" channel, so the observer needs no special case.
+    let mut private_apps = settings.private_apps.clone();
+    if !self_bundle_id.is_empty() && !private_apps.iter().any(|a| a == self_bundle_id) {
+        private_apps.push(self_bundle_id.to_string());
+    }
     serde_json::json!({
         "type": "configure",
         "allowlist_bundles": bundles,
         "allowlist_domains": settings.allowlist_domains,
-        "private_apps": settings.private_apps,
+        "private_apps": private_apps,
         // Pack label_patterns, pushed as plain strings: the observer matches
         // them against pre-hash label text and emits ONLY the pattern strings
         // that fired. No YAML and no new dependency enters the observer.
@@ -514,6 +529,90 @@ fn statusbar_origin(
     };
     let x = usable.0 + (usable.2 - window.0) / 2;
     let y = usable.1 + usable.3 - window.1 - STATUSBAR_GAP;
+    (x, y)
+}
+
+/// Docks the subtitle bar to the bottom of the window currently being monitored,
+/// or returns it to the screen anchor when nothing is monitored.
+///
+/// This is the "subtitle at the bottom of the window you are working in"
+/// behaviour. Only ONE window is monitored at a time — the observer attaches AX
+/// to the frontmost allowlisted app — so one bar that follows focus is the whole
+/// feature, not an approximation of it.
+fn dock_statusbar<R: Runtime>(app: &AppHandle<R>, frame: Option<observer::WindowFrame>) {
+    let Some(bar) = app.get_webview_window("statusbar") else { return };
+    // A hidden bar (user turned it off) must not be moved or shown.
+    if !bar.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Some(frame) = frame else {
+        position_statusbar(&bar);
+        return;
+    };
+    let Ok(size) = bar.outer_size() else { return };
+    // Clamp against the display the WINDOW is on, not the primary one: on a
+    // multi-display setup those differ, and clamping to the wrong work area would
+    // yank the bar onto another screen. monitor_from_point wants physical pixels,
+    // so scale the window's logical center by the primary scale factor first —
+    // good enough to identify the display, and we re-read the real scale below.
+    let Ok(Some(primary)) = bar.primary_monitor() else { return };
+    let probe = primary.scale_factor();
+    let center = (
+        (frame.x + frame.width / 2.0) * probe,
+        (frame.y + frame.height / 2.0) * probe,
+    );
+    let monitor = match bar.monitor_from_point(center.0, center.1) {
+        Ok(Some(m)) => m,
+        _ => primary,
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    // AX reports logical points; compare in the same space as the bar's size.
+    let bar_logical = (
+        size.width as f64 / scale,
+        size.height as f64 / scale,
+    );
+    let work_logical = (
+        area.position.x as f64 / scale,
+        area.position.y as f64 / scale,
+        area.size.width as f64 / scale,
+        area.size.height as f64 / scale,
+    );
+    let (x, y) = statusbar_origin_in_window(
+        (frame.x, frame.y, frame.width, frame.height),
+        bar_logical,
+        work_logical,
+    );
+    let _ = bar.set_position(tauri::LogicalPosition::new(x, y));
+}
+
+/// Inset from the monitored window's bottom edge (logical points).
+const DOCK_INSET: f64 = 6.0;
+
+/// Bottom-center of the monitored window, clamped to stay inside the work area.
+///
+/// The clamp is what keeps this honest: a window can be dragged half off-screen,
+/// or be shorter than the bar itself, and in both cases the bar must remain
+/// visible somewhere sensible rather than following the window into the void.
+fn statusbar_origin_in_window(
+    frame: (f64, f64, f64, f64),
+    bar: (f64, f64),
+    work: (f64, f64, f64, f64),
+) -> (f64, f64) {
+    let (fx, fy, fw, fh) = frame;
+    let (bw, bh) = bar;
+    let (wx, wy, ww, wh) = work;
+
+    // Centered on the window, or left-aligned when the window is narrower.
+    let desired_x = if fw >= bw { fx + (fw - bw) / 2.0 } else { fx };
+    let desired_y = fy + fh - bh - DOCK_INSET;
+
+    // Clamp into the usable area. max_* can fall below the origin on a tiny work
+    // area, so clamp the low bound last to avoid an inverted range.
+    let max_x = wx + ww - bw;
+    let max_y = wy + wh - bh;
+    let x = desired_x.min(max_x).max(wx);
+    let y = desired_y.min(max_y).max(wy);
     (x, y)
 }
 
@@ -1915,7 +2014,11 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
             let label_patterns =
                 domain::label_patterns(&domain::load_packs(&domain_packs_dir(&app)));
             let mut last_config =
-                observer_configure_line(&load_gate_settings(&app), &label_patterns);
+                observer_configure_line(
+                    &load_gate_settings(&app),
+                    &label_patterns,
+                    &app.config().identifier,
+                );
             if let Some(stdin) = control_stdin.as_mut() {
                 let _ = stdin.write_all(format!("{last_config}\n").as_bytes()).await;
                 let _ = stdin.write_all(b"{\"type\":\"resume\"}\n").await;
@@ -1941,7 +2044,11 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                     // Live reconfigure: push a fresh allowlist / observe-all /
                     // private config within ~2s of a settings change — no restart.
                     let current_config =
-                        observer_configure_line(&load_gate_settings(&app), &label_patterns);
+                        observer_configure_line(
+                    &load_gate_settings(&app),
+                    &label_patterns,
+                    &app.config().identifier,
+                );
                     if current_config != last_config {
                         last_config = current_config.clone();
                         if let Some(stdin) = control_stdin.as_mut() {
@@ -1962,6 +2069,11 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                             }
                             observer::ObserverLine::Error { code, fatal } => {
                                 set_observer_status(&app, observer::status_for_error(&code, fatal));
+                            }
+                            observer::ObserverLine::WindowFrame { frame } => {
+                                // Transient UI state only: dock the subtitle bar
+                                // to the monitored window. Nothing is stored.
+                                dock_statusbar(&app, frame);
                             }
                             observer::ObserverLine::Heartbeat { .. }
                             | observer::ObserverLine::Hello { .. }
@@ -2381,12 +2493,12 @@ mod label_pattern_tests {
             allowlist_bundles: vec!["com.google.Chrome".into()],
             observe_all_apps: false,
         };
-        let line = observer_configure_line(&settings, &["INV-".into(), "invoice".into()]);
+        let line = observer_configure_line(&settings, &["INV-".into(), "invoice".into()], "com.maman.desktop");
         let json: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(json["type"], "configure");
         assert_eq!(json["label_patterns"], serde_json::json!(["INV-", "invoice"]));
         // No patterns → empty array, never absent (stable change fingerprint).
-        let bare = observer_configure_line(&settings, &[]);
+        let bare = observer_configure_line(&settings, &[], "com.maman.desktop");
         let json: serde_json::Value = serde_json::from_str(&bare).unwrap();
         assert_eq!(json["label_patterns"], serde_json::json!([]));
     }
@@ -2399,7 +2511,7 @@ mod label_pattern_tests {
         let patterns = crate::domain::label_patterns(&packs);
         assert!(patterns.iter().any(|p| p == "invoice"));
         let settings = GateSettings::default();
-        let line = observer_configure_line(&settings, &patterns);
+        let line = observer_configure_line(&settings, &patterns, "com.maman.desktop");
         assert!(line.contains("label_patterns"));
         assert!(line.contains("invoice"));
     }
@@ -2468,5 +2580,157 @@ mod statusbar_placement_tests {
         assert!(x < 0, "bar must stay on the left-hand display");
         assert_eq!(x, -1920 + (1920 - WINDOW.0) / 2);
         assert_eq!(y, 1080 - WINDOW.1 - STATUSBAR_GAP);
+    }
+}
+
+#[cfg(test)]
+mod statusbar_docking_tests {
+    //! Docking the subtitle bar to the window being monitored. The clamp is the
+    //! part that matters: a window can be dragged half off-screen or be shorter
+    //! than the bar, and the bar must stay visible rather than follow it away.
+    use super::{statusbar_origin_in_window, DOCK_INSET};
+
+    /// Logical points: 1470x956 usable, menu bar 25pt, Dock ~70pt.
+    const WORK: (f64, f64, f64, f64) = (0.0, 25.0, 1470.0, 861.0);
+    const BAR: (f64, f64) = (480.0, 40.0);
+
+    #[test]
+    fn centers_on_the_monitored_window_just_inside_its_bottom_edge() {
+        let window = (200.0, 100.0, 900.0, 600.0);
+        let (x, y) = statusbar_origin_in_window(window, BAR, WORK);
+        assert_eq!(x, 200.0 + (900.0 - 480.0) / 2.0, "centered horizontally");
+        assert_eq!(y, 100.0 + 600.0 - 40.0 - DOCK_INSET, "just inside the bottom");
+        // Inside the window, not below it.
+        assert!(y + BAR.1 <= 100.0 + 600.0);
+    }
+
+    #[test]
+    fn follows_the_window_when_it_moves() {
+        let (x1, y1) = statusbar_origin_in_window((100.0, 100.0, 800.0, 500.0), BAR, WORK);
+        let (x2, y2) = statusbar_origin_in_window((300.0, 200.0, 800.0, 500.0), BAR, WORK);
+        assert_eq!(x2 - x1, 200.0);
+        assert_eq!(y2 - y1, 100.0);
+    }
+
+    #[test]
+    fn left_aligns_when_the_window_is_narrower_than_the_bar() {
+        let (x, _) = statusbar_origin_in_window((300.0, 100.0, 320.0, 400.0), BAR, WORK);
+        assert_eq!(x, 300.0, "no negative centering offset");
+    }
+
+    #[test]
+    fn clamps_a_window_dragged_off_the_right_edge() {
+        // Window mostly off-screen to the right.
+        let (x, _) = statusbar_origin_in_window((1400.0, 100.0, 900.0, 500.0), BAR, WORK);
+        assert!(x + BAR.0 <= WORK.0 + WORK.2, "bar must stay on screen");
+        assert_eq!(x, WORK.2 - BAR.0);
+    }
+
+    #[test]
+    fn clamps_a_window_dragged_off_the_left_edge() {
+        let (x, _) = statusbar_origin_in_window((-600.0, 100.0, 900.0, 500.0), BAR, WORK);
+        assert!(x >= WORK.0, "bar must not sit off the left edge");
+        assert_eq!(x, 0.0);
+    }
+
+    #[test]
+    fn clamps_a_window_whose_bottom_is_under_the_dock() {
+        // A window extending past the bottom of the usable area.
+        let (_, y) = statusbar_origin_in_window((200.0, 500.0, 900.0, 600.0), BAR, WORK);
+        assert!(
+            y + BAR.1 <= WORK.1 + WORK.3,
+            "bar must not be pushed behind the Dock"
+        );
+        assert_eq!(y, WORK.1 + WORK.3 - BAR.1);
+    }
+
+    #[test]
+    fn clamps_above_the_menu_bar() {
+        // A window positioned above the work area origin (menu bar region).
+        let (_, y) = statusbar_origin_in_window((200.0, -200.0, 900.0, 100.0), BAR, WORK);
+        assert!(y >= WORK.1, "bar must not overlap the menu bar");
+        assert_eq!(y, WORK.1);
+    }
+
+    #[test]
+    fn never_produces_an_inverted_range_on_an_absurd_work_area() {
+        // Work area smaller than the bar: clamping must still yield the origin,
+        // not a position derived from a negative max.
+        let tiny = (0.0, 0.0, 100.0, 20.0);
+        let (x, y) = statusbar_origin_in_window((200.0, 200.0, 900.0, 500.0), BAR, tiny);
+        assert_eq!((x, y), (0.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod self_observation_tests {
+    //! Maman must never observe its own windows.
+    //!
+    //! Found on-device: with `observe_all_apps` the observer watched Maman's own
+    //! panel, pet, and status bar. Two consequences, one silent and one loud —
+    //! the event store filled with Maman's own UI as if it were the user's work,
+    //! and once the subtitle bar docked to the monitored window, moving the bar
+    //! emitted a window-moved notification that moved it again, walking it up the
+    //! screen 6pt per iteration (138 iterations in one recorded run).
+    use super::{observer_configure_line, GateSettings};
+
+    fn settings(observe_all: bool, private_apps: Vec<String>) -> GateSettings {
+        GateSettings {
+            observe_all_apps: observe_all,
+            allowlist_bundles: vec!["com.google.Chrome".into()],
+            allowlist_domains: vec![],
+            private_apps,
+            ..Default::default()
+        }
+    }
+
+    fn private_list(line: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        v["private_apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn own_bundle_is_always_excluded_even_when_observing_every_app() {
+        let line = observer_configure_line(&settings(true, vec![]), &[], "com.maman.desktop");
+        assert!(
+            private_list(&line).contains(&"com.maman.desktop".to_string()),
+            "Maman must be in private_apps: {line}"
+        );
+        // The wildcard is still sent — self-exclusion must not narrow observation.
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["allowlist_bundles"][0], "*");
+    }
+
+    #[test]
+    fn own_bundle_is_excluded_with_an_explicit_allowlist_too() {
+        let line = observer_configure_line(&settings(false, vec![]), &[], "com.maman.desktop");
+        assert!(private_list(&line).contains(&"com.maman.desktop".to_string()));
+    }
+
+    #[test]
+    fn user_private_apps_are_preserved_and_not_duplicated() {
+        let line = observer_configure_line(
+            &settings(true, vec!["com.apple.mail".into(), "com.maman.desktop".into()]),
+            &[],
+            "com.maman.desktop",
+        );
+        let list = private_list(&line);
+        assert!(list.contains(&"com.apple.mail".to_string()), "user entry kept");
+        assert_eq!(
+            list.iter().filter(|a| *a == "com.maman.desktop").count(),
+            1,
+            "no duplicate self entry: {list:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_identifier_adds_nothing_rather_than_a_blank_entry() {
+        let line = observer_configure_line(&settings(true, vec![]), &[], "");
+        assert!(private_list(&line).is_empty(), "blank id must not be added");
     }
 }

@@ -8,6 +8,27 @@ public enum ObserverMessage: Encodable {
     case boundary(reason: BoundaryReason, occurredAt: String)
     case heartbeat(occurredAt: String, eventsEmitted: Int)
     case error(code: String, message: String, fatal: Bool)
+    /// Geometry of the window currently being monitored, so the subtitle bar can
+    /// dock to it. TRANSIENT UI STATE: the Rust core never persists this and no
+    /// sync projection reads it. Carries no app identity and no content — a
+    /// rectangle only. `frame: nil` means "nothing is being monitored right now",
+    /// which detaches the bar rather than leaving it stuck to a stale position.
+    case windowFrame(frame: WindowFrame?, occurredAt: String)
+
+    /// Logical points, top-left origin — the same convention as AX and as Tauri's
+    /// logical coordinates, so no conversion happens anywhere in between.
+    public struct WindowFrame: Encodable, Equatable {
+        public let x: Double
+        public let y: Double
+        public let width: Double
+        public let height: Double
+        public init(x: Double, y: Double, width: Double, height: Double) {
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+        }
+    }
 
     public enum BoundaryReason: String, Encodable {
         case hardDenied = "hard_denied"
@@ -18,7 +39,8 @@ public enum ObserverMessage: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case type, observerVersion = "observer_version", capabilities, pid, event, reason,
-            occurredAt = "occurred_at", eventsEmitted = "events_emitted", code, message, fatal
+            occurredAt = "occurred_at", eventsEmitted = "events_emitted", code, message, fatal,
+            frame
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -45,6 +67,12 @@ public enum ObserverMessage: Encodable {
             try c.encode(code, forKey: .code)
             try c.encode(message, forKey: .message)
             try c.encode(fatal, forKey: .fatal)
+        case let .windowFrame(frame, occurredAt):
+            try c.encode("window_frame", forKey: .type)
+            try c.encode(occurredAt, forKey: .occurredAt)
+            // Explicit null rather than an omitted key: "monitoring stopped" is a
+            // real state the core must act on, not an absence to be guessed at.
+            try c.encode(frame, forKey: .frame)
         }
     }
 

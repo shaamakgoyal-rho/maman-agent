@@ -46,6 +46,17 @@ pub enum ObserverStatus {
     Failed,
 }
 
+/// Geometry of a monitored window, in logical points with a top-left origin —
+/// the convention AX reports and the one Tauri's logical coordinates use, so
+/// nothing converts between them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// One parsed line from the observer's stdout (the JSONL protocol).
 #[derive(Debug, PartialEq)]
 pub enum ObserverLine {
@@ -56,6 +67,10 @@ pub enum ObserverLine {
     Boundary { reason: String },
     Heartbeat { events_emitted: i64 },
     Error { code: String, fatal: bool },
+    /// Geometry of the window being monitored, for docking the subtitle bar.
+    /// `None` means nothing is monitored right now — the bar must detach rather
+    /// than stay pinned to a stale rectangle. Transient: never persisted.
+    WindowFrame { frame: Option<WindowFrame> },
     /// Malformed or an unrecognized message type — dropped, never crashes.
     Ignored,
 }
@@ -88,6 +103,27 @@ pub fn parse_observer_line(line: &str) -> ObserverLine {
         Some("heartbeat") => ObserverLine::Heartbeat {
             events_emitted: v.get("events_emitted").and_then(|n| n.as_i64()).unwrap_or(0),
         },
+        Some("window_frame") => {
+            // A frame must be complete and sane to be usable; anything else is
+            // treated as "no frame" rather than half-trusted.
+            let frame = v.get("frame").and_then(|f| {
+                let num = |k: &str| f.get(k).and_then(|n| n.as_f64());
+                match (num("x"), num("y"), num("width"), num("height")) {
+                    (Some(x), Some(y), Some(width), Some(height))
+                        if width > 1.0
+                            && height > 1.0
+                            && x.is_finite()
+                            && y.is_finite()
+                            && width.is_finite()
+                            && height.is_finite() =>
+                    {
+                        Some(WindowFrame { x, y, width, height })
+                    }
+                    _ => None,
+                }
+            });
+            ObserverLine::WindowFrame { frame }
+        }
         Some("error") => ObserverLine::Error {
             code: v.get("code").and_then(|s| s.as_str()).unwrap_or("").to_string(),
             fatal: v.get("fatal").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -221,6 +257,33 @@ mod tests {
             parse_observer_line(r#"{"type":"heartbeat","occurred_at":"x","events_emitted":7}"#),
             ObserverLine::Heartbeat { events_emitted: 7 }
         );
+        // Window geometry: transient UI state, parsed but never stored.
+        assert_eq!(
+            parse_observer_line(
+                r#"{"type":"window_frame","occurred_at":"x","frame":{"x":100,"y":80,"width":900,"height":600}}"#
+            ),
+            ObserverLine::WindowFrame {
+                frame: Some(WindowFrame { x: 100.0, y: 80.0, width: 900.0, height: 600.0 })
+            }
+        );
+        // An explicit null frame means "nothing is monitored" — the bar detaches.
+        assert_eq!(
+            parse_observer_line(r#"{"type":"window_frame","occurred_at":"x","frame":null}"#),
+            ObserverLine::WindowFrame { frame: None }
+        );
+        // Half-trusting a malformed rectangle would park the bar somewhere
+        // arbitrary, so an incomplete or absurd frame degrades to None.
+        for bad in [
+            r#"{"type":"window_frame","occurred_at":"x","frame":{"x":1,"y":2,"width":900}}"#,
+            r#"{"type":"window_frame","occurred_at":"x","frame":{"x":1,"y":2,"width":0,"height":600}}"#,
+            r#"{"type":"window_frame","occurred_at":"x","frame":{"x":"left","y":2,"width":9,"height":6}}"#,
+        ] {
+            assert_eq!(
+                parse_observer_line(bad),
+                ObserverLine::WindowFrame { frame: None },
+                "should not trust: {bad}"
+            );
+        }
         assert_eq!(
             parse_observer_line(r#"{"type":"error","code":"accessibility_permission_required","message":"m","fatal":false}"#),
             ObserverLine::Error {

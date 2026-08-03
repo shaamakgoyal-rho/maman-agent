@@ -50,12 +50,43 @@ export const observerErrorSchema = z
   })
   .strict();
 
+/**
+ * Geometry of the window currently being monitored, so the subtitle bar can dock
+ * to it (logical points, top-left origin — AX's convention, which is also
+ * Tauri's, so nothing converts in between).
+ *
+ * TRANSIENT UI STATE. The core repositions a window and drops it: this is never
+ * written to the store, never projected into features, and never synced. It
+ * carries no app identity and no content — a rectangle only — and the observer
+ * emits it solely for contexts it is genuinely observing, so a hard-denied or
+ * private window's geometry never leaves the observer at all.
+ *
+ * `frame: null` is a real state, not an absence: nothing is being monitored, so
+ * the bar must detach rather than stay stuck to a stale rectangle.
+ */
+export const observerWindowFrameSchema = z
+  .object({
+    type: z.literal("window_frame"),
+    occurred_at: utcTimestamp,
+    frame: z
+      .object({
+        x: z.number(),
+        y: z.number(),
+        width: z.number().positive(),
+        height: z.number().positive(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
 export const observerMessageSchema = z.discriminatedUnion("type", [
   observerHelloSchema,
   observerEventSchema,
   observerBoundarySchema,
   observerHeartbeatSchema,
   observerErrorSchema,
+  observerWindowFrameSchema,
 ]);
 
 export type ObserverMessage = z.infer<typeof observerMessageSchema>;
