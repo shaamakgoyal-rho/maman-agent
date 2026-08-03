@@ -28,6 +28,27 @@ export const localSettingsSchema = z
     suggestion_budget_daily: z.number().int().min(0).max(10).default(2),
     quiet_hours_start: z.string().default("18:00"),
     quiet_hours_end: z.string().default("08:30"),
+    // Fiscal calendar (Layer 5). A pack says `calendar: fiscal`; the company
+    // says WHEN its periods land, so this is a setting, never pack content.
+    fiscal_year_start_month: z.number().int().min(1).max(12).default(1),
+    /** Day of month the monthly close opens (clamped to the month's length). */
+    fiscal_close_start_day: z.number().int().min(1).max(31).default(1),
+    /**
+     * User-editable date ranges (audit weeks, board prep) during which proactive
+     * cards QUEUE silently instead of interrupting. Nothing is dropped: each
+     * card reports the date it will be released.
+     */
+    quiet_periods: z
+      .array(
+        z
+          .object({
+            start: z.string(),
+            end: z.string(),
+            label: z.string().max(60).optional(),
+          })
+          .strict(),
+      )
+      .default([]),
     reduced_motion: z.enum(["system", "on", "off"]).default("system"),
     /** The always-on-top subtitle bar showing what Maman is doing right now. */
     statusbar_enabled: z.boolean().default(true),

@@ -1022,6 +1022,67 @@ async fn suggestion_history_log<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// Appends a Layer 5 surfacing outcome (decision + context features) to the
+/// local `suggestion_outcomes` ledger. The store validates every field against
+/// a closed vocabulary, so a malformed call is rejected, not stored.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn suggestion_outcome_log<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    pattern_id: String,
+    workflow_id: Option<String>,
+    pack_domain: Option<String>,
+    cadence: Option<String>,
+    surface: Option<String>,
+    outcome: String,
+    reason: Option<String>,
+    local_dow: i64,
+    local_hour: i64,
+    cadence_phase: Option<String>,
+    seconds_since_trigger: Option<i64>,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .suggestion_outcome_log(
+            &pattern_id,
+            workflow_id.as_deref(),
+            pack_domain.as_deref(),
+            cadence.as_deref(),
+            surface.as_deref(),
+            &outcome,
+            reason.as_deref(),
+            local_dow,
+            local_hour,
+            cadence_phase.as_deref(),
+            seconds_since_trigger,
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// How many Layer 5 outcome rows exist locally — shown in Privacy so the size
+/// of the on-device training set is visible rather than implied.
+#[tauri::command]
+async fn suggestion_outcome_count<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+) -> Result<i64, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    guard
+        .as_ref()
+        .expect("initialized")
+        .suggestion_outcome_count()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---------- trust surface (panel-only) ----------
 
 /// Non-mutating peek at the next queued sync payloads, decrypted, so the user
@@ -1891,6 +1952,8 @@ pub fn run() {
             pattern_verification_save,
             verification_report,
             suggestion_history_log,
+            suggestion_outcome_log,
+            suggestion_outcome_count,
             sync_preview,
             hard_denied_list,
             observation_stats,

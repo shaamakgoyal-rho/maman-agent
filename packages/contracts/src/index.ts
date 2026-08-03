@@ -10,3 +10,4 @@ export * from "./audit.js";
 export * from "./observer-protocol.js";
 export * from "./receipt.js";
 export * from "./sync.js";
+export * from "./suggestion-outcome.js";

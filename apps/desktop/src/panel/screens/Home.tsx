@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   demoHistoryFixture,
+  finopsMonthEndRepFixture,
   finopsThreeWayRepFixture,
   liveWorkflowRepFixture,
   reconciliationFixture,
@@ -21,6 +22,8 @@ let liveSimBaseAtMs: number | null = null;
 let liveSimRepIndex = 0;
 let domainSimBaseAtMs: number | null = null;
 let domainSimRepIndex = 0;
+let monthEndSimBaseAtMs: number | null = null;
+let monthEndSimRepIndex = 0;
 
 export function Home({ petState }: { petState: PetStateName }) {
   const { settings, update } = useSettings();
@@ -29,6 +32,7 @@ export function Home({ petState }: { petState: PetStateName }) {
   const [demoBusy, setDemoBusy] = useState(false);
   const [liveRepCount, setLiveRepCount] = useState(0);
   const [finopsRepCount, setFinopsRepCount] = useState(0);
+  const [monthEndRepCount, setMonthEndRepCount] = useState(0);
   const [capabilities, setCapabilities] = useState<CapabilityLine[]>([]);
 
   useEffect(() => {
@@ -97,6 +101,33 @@ export function Home({ petState }: { petState: PetStateName }) {
       );
       setDemoResult(result);
       setFinopsRepCount(rep + 1);
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
+      await useRecommendations.getState().refresh();
+      await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
+  /**
+   * Simulated month-end accrual rep: one repetition of the finops
+   * `month_end_accruals` PACK workflow. This is the FISCAL_MONTHLY cadence, so
+   * two clicks give the Layer 5 scheduler something real to time a pre-close
+   * card against (a continuous workflow has no close to count down to).
+   */
+  const simulateMonthEndRep = async () => {
+    setDemoBusy(true);
+    try {
+      monthEndSimBaseAtMs ??= Date.now() - 90 * 60_000;
+      const rep = monthEndSimRepIndex++;
+      await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STARTED" });
+      const result = await ingestEvents(
+        finopsMonthEndRepFixture({ rep_index: rep, base_at_ms: monthEndSimBaseAtMs }),
+        { observationPaused: settings.observation_paused },
+      );
+      setDemoResult(result);
+      setMonthEndRepCount(rep + 1);
       await emitAppEvent({ type: "simulate_pet_event", event: "OBSERVING_STOPPED" });
       await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
       await useRecommendations.getState().refresh();
@@ -217,6 +248,13 @@ export function Home({ petState }: { petState: PetStateName }) {
           </Button>
           <Button variant="secondary" onClick={() => void simulateFinopsRep()} disabled={demoBusy}>
             Simulate FinOps rep{finopsRepCount > 0 ? ` (${finopsRepCount})` : ""}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => void simulateMonthEndRep()}
+            disabled={demoBusy}
+          >
+            Simulate month-end rep{monthEndRepCount > 0 ? ` (${monthEndRepCount})` : ""}
           </Button>
           {demoResult && (
             <span className="text-xs text-muted tabular-nums">

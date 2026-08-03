@@ -15,6 +15,13 @@ import { z } from "zod";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 import { getMemoryRawEvents } from "./events.js";
 import { canSurfaceSuggestion, snoozeUntil, type SnoozeOption } from "./suggestion-policy.js";
+import {
+  familySuppressed,
+  outcomeFor,
+  proactiveCards,
+  type ProactiveInput,
+  type ProactiveItem,
+} from "./proactive.js";
 import { useSettings } from "../state/settings.js";
 
 /**
@@ -104,6 +111,8 @@ type RecommendationsStore = {
   items: RecommendationWithState[];
   /** In-progress patterns not yet surfaceable, ranked closest-first. */
   forming: FormingItem[];
+  /** Layer 5: pack workflows the calendar says are due (or queued). */
+  proactive: ProactiveItem[];
   hydrated: boolean;
   refresh: () => Promise<void>;
   act: (
@@ -123,10 +132,25 @@ type RecommendationsStore = {
 
 const DEFAULT_STATE: SuggestionState = suggestionStateSchema.parse({});
 
+/**
+ * The closed reason vocabulary the outcome ledger accepts. A dismissal reason
+ * that is not on this list becomes "other" rather than being passed through —
+ * the ledger must never carry free text.
+ */
+const LEDGER_REASONS: ReadonlySet<string> = new Set([
+  "not_useful",
+  "wrong_pattern",
+  "too_risky",
+  "not_now",
+  "never_suggest",
+  "other",
+]);
+
 export const useRecommendations = create<RecommendationsStore>((set, get) => ({
   state: DEFAULT_STATE,
   items: [],
   forming: [],
+  proactive: [],
   hydrated: false,
 
   refresh: async () => {
@@ -324,8 +348,61 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
     }
     forming.sort((a, b) => b.progress.ratio - a.progress.ratio);
 
+    // ---- Layer 5: pack-tuned proactivity ------------------------------------
+    // Reduce every tracked pattern to what the scheduler needs. Replay evidence
+    // is forwarded ONLY once it clears the verification floor: below that the
+    // numbers are self-referential, and a pack copy line that claims "matched
+    // 2/2" would be noise dressed as proof.
+    const weekdaysOf = (candidate: PatternCandidate): string[] =>
+      candidate.episode_ids
+        .map((id) => episodeById.get(id))
+        .filter((e): e is SegmentedEpisode => Boolean(e))
+        .map((e) => e.started_at);
+
+    const proactiveInputs: ProactiveInput[] = [...items, ...forming].map((entry) => {
+      const verification = entry.verification;
+      const verified =
+        verification && verification.runs_tested >= replayThresholds.min_runs
+          ? { runs_matched: verification.runs_matched, runs_tested: verification.runs_tested }
+          : null;
+      return {
+        pattern_id: entry.candidate.pattern_id,
+        signature: entry.signature,
+        template_id: entry.candidate.template_id ?? null,
+        verified,
+        episode_weekdays: weekdaysOf(entry.candidate),
+        entry:
+          "entry" in entry
+            ? entry.entry
+            : { status: "new", dismissal_reason: null, dismissed_at: null, snoozed_until: null },
+      };
+    });
+
+    // Pack semantics for "never suggest": suppress the whole workflow FAMILY,
+    // not just the pattern instance the user happened to be looking at.
+    const hiddenByFamily = (candidate: PatternCandidate): boolean =>
+      familySuppressed({
+        now,
+        template_id: candidate.template_id ?? null,
+        patterns: proactiveInputs,
+      });
+    const visibleItems = items.filter(
+      (i) => i.entry.status === "dismissed" || !hiddenByFamily(i.candidate),
+    );
+    const visibleForming = forming.filter((f) => !hiddenByFamily(f.candidate));
+
+    const { items: proactive } = proactiveCards({
+      now,
+      calendar: {
+        fiscal_year_start_month: settings.fiscal_year_start_month,
+        close_start_day: settings.fiscal_close_start_day,
+      },
+      quiet_periods: settings.quiet_periods,
+      patterns: proactiveInputs,
+    });
+
     // Status bar: the current top of the funnel, named after the workflow.
-    const freshItem = items.find((i) => i.entry.status === "new");
+    const freshItem = visibleItems.find((i) => i.entry.status === "new");
     if (freshItem) {
       await emitAppEvent({
         type: "status_beat",
@@ -334,8 +411,15 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           title: freshItem.entry.custom_title ?? freshItem.recommendation.title,
         },
       });
-    } else if (forming.length > 0) {
-      const top = forming[0]!;
+    } else if (proactive.length > 0) {
+      // A pack workflow the calendar says is due — the pet has something to
+      // offer even though no new pattern crossed the bar today.
+      await emitAppEvent({
+        type: "status_beat",
+        beat: { kind: "suggested", title: proactive[0]!.card.workflow_name },
+      });
+    } else if (visibleForming.length > 0) {
+      const top = visibleForming[0]!;
       await emitAppEvent({
         type: "status_beat",
         beat: {
@@ -350,7 +434,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
 
     // Keep dismissed/accepted history entries visible in their filters even
     // when the engine no longer produces them (data deleted, cooldown, …).
-    set({ state, items, forming, hydrated: true });
+    set({ state, items: visibleItems, forming: visibleForming, proactive, hydrated: true });
   },
 
   act: async (signature, action) => {
@@ -442,6 +526,45 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           patternId,
           action: action.type,
           reason,
+        }).catch(() => {});
+
+        // Layer 5: the same decision, plus the context it was made in, into the
+        // local outcome ledger. Closed vocabularies only — the Rust store
+        // rejects anything that could carry content.
+        const card = get().proactive.find((p) => p.signature === signature)?.card;
+        const outcome = outcomeFor({
+          pattern_id: patternId,
+          outcome:
+            action.type === "never_suggest"
+              ? "never_suggest"
+              : action.type === "wrong"
+                ? "wrong"
+                : action.type === "snoozed"
+                  ? "snoozed"
+                  : action.type === "accepted"
+                    ? "accepted"
+                    : "dismissed",
+          reason: LEDGER_REASONS.has(reason ?? "")
+            ? reason
+            : action.type === "dismissed"
+              ? "other"
+              : null,
+          now,
+          card,
+          triggered_at: card ? `${card.due_date}T00:00:00.000Z` : undefined,
+        });
+        void invokeCommand("suggestion_outcome_log", {
+          patternId: outcome.pattern_id,
+          workflowId: outcome.workflow_id,
+          packDomain: outcome.pack_domain,
+          cadence: outcome.cadence,
+          surface: outcome.surface,
+          outcome: outcome.outcome,
+          reason: outcome.reason,
+          localDow: outcome.local_dow,
+          localHour: outcome.local_hour,
+          cadencePhase: outcome.cadence_phase,
+          secondsSinceTrigger: outcome.seconds_since_trigger,
         }).catch(() => {});
       }
     }
