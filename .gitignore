@@ -45,3 +45,11 @@ DerivedData/
 pnpm-debug.log*
 .gstack/
 apps/desktop/src-tauri/binaries/
+
+# Linked git worktrees (created under .claude/worktrees by Claude Code) are
+# nested inside this checkout on disk but are separate git checkouts of their
+# own branch. Anchored .prettierignore/.eslintignore patterns above only match
+# at THIS root, so without this entry, tools that walk the filesystem (not git
+# itself) reach into a linked worktree and reformat/relint its generated
+# artifacts as a side effect of running here.
+.claude/worktrees/
