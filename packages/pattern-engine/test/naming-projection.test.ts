@@ -55,7 +55,8 @@ describe("deterministic naming branches", () => {
       ]),
       [episodeWith(["crm"])],
     );
-    expect(naming.title).toBe("Update Salesforce opportunity records from your workflow");
+    // Names the app once, and drops the "from your workflow" filler.
+    expect(naming.title).toBe("Update opportunity records in Salesforce");
   });
 
   it("spreadsheet report recipe", () => {
@@ -66,10 +67,16 @@ describe("deterministic naming branches", () => {
       ]),
       [episodeWith(["spreadsheet"])],
     );
-    expect(naming.title).toBe("Build your recurring pipeline report");
+    expect(naming.title).toBe("Export the pipeline report from your spreadsheet");
   });
 
-  it("generic fallback across arbitrary categories", () => {
+  /**
+   * These two used to assert the generic fallback ("Automate your <object>
+   * workflow across <apps>"), which was the user-visible complaint: it names
+   * nothing, and its object is whatever mostCommonObject defaulted to. They now
+   * pin the replacement — a title built from the steps that were observed.
+   */
+  it("describes a cross-app read as the shared object in both apps", () => {
     const naming = deterministicName(
       candidate([
         "chrome:email:navigation:-:inbox:thread",
@@ -77,15 +84,20 @@ describe("deterministic naming branches", () => {
       ]),
       [episodeWith(["email", "calendar"])],
     );
-    expect(naming.title).toMatch(/^Automate your thread workflow across /);
+    // `thread` is the object BOTH steps carry, so it is the honest common noun;
+    // naming both apps avoids attributing the calendar's "event" to Gmail.
+    expect(naming.title).toBe("Open threads in Gmail and Calendar");
+    expect(naming.title).not.toMatch(/^Automate your/);
   });
 
-  it("falls back to 'record' when no object types exist", () => {
+  it("admits it when no object was observed instead of inventing 'record'", () => {
     const naming = deterministicName(
       candidate(["chrome:email:navigation:-:-:-", "chrome:email:record_opened:-:-:-"]),
       [episodeWith(["email"])],
     );
-    expect(naming.title).toContain("record");
+    expect(naming.title).toBe("Repeated 2-step workflow in Gmail");
+    // The old title said "record" purely because that was the default.
+    expect(naming.title).not.toContain("record");
   });
 });
 

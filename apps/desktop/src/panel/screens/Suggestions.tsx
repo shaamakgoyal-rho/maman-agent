@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { describeProposedHelper } from "@maman/agent-runtime";
+import { stepPhrase } from "@maman/pattern-engine";
 import { emitAppEvent } from "../../lib/bridge.js";
 import { useAgents } from "../../lib/agents.js";
 import {
@@ -218,12 +219,17 @@ function FormingCard({
   onToggleExpand: () => void;
 }) {
   const { progress } = item;
+  // Same "what this actually is" line as a suggestion card: a workflow being
+  // watched is just as opaque as one being offered if all you see is a name.
+  const steps = stepPhrase(item.candidate.canonical_sequence);
   return (
     <Card>
       <div className="flex items-start justify-between gap-2">
         <SectionTitle>{item.title}</SectionTitle>
         <StatusPill tone="muted">Watching</StatusPill>
       </div>
+
+      {steps && <p className="mt-1 text-sm text-ink">You {steps}.</p>}
 
       {/* Progress toward becoming a suggestion. */}
       <div className="mt-1.5">
@@ -312,6 +318,9 @@ function SuggestionCard({
     v.runs_tested > 0 &&
     v.runs_matched / v.runs_tested >= settings.verify_min_match_pct;
   const title = item.entry.custom_title ?? rec.title;
+  // The observed step chain, in prose. Null when the tokens carry nothing worth
+  // stating — better to omit the line than to pad the card.
+  const steps = stepPhrase(item.candidate.canonical_sequence);
   const divergences = v.results.filter((r) => r.verdict !== "match");
 
   return (
@@ -358,6 +367,12 @@ function SuggestionCard({
           <StatusPill tone="success">verified</StatusPill>
         )}
       </div>
+
+      {/* WHAT THE WORKFLOW ACTUALLY IS. Without this the card only said how often
+          it happened and how well a helper replayed — true, but it never told you
+          which of your habits it meant. Built from the same canonical tokens the
+          evidence list uses, so the two can never disagree. */}
+      {steps && <p className="mt-1 text-sm text-ink">You {steps}.</p>}
 
       {rec.template ? (
         <>

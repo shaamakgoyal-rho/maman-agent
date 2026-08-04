@@ -44,7 +44,7 @@ export {
   type TunableEligibility,
   type WatchingPattern,
 } from "./engine.js";
-export { deterministicName, type NamingResult } from "./naming.js";
+export { deterministicName, describeObserved, stepPhrase, type NamingResult } from "./naming.js";
 export { toPatternFeature, categorizeApp } from "./projection.js";
 export {
   replayCandidate,

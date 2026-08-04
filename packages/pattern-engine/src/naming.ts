@@ -61,23 +61,30 @@ export function deterministicName(
   ) {
     // Live observation ends CRM edits with value_committed (field commits);
     // curated fixtures end with record_updated. Same business action.
-    title = `Update Salesforce ${objectType} records from your workflow`;
+    title = `Update ${objectType} records in Salesforce`;
     intent = `update_${objectType}_records`;
   } else if (categories.has("spreadsheet") && outcome === "table_exported") {
-    title = `Build your recurring ${objectType} report`;
+    title = `Export the ${objectType} report from your spreadsheet`;
     intent = `generate_${objectType}_report`;
   } else {
-    const appList = [...categories].map((c) => APP_LABELS[c] ?? c).slice(0, 2);
-    title = `Automate your ${objectType} workflow across ${appList.join(" and ")}`;
+    // Describe what was actually OBSERVED rather than labelling it "automate
+    // your <thing> workflow", which says nothing and implies an object we may
+    // never have seen (objectType silently falls back to "record").
+    title = describeObserved(candidate.canonical_sequence, candidate.domain_actions ?? []);
     intent = `automate_${objectType}_workflow`;
   }
 
   const medianMinutes = Math.round(candidate.median_duration_ms / 60_000);
   const dayWord = candidate.distinct_day_count === 1 ? "day" : "days";
+  // Lead with the STEPS. "I noticed a similar workflow N times" describes the
+  // detector, not the work — the reader cannot tell which of their habits this
+  // is without being told what it consists of.
+  const steps = stepPhrase(candidate.canonical_sequence);
   const summary =
-    `I noticed you completed a similar workflow ${candidate.occurrence_count} times across ` +
-    `${candidate.distinct_day_count} ${dayWord}. The median run took ${medianMinutes} minutes. ` +
-    `I can draft a helper and show you what it would do before anything changes.`;
+    (steps ? `You ${steps}. ` : "") +
+    `I saw this ${candidate.occurrence_count} times across ${candidate.distinct_day_count} ` +
+    `${dayWord}; the median run took ${medianMinutes} minutes. ` +
+    `I can draft a helper and show you exactly what it would do before anything changes.`;
 
   // Redacted evidence steps (≤5 by default; the UI can expand).
   const seen = new Set<string>();
@@ -123,4 +130,209 @@ function mostCommonObject(sequence: string[]): string | null {
     }
   }
   return best;
+}
+
+/* ------------------------------------------------------- observed description */
+
+type ParsedStep = {
+  app: string;
+  event: string;
+  semantic: string;
+  object: string;
+};
+
+/** Events that only READ. A workflow of these is a review, not a change. */
+const READ_EVENTS = new Set([
+  "navigation",
+  "record_opened",
+  "table_read",
+  "element_focused",
+  "window_focused",
+  "app_activated",
+  "element_activated",
+  "copy_semantic",
+]);
+
+/** Transitive verbs, so a real object can follow them in a title. */
+/**
+ * Prose for a step whose object we never saw. Each phrase states exactly what the
+ * event type means and nothing more — the implicit noun ("a table", "fields")
+ * comes from the event's own definition, not from a guess about the user's data.
+ */
+const STEP_PHRASES: Record<string, string> = {
+  navigation: "open a page",
+  record_opened: "open a record",
+  table_read: "read a table",
+  table_exported: "export a report",
+  value_committed: "edit fields",
+  record_updated: "update a record",
+  copy_semantic: "copy data",
+  paste_semantic: "paste data",
+  element_activated: "run a search",
+  element_focused: "work in a field",
+  window_focused: "switch windows",
+  app_activated: "switch apps",
+};
+
+/** Transitive verbs, so a real object can follow them in a title. */
+const TITLE_VERBS: Record<string, string> = {
+  navigation: "Open",
+  record_opened: "Open",
+  table_read: "Read",
+  table_exported: "Export",
+  value_committed: "Update",
+  record_updated: "Update",
+  copy_semantic: "Copy",
+  paste_semantic: "Paste",
+  element_activated: "Search",
+  element_focused: "Review",
+  window_focused: "Review",
+  app_activated: "Switch to",
+};
+
+function parseStep(token: string): ParsedStep {
+  const parts = token.split(":");
+  return {
+    app: parts[1] ?? "other",
+    event: parts[2] ?? "",
+    semantic: parts[4] ?? "-",
+    object: parts[5] ?? "-",
+  };
+}
+
+/** "purchase_order" → "purchase orders". Plural because a pattern recurs. */
+function humanizePlural(raw: string): string {
+  const words = raw.replace(/_/g, " ").trim();
+  if (!words) return words;
+  if (/(s|x|z|ch|sh)$/.test(words)) return `${words}es`;
+  if (/[^aeiou]y$/.test(words)) return `${words.slice(0, -1)}ies`;
+  return `${words}s`;
+}
+
+function mostCommon(values: string[]): string | null {
+  const counts = new Map<string, number>();
+  for (const v of values) {
+    if (!v || v === "-") continue;
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  // Ascending key order breaks ties deterministically.
+  for (const key of [...counts.keys()].sort()) {
+    const n = counts.get(key)!;
+    if (n > bestCount) {
+      best = key;
+      bestCount = n;
+    }
+  }
+  return best;
+}
+
+/**
+ * A title describing the workflow that was actually observed.
+ *
+ * Built strictly from evidence, in descending order of specificity: a pack
+ * ACTION if the classifier recognised one, then the semantic type of the fields
+ * touched, then the object type. When none of that exists the title says so —
+ * "Repeated 4-step workflow in the browser" — because an honest vague title beats
+ * a confident meaningless one. Nothing here invents an app or an object.
+ */
+export function describeObserved(sequence: string[], domainActions: string[]): string {
+  const steps = sequence.map(parseStep);
+  if (steps.length === 0) return "Repeated workflow";
+
+  const appLabel = (app: string): string => APP_LABELS[app] ?? app;
+  const lastWrite = [...steps].reverse().find((s) => !READ_EVENTS.has(s.event));
+  const firstRead = steps.find((s) => READ_EVENTS.has(s.event));
+  const head = lastWrite ?? steps[0]!;
+  const apps = [...new Set(steps.map((s) => s.app))];
+  const readOnlyAcrossApps = !lastWrite && apps.length > 1;
+
+  // Subject selection avoids MISATTRIBUTION: taking the noun from one step and
+  // the app from another produced titles like "Open events in Gmail" for a
+  // workflow whose events lived in Calendar. For a read-only flow spanning apps
+  // the shared object type is the honest common noun; otherwise the noun must
+  // come from the step the title names.
+  const subjectRaw = readOnlyAcrossApps
+    ? (mostCommon(steps.map((s) => s.object)) ?? mostCommon(steps.map((s) => s.semantic)))
+    : (nonEmpty(head.semantic) ??
+      nonEmpty(head.object) ??
+      mostCommon(steps.map((s) => s.semantic)) ??
+      mostCommon(steps.map((s) => s.object)));
+  const subject = subjectRaw ? humanizePlural(subjectRaw) : null;
+
+  const target = appLabel(head.app);
+  const source = firstRead && firstRead.app !== head.app ? appLabel(firstRead.app) : null;
+
+  if (!subject) {
+    // No object anywhere: name the shape instead of pretending to know the noun.
+    const where = source ? `${source} and ${target}` : target;
+    return `Repeated ${steps.length}-step workflow in ${where}`;
+  }
+
+  // A pack action is the most specific verb available — the classifier named the
+  // business action, not just the UI event ("post journals", not "update fields").
+  const packVerb = domainActions.length > 0 ? domainActions[domainActions.length - 1] : undefined;
+  if (packVerb) {
+    const words = packVerb.split("_");
+    const action = capitalize(
+      [...words.slice(0, -1), humanizePlural(words[words.length - 1] ?? "")].join(" "),
+    );
+    // "Approve invoices for invoices" is nonsense: drop the subject when the
+    // action already names it.
+    const redundant = words.some((w) => subjectRaw?.includes(w));
+    const withSubject = redundant ? action : `${action} for ${subject}`;
+    return source ? `${withSubject} in ${target} from ${source}` : `${withSubject} in ${target}`;
+  }
+
+  const verb = TITLE_VERBS[head.event] ?? "Work through";
+  if (readOnlyAcrossApps) {
+    return `${verb} ${subject} in ${apps.slice(0, 2).map(appLabel).join(" and ")}`;
+  }
+  if (source) return `${verb} ${subject} in ${target} from ${source}`;
+  return `${verb} ${subject} in ${target}`;
+}
+
+/** A canonical-token field that carries real information ("-" means absent). */
+function nonEmpty(value: string): string | null {
+  return value && value !== "-" ? value : null;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * The observed steps as prose: "open records in Salesforce, read a table, then
+ * edit fields". Built from the same canonical tokens the card's evidence list
+ * shows, so the summary and the evidence can never disagree.
+ *
+ * The app is named only when it CHANGES between steps — repeating "in Salesforce"
+ * four times reads like filler and buries the one app switch that matters.
+ */
+export function stepPhrase(sequence: string[]): string | null {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  let lastApp: string | null = null;
+  for (const token of sequence) {
+    const step = parseStep(token);
+    const key = `${step.app}:${step.event}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // With a real noun, name it. Without one, use the phrase for the UI action
+    // itself — "read a table" is what table_read means, so it is still evidence,
+    // whereas a bare verb ("You open in your spreadsheet") is just broken English.
+    const noun = nonEmpty(step.semantic) ?? nonEmpty(step.object);
+    const verb = noun
+      ? `${(TITLE_VERBS[step.event] ?? step.event.replace(/_/g, " ")).toLowerCase()} ${humanizePlural(noun)}`
+      : (STEP_PHRASES[step.event] ?? step.event.replace(/_/g, " "));
+    const nounText = "";
+    const appText = step.app !== lastApp ? ` in ${APP_LABELS[step.app] ?? step.app}` : "";
+    lastApp = step.app;
+    parts.push(`${verb}${nounText}${appText}`);
+    if (parts.length === 4) break;
+  }
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0]!;
+  return `${parts.slice(0, -1).join(", ")}, then ${parts[parts.length - 1]}`;
 }

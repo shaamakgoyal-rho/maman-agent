@@ -42,7 +42,14 @@ test("live arc: preset → 4 relay-shaped reps → forming → verified card →
   await simulate.click();
   await page.getByRole("button", { name: "Suggestions" }).click();
   await expect(page.getByText(/Forming — what I'm watching/i)).toBeVisible();
-  await expect(page.getByText(/Update Salesforce account records/i).first()).toBeVisible();
+  // The card names the work and the app it happens in ("Update account records
+  // in Salesforce"), and states the observed steps underneath — a title like
+  // "Automate your record workflow" told the reader nothing.
+  await expect(page.getByText(/Update account records in Salesforce/i).first()).toBeVisible();
+  // The steps line, in prose. Asserted loosely on purpose: the exact verbs
+  // depend on which events the relay produced, and pinning them would make this
+  // test a copy snapshot rather than a check that the card explains itself.
+  await expect(page.getByText(/^You .+\.$/).first()).toBeVisible();
 
   // 3. Two more reps clear every bar + replay verification → the card.
   await page.getByRole("button", { name: "Home" }).click();
