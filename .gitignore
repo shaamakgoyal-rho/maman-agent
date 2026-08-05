@@ -53,3 +53,7 @@ apps/desktop/src-tauri/binaries/
 # itself) reach into a linked worktree and reformat/relint its generated
 # artifacts as a side effect of running here.
 .claude/worktrees/
+
+# Cross-compile output for the universal observer sidecar (scripts/build-release-dmg.sh).
+native/macos-observer/.build-x86/
+dist/
