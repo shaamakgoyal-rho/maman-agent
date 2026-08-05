@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "echo 'no dependencies: the download page is static HTML'",
+  "buildCommand": "echo 'no build step'",
+  "outputDirectory": "apps/site",
+  "cleanUrls": true
+}
