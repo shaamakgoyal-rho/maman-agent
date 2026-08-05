@@ -474,9 +474,17 @@ fn setup_statusbar<R: Runtime>(app: &AppHandle<R>) {
     // cursor events never receives the mouse, so it cannot be grabbed. The
     // setting picks which one the user wants; dragging is the default.
     let _ = bar.set_ignore_cursor_events(statusbar_click_through_setting(app));
+    // Assert always-on-top explicitly rather than trusting the window config:
+    // a health surface that ends up BEHIND an ordinary window reads as broken,
+    // and this is the second time a bar the code believed was visible was not.
+    let _ = bar.set_always_on_top(true);
     if let Some((x, y)) = saved_statusbar_position(app, &bar) {
-        // A position the user chose by hand wins over any automatic placement.
-        let _ = bar.set_position(PhysicalPosition::new(x, y));
+        // A position the user chose by hand wins over any automatic placement —
+        // but it is still CLAMPED onto the usable area. A drag can end at the
+        // screen edge, and a position saved on a display that has since changed
+        // resolution (or been unplugged) can point nowhere at all.
+        let (cx, cy) = clamp_statusbar_position(&bar, (x, y));
+        let _ = bar.set_position(PhysicalPosition::new(cx, cy));
     } else {
         position_statusbar(&bar);
     }
@@ -625,6 +633,45 @@ fn dock_statusbar<R: Runtime>(app: &AppHandle<R>, frame: Option<observer::Window
 
 /// Inset from the monitored window's bottom edge (logical points).
 const DOCK_INSET: f64 = 6.0;
+
+/// Pulls a hand-placed position back onto the usable area of its display.
+///
+/// Manual placement outranks automatic placement, but not the requirement to be
+/// ON SCREEN: a drag that ends at an edge, or a position saved when the display
+/// was larger, must not leave the bar somewhere the user cannot see or reach it.
+fn clamp_statusbar_position<R: Runtime>(
+    bar: &tauri::WebviewWindow<R>,
+    saved: (i32, i32),
+) -> (i32, i32) {
+    let (Ok(Some(monitor)), Ok(size)) = (bar.primary_monitor(), bar.outer_size()) else {
+        return saved;
+    };
+    let area = monitor.work_area();
+    clamp_into_area(
+        saved,
+        (size.width as i32, size.height as i32),
+        (
+            area.position.x,
+            area.position.y,
+            area.size.width as i32,
+            area.size.height as i32,
+        ),
+    )
+}
+
+/// Pure clamp: keeps the whole window inside the area when it fits, and pins it
+/// to the origin when the area is smaller than the window (never an inverted
+/// range).
+fn clamp_into_area(
+    pos: (i32, i32),
+    window: (i32, i32),
+    area: (i32, i32, i32, i32),
+) -> (i32, i32) {
+    let (ax, ay, aw, ah) = area;
+    let max_x = ax + (aw - window.0).max(0);
+    let max_y = ay + (ah - window.1).max(0);
+    (pos.0.clamp(ax, max_x), pos.1.clamp(ay, max_y))
+}
 
 /// Whether automatic placement may move the bar.
 ///
@@ -2891,5 +2938,62 @@ mod statusbar_manual_position_tests {
             statusbar_position_key_for("Built-in Retina Display"),
             statusbar_position_key_for("DELL U2720Q"),
         );
+    }
+}
+
+#[cfg(test)]
+mod statusbar_clamp_tests {
+    //! A hand-placed bar outranks automatic placement, but not the requirement to
+    //! be reachable. On-device the bar sat at logical (0, 850) — a faithfully
+    //! restored manual position that was nonetheless behind another window and in
+    //! a corner, with nothing in the code able to pull it back.
+    use super::clamp_into_area;
+
+    /// Physical pixels for a 1470x956 logical display at scale 2: menu bar 33pt,
+    /// Dock ~65pt, so the usable area is y 66..1782.
+    const AREA: (i32, i32, i32, i32) = (0, 66, 2940, 1716);
+    const BAR: (i32, i32) = (960, 80);
+
+    #[test]
+    fn leaves_a_position_that_is_already_fully_visible() {
+        assert_eq!(clamp_into_area((500, 900), BAR, AREA), (500, 900));
+    }
+
+    #[test]
+    fn pulls_back_a_bar_dragged_past_the_right_edge() {
+        let (x, _) = clamp_into_area((2900, 900), BAR, AREA);
+        assert_eq!(x, AREA.2 - BAR.0, "right edge, fully on screen");
+        assert!(x + BAR.0 <= AREA.0 + AREA.2);
+    }
+
+    #[test]
+    fn pulls_back_a_bar_dragged_below_the_usable_area() {
+        // Past the Dock: the exact failure that made the bar unreachable.
+        let (_, y) = clamp_into_area((500, 1900), BAR, AREA);
+        assert_eq!(y, AREA.1 + AREA.3 - BAR.1);
+        assert!(y + BAR.1 <= AREA.1 + AREA.3);
+    }
+
+    #[test]
+    fn pulls_back_negative_coordinates_and_the_menu_bar_strip() {
+        assert_eq!(clamp_into_area((-500, -500), BAR, AREA), (0, 66));
+    }
+
+    #[test]
+    fn survives_a_display_that_shrank_below_the_bar_size() {
+        // A position saved on a bigger display, restored on a tiny one: pin to the
+        // origin rather than computing a negative maximum.
+        let tiny = (0, 0, 200, 40);
+        assert_eq!(clamp_into_area((1500, 1500), BAR, tiny), (0, 0));
+    }
+
+    #[test]
+    fn respects_a_secondary_display_origin() {
+        // A display left of the primary has negative coordinates; clamping must
+        // keep the bar on THAT display, not drag it to x=0.
+        let left = (-2940, 0, 2940, 1716);
+        let (x, y) = clamp_into_area((-2000, 800), BAR, left);
+        assert_eq!((x, y), (-2000, 800));
+        assert_eq!(clamp_into_area((-5000, 800), BAR, left).0, -2940);
     }
 }
