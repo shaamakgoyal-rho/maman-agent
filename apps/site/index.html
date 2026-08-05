@@ -1,279 +1,633 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Maman — a desktop pet that notices repetitive work</title>
-<meta name="description" content="Maman watches the apps you allow, notices work you repeat, and drafts a helper only after testing it against your own past runs. Everything stays on your Mac." />
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌱</text></svg>" />
-<style>
-  :root{
-    --ink:#111114; --muted:#5C5C66; --line:#E6E6EA; --panel:#FFFFFF;
-    --bg:#FAFAF8; --primary:#4F46E5; --primary-hover:#4338CA;
-    --success:#0F9F8F; --warning:#D97706;
-    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,"Segoe UI",sans-serif;
-    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-  }
-  @media (prefers-color-scheme: dark){
-    :root{ --ink:#F4F4F5; --muted:#A1A1AA; --line:#26262B; --panel:#15151A; --bg:#0D0D10; }
-  }
-  *{box-sizing:border-box}
-  html{-webkit-text-size-adjust:100%}
-  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
-    font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:760px;margin:0 auto;padding:0 20px}
-  a{color:var(--primary)}
-  header{padding:56px 0 8px}
-  .logo{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:-.01em}
-  .dot{width:9px;height:9px;border-radius:50%;background:var(--success);
-    box-shadow:0 0 7px var(--success)}
-  h1{font-size:2.25rem;line-height:1.15;letter-spacing:-.022em;margin:24px 0 12px;font-weight:680}
-  .lede{font-size:1.125rem;color:var(--muted);margin:0 0 28px;max-width:60ch}
-  /* ---- the download block: the whole point of the page ---- */
-  .get{background:var(--panel);border:1px solid var(--line);border-radius:14px;
-    padding:22px;margin:0 0 14px}
-  .btn{display:inline-flex;align-items:center;gap:9px;background:var(--primary);
-    color:#fff;text-decoration:none;font-weight:600;font-size:1.0625rem;
-    padding:13px 22px;border-radius:11px;border:0;cursor:pointer;
-    transition:background .15s ease}
-  .btn:hover{background:var(--primary-hover)}
-  .btn[aria-disabled="true"]{background:var(--muted);cursor:not-allowed;opacity:.75}
-  .req{font-size:.875rem;color:var(--muted);margin:12px 0 0}
-  .tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin:36px 0 0;
-    flex-wrap:wrap}
-  .tab{appearance:none;background:none;border:0;font:inherit;color:var(--muted);
-    font-weight:560;padding:10px 13px;cursor:pointer;border-bottom:2px solid transparent;
-    margin-bottom:-1px}
-  .tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--primary)}
-  .panel{padding:24px 0 8px}
-  .panel[hidden]{display:none}
-  h2{font-size:1.25rem;letter-spacing:-.014em;margin:28px 0 10px;font-weight:650}
-  h2:first-child{margin-top:0}
-  ol.steps{list-style:none;counter-reset:s;padding:0;margin:0}
-  ol.steps > li{counter-increment:s;position:relative;padding:0 0 20px 42px;
-    border-left:1px solid var(--line);margin-left:13px}
-  ol.steps > li:last-child{border-left-color:transparent;padding-bottom:4px}
-  ol.steps > li::before{content:counter(s);position:absolute;left:-13px;top:-2px;
-    width:26px;height:26px;border-radius:50%;background:var(--primary);color:#fff;
-    font-size:.8125rem;font-weight:650;display:grid;place-items:center}
-  .steps b{font-weight:620}
-  .note{font-size:.9375rem;color:var(--muted);margin:6px 0 0}
-  code,kbd{font-family:var(--mono);font-size:.875em;background:var(--bg);
-    border:1px solid var(--line);border-radius:5px;padding:1px 5px}
-  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-    padding:13px 15px;overflow-x:auto;margin:10px 0}
-  pre code{background:none;border:0;padding:0}
-  .callout{border:1px solid var(--line);border-left:3px solid var(--warning);
-    background:var(--panel);border-radius:10px;padding:15px 17px;margin:18px 0}
-  .callout.ok{border-left-color:var(--success)}
-  .callout p{margin:0}
-  .callout p + p{margin-top:8px}
-  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));margin:14px 0}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
-  .card h3{margin:0 0 6px;font-size:.9375rem;font-weight:640}
-  .card p{margin:0;font-size:.9375rem;color:var(--muted)}
-  ul.plain{padding-left:20px;margin:10px 0}
-  ul.plain li{margin:6px 0}
-  table{width:100%;border-collapse:collapse;font-size:.9375rem;margin:12px 0;display:block;overflow-x:auto}
-  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
-  th{font-weight:620;color:var(--muted);font-size:.875rem}
-  footer{border-top:1px solid var(--line);margin:52px 0 0;padding:22px 0 60px;
-    font-size:.875rem;color:var(--muted)}
-</style>
-</head>
-<body>
-<div class="wrap">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maman — a desktop pet that notices repetitive work</title>
+    <meta
+      name="description"
+      content="Maman watches the apps you allow, notices work you repeat, and drafts a helper only after testing it against your own past runs. Everything stays on your Mac."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🌱</text></svg>"
+    />
+    <style>
+      :root {
+        --ink: #111114;
+        --muted: #5c5c66;
+        --line: #e6e6ea;
+        --panel: #ffffff;
+        --bg: #fafaf8;
+        --primary: #4f46e5;
+        --primary-hover: #4338ca;
+        --success: #0f9f8f;
+        --warning: #d97706;
+        --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ink: #f4f4f5;
+          --muted: #a1a1aa;
+          --line: #26262b;
+          --panel: #15151a;
+          --bg: #0d0d10;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      a {
+        color: var(--primary);
+      }
+      header {
+        padding: 56px 0 8px;
+      }
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--success);
+        box-shadow: 0 0 7px var(--success);
+      }
+      h1 {
+        font-size: 2.25rem;
+        line-height: 1.15;
+        letter-spacing: -0.022em;
+        margin: 24px 0 12px;
+        font-weight: 680;
+      }
+      .lede {
+        font-size: 1.125rem;
+        color: var(--muted);
+        margin: 0 0 28px;
+        max-width: 60ch;
+      }
+      /* ---- the download block: the whole point of the page ---- */
+      .get {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 22px;
+        margin: 0 0 14px;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        background: var(--primary);
+        color: #fff;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 1.0625rem;
+        padding: 13px 22px;
+        border-radius: 11px;
+        border: 0;
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      .btn:hover {
+        background: var(--primary-hover);
+      }
+      .btn[aria-disabled="true"] {
+        background: var(--muted);
+        cursor: not-allowed;
+        opacity: 0.75;
+      }
+      .req {
+        font-size: 0.875rem;
+        color: var(--muted);
+        margin: 12px 0 0;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        border-bottom: 1px solid var(--line);
+        margin: 36px 0 0;
+        flex-wrap: wrap;
+      }
+      .tab {
+        appearance: none;
+        background: none;
+        border: 0;
+        font: inherit;
+        color: var(--muted);
+        font-weight: 560;
+        padding: 10px 13px;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+      }
+      .tab[aria-selected="true"] {
+        color: var(--ink);
+        border-bottom-color: var(--primary);
+      }
+      .panel {
+        padding: 24px 0 8px;
+      }
+      .panel[hidden] {
+        display: none;
+      }
+      h2 {
+        font-size: 1.25rem;
+        letter-spacing: -0.014em;
+        margin: 28px 0 10px;
+        font-weight: 650;
+      }
+      h2:first-child {
+        margin-top: 0;
+      }
+      ol.steps {
+        list-style: none;
+        counter-reset: s;
+        padding: 0;
+        margin: 0;
+      }
+      ol.steps > li {
+        counter-increment: s;
+        position: relative;
+        padding: 0 0 20px 42px;
+        border-left: 1px solid var(--line);
+        margin-left: 13px;
+      }
+      ol.steps > li:last-child {
+        border-left-color: transparent;
+        padding-bottom: 4px;
+      }
+      ol.steps > li::before {
+        content: counter(s);
+        position: absolute;
+        left: -13px;
+        top: -2px;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: var(--primary);
+        color: #fff;
+        font-size: 0.8125rem;
+        font-weight: 650;
+        display: grid;
+        place-items: center;
+      }
+      .steps b {
+        font-weight: 620;
+      }
+      .note {
+        font-size: 0.9375rem;
+        color: var(--muted);
+        margin: 6px 0 0;
+      }
+      code,
+      kbd {
+        font-family: var(--mono);
+        font-size: 0.875em;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 1px 5px;
+      }
+      pre {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 13px 15px;
+        overflow-x: auto;
+        margin: 10px 0;
+      }
+      pre code {
+        background: none;
+        border: 0;
+        padding: 0;
+      }
+      .callout {
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--warning);
+        background: var(--panel);
+        border-radius: 10px;
+        padding: 15px 17px;
+        margin: 18px 0;
+      }
+      .callout.ok {
+        border-left-color: var(--success);
+      }
+      .callout p {
+        margin: 0;
+      }
+      .callout p + p {
+        margin-top: 8px;
+      }
+      .grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+        margin: 14px 0;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      .card h3 {
+        margin: 0 0 6px;
+        font-size: 0.9375rem;
+        font-weight: 640;
+      }
+      .card p {
+        margin: 0;
+        font-size: 0.9375rem;
+        color: var(--muted);
+      }
+      ul.plain {
+        padding-left: 20px;
+        margin: 10px 0;
+      }
+      ul.plain li {
+        margin: 6px 0;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9375rem;
+        margin: 12px 0;
+        display: block;
+        overflow-x: auto;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 9px 11px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        font-weight: 620;
+        color: var(--muted);
+        font-size: 0.875rem;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        margin: 52px 0 0;
+        padding: 22px 0 60px;
+        font-size: 0.875rem;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="logo"><span class="dot" aria-hidden="true"></span> Maman</div>
+        <h1>It notices the work you stopped noticing.</h1>
+        <p class="lede">
+          Maman watches only the apps you allow, spots a workflow you keep repeating, and offers a
+          helper — but only after replaying it against your own past runs and showing you the score.
+          Everything stays on your Mac.
+        </p>
+      </header>
 
-<header>
-  <div class="logo"><span class="dot" aria-hidden="true"></span> Maman</div>
-  <h1>It notices the work you stopped noticing.</h1>
-  <p class="lede">Maman watches only the apps you allow, spots a workflow you keep repeating,
-  and offers a helper — but only after replaying it against your own past runs and showing you
-  the score. Everything stays on your Mac.</p>
-</header>
+      <div class="get">
+        <a
+          class="btn"
+          id="dl"
+          href="https://github.com/shaamakgoyal-rho/maman-releases/releases/latest/download/Maman.dmg"
+          >Download Maman for macOS</a
+        >
+        <p class="req" id="req">
+          Universal — Apple Silicon and Intel · macOS 14 Sonoma or later · 12.9 MB<br /><a
+            href="https://github.com/shaamakgoyal-rho/maman-releases/releases/latest"
+            >Release notes and checksums</a
+          >
+        </p>
+      </div>
 
-<div class="get">
-  <a class="btn" id="dl" href="https://github.com/shaamakgoyal-rho/maman-releases/releases/latest/download/Maman.dmg">Download Maman for macOS</a>
-  <p class="req" id="req">Universal — Apple Silicon and Intel · macOS 14 Sonoma or later · 12.9 MB<br><a href="https://github.com/shaamakgoyal-rho/maman-releases/releases/latest">Release notes and checksums</a></p>
-</div>
+      <div class="callout">
+        <p>
+          <b>This is an unsigned developer preview.</b> It is not yet notarized by Apple, so the
+          first time you open it macOS will say the developer cannot be verified. Step 3 below is
+          the one extra step that costs you — it takes five seconds and you only do it once.
+        </p>
+      </div>
 
-<div class="callout">
-  <p><b>This is an unsigned developer preview.</b> It is not yet notarized by Apple, so the
-  first time you open it macOS will say the developer cannot be verified. Step 3 below is the
-  one extra step that costs you — it takes five seconds and you only do it once.</p>
-</div>
+      <div class="tabs" role="tablist" aria-label="Sections">
+        <button
+          class="tab"
+          role="tab"
+          id="t-install"
+          aria-controls="p-install"
+          aria-selected="true"
+        >
+          Install
+        </button>
+        <button
+          class="tab"
+          role="tab"
+          id="t-privacy"
+          aria-controls="p-privacy"
+          aria-selected="false"
+        >
+          What it can see
+        </button>
+        <button class="tab" role="tab" id="t-how" aria-controls="p-how" aria-selected="false">
+          How it works
+        </button>
+        <button
+          class="tab"
+          role="tab"
+          id="t-trouble"
+          aria-controls="p-trouble"
+          aria-selected="false"
+        >
+          Troubleshooting
+        </button>
+      </div>
 
-<div class="tabs" role="tablist" aria-label="Sections">
-  <button class="tab" role="tab" id="t-install" aria-controls="p-install" aria-selected="true">Install</button>
-  <button class="tab" role="tab" id="t-privacy" aria-controls="p-privacy" aria-selected="false">What it can see</button>
-  <button class="tab" role="tab" id="t-how" aria-controls="p-how" aria-selected="false">How it works</button>
-  <button class="tab" role="tab" id="t-trouble" aria-controls="p-trouble" aria-selected="false">Troubleshooting</button>
-</div>
+      <!-- ============================ INSTALL ============================ -->
+      <section
+        class="panel"
+        id="p-install"
+        role="tabpanel"
+        aria-labelledby="t-install"
+        tabindex="0"
+      >
+        <h2 id="install">Five steps, about two minutes</h2>
+        <ol class="steps">
+          <li>
+            <b>Download and open the disk image.</b>
+            <p class="note">Your browser will save <code>Maman.dmg</code>. Double-click it.</p>
+          </li>
 
-<!-- ============================ INSTALL ============================ -->
-<section class="panel" id="p-install" role="tabpanel" aria-labelledby="t-install" tabindex="0">
-  <h2 id="install">Five steps, about two minutes</h2>
-  <ol class="steps">
-    <li><b>Download and open the disk image.</b>
-      <p class="note">Your browser will save <code>Maman.dmg</code>. Double-click it.</p></li>
+          <li>
+            <b>Drag Maman into Applications.</b>
+            <p class="note">
+              The window shows both — drag left to right. Then eject the disk image.
+            </p>
+          </li>
 
-    <li><b>Drag Maman into Applications.</b>
-      <p class="note">The window shows both — drag left to right. Then eject the disk image.</p></li>
+          <li>
+            <b>Right-click Maman in Applications and choose Open.</b>
+            <p class="note">
+              Do <em>not</em> double-click the first time. macOS will warn that the developer cannot
+              be verified; click <b>Open</b> to confirm. This is only needed once, and it is
+              required because this preview is not yet notarized.
+            </p>
+          </li>
 
-    <li><b>Right-click Maman in Applications and choose Open.</b>
-      <p class="note">Do <em>not</em> double-click the first time. macOS will warn that the
-      developer cannot be verified; click <b>Open</b> to confirm. This is only needed once,
-      and it is required because this preview is not yet notarized.</p></li>
+          <li>
+            <b>Grant Accessibility, then click Always Allow on the keychain prompt.</b>
+            <p class="note">
+              Maman opens System Settings for you — flip its switch under
+              Privacy&nbsp;&amp;&nbsp;Security → Accessibility. Without it Maman cannot see the
+              shape of your work and will honestly tell you it is not observing. The keychain prompt
+              is macOS asking permission to unlock the encrypted database it just created for you.
+            </p>
+          </li>
 
-    <li><b>Grant Accessibility, then click Always Allow on the keychain prompt.</b>
-      <p class="note">Maman opens System Settings for you — flip its switch under
-      Privacy&nbsp;&amp;&nbsp;Security → Accessibility. Without it Maman cannot see the shape of
-      your work and will honestly tell you it is not observing. The keychain prompt is macOS
-      asking permission to unlock the encrypted database it just created for you.</p></li>
+          <li>
+            <b>Choose what it may watch.</b>
+            <p class="note">
+              Onboarding asks which apps and sites are fair game. Nothing is watched until you say
+              so. When the pet's dot turns green, Maman is running.
+            </p>
+          </li>
+        </ol>
 
-    <li><b>Choose what it may watch.</b>
-      <p class="note">Onboarding asks which apps and sites are fair game. Nothing is watched
-      until you say so. When the pet's dot turns green, Maman is running.</p></li>
-  </ol>
+        <div class="callout ok">
+          <p>
+            <b>How you know it worked:</b> a small bar appears at the bottom of the window you are
+            working in, with a green dot and a line like
+            <code>Watching: Month-end accrual journals — 6 of 8 checks</code>. Green means it is
+            genuinely observing. Any other colour means it is not, and it will say why.
+          </p>
+        </div>
 
-  <div class="callout ok">
-    <p><b>How you know it worked:</b> a small bar appears at the bottom of the window you are
-    working in, with a green dot and a line like <code>Watching: Month-end accrual journals — 6 of 8 checks</code>.
-    Green means it is genuinely observing. Any other colour means it is not, and it will say why.</p>
-  </div>
+        <h2>Optional: browser detail</h2>
+        <p>
+          Maman sees native apps through macOS Accessibility. For richer detail inside Chrome —
+          which record you were on, not just that a browser was open — there is a companion
+          extension. It is not required, and Maman works without it.
+        </p>
+        <p class="note">
+          The extension is not yet on the Chrome Web Store. Until it is, browser workflows are still
+          detected, but their names stay coarser.
+        </p>
+      </section>
 
-  <h2>Optional: browser detail</h2>
-  <p>Maman sees native apps through macOS Accessibility. For richer detail inside Chrome —
-  which record you were on, not just that a browser was open — there is a companion extension.
-  It is not required, and Maman works without it.</p>
-  <p class="note">The extension is not yet on the Chrome Web Store. Until it is, browser
-  workflows are still detected, but their names stay coarser.</p>
-</section>
+      <!-- ============================ PRIVACY ============================ -->
+      <section
+        class="panel"
+        id="p-privacy"
+        role="tabpanel"
+        aria-labelledby="t-privacy"
+        hidden
+        tabindex="0"
+      >
+        <h2>What Maman never collects</h2>
+        <p>These are not settings you have to find. They are properties of how it is built.</p>
+        <div class="grid">
+          <div class="card">
+            <h3>No keystrokes</h3>
+            <p>It registers no keyboard tap. Ever.</p>
+          </div>
+          <div class="card">
+            <h3>No screenshots</h3>
+            <p>No screen recording, no pixels.</p>
+          </div>
+          <div class="card">
+            <h3>No passwords or payment fields</h3>
+            <p>Secure fields and password managers are refused outright.</p>
+          </div>
+          <div class="card">
+            <h3>No private browsing</h3>
+            <p>Private windows are a hard boundary.</p>
+          </div>
+        </div>
 
-<!-- ============================ PRIVACY ============================ -->
-<section class="panel" id="p-privacy" role="tabpanel" aria-labelledby="t-privacy" hidden tabindex="0">
-  <h2>What Maman never collects</h2>
-  <p>These are not settings you have to find. They are properties of how it is built.</p>
-  <div class="grid">
-    <div class="card"><h3>No keystrokes</h3><p>It registers no keyboard tap. Ever.</p></div>
-    <div class="card"><h3>No screenshots</h3><p>No screen recording, no pixels.</p></div>
-    <div class="card"><h3>No passwords or payment fields</h3><p>Secure fields and password managers are refused outright.</p></div>
-    <div class="card"><h3>No private browsing</h3><p>Private windows are a hard boundary.</p></div>
-  </div>
+        <h2>What it does record</h2>
+        <p>
+          The <em>shape</em> of your work: which category of app, what kind of element you touched,
+          how long a step took. Text you see is hashed before it is stored, so a label becomes an
+          anonymous fingerprint rather than words.
+        </p>
+        <table>
+          <tr>
+            <th>Recorded</th>
+            <th>Not recorded</th>
+          </tr>
+          <tr>
+            <td>"a table was read in a spreadsheet"</td>
+            <td>the contents of the table</td>
+          </tr>
+          <tr>
+            <td>"a field was committed on an invoice"</td>
+            <td>what you typed into it</td>
+          </tr>
+          <tr>
+            <td>a renewal date read off a record</td>
+            <td>whose renewal it is</td>
+          </tr>
+        </table>
 
-  <h2>What it does record</h2>
-  <p>The <em>shape</em> of your work: which category of app, what kind of element you touched,
-  how long a step took. Text you see is hashed before it is stored, so a label becomes an
-  anonymous fingerprint rather than words.</p>
-  <table>
-    <tr><th>Recorded</th><th>Not recorded</th></tr>
-    <tr><td>"a table was read in a spreadsheet"</td><td>the contents of the table</td></tr>
-    <tr><td>"a field was committed on an invoice"</td><td>what you typed into it</td></tr>
-    <tr><td>a renewal date read off a record</td><td>whose renewal it is</td></tr>
-  </table>
+        <h2>Where it lives</h2>
+        <p>
+          In an encrypted database on your Mac, with the key in your login keychain. There is no
+          account, no server, and nothing is uploaded — the sync path is off unless you deliberately
+          connect one. <b>Privacy → Delete data</b> removes any app's history, or all of it, and
+          writes a tombstone so it cannot come back.
+        </p>
 
-  <h2>Where it lives</h2>
-  <p>In an encrypted database on your Mac, with the key in your login keychain. There is no
-  account, no server, and nothing is uploaded — the sync path is off unless you deliberately
-  connect one. <b>Privacy → Delete data</b> removes any app's history, or all of it, and writes
-  a tombstone so it cannot come back.</p>
+        <h2>Nothing changes without you</h2>
+        <p>
+          A helper is drafted, replayed against your own past runs, and shown to you with its score
+          before it may touch anything. Actions that alter a real record need your explicit
+          approval, every time, and some are capped so they can only ever draft.
+        </p>
+      </section>
 
-  <h2>Nothing changes without you</h2>
-  <p>A helper is drafted, replayed against your own past runs, and shown to you with its score
-  before it may touch anything. Actions that alter a real record need your explicit approval,
-  every time, and some are capped so they can only ever draft.</p>
-</section>
+      <!-- ============================ HOW ============================ -->
+      <section class="panel" id="p-how" role="tabpanel" aria-labelledby="t-how" hidden tabindex="0">
+        <h2>Notice → prove → offer</h2>
+        <ol class="steps">
+          <li>
+            <b>Notice.</b> Repeated sequences are grouped into a candidate workflow. A one-off is
+            not a pattern.
+          </li>
+          <li>
+            <b>Prove.</b> A draft helper is replayed against your own recorded runs. The card shows
+            the real score — "tested against your last 21 runs, matched 19". Below a floor of runs
+            no score is claimed at all, because a 2-out-of-2 match is noise dressed as proof.
+          </li>
+          <li>
+            <b>Offer.</b> Only then does a card appear, named after the work — "Update account
+            records in Salesforce" — with the steps it observed spelled out.
+          </li>
+        </ol>
 
-<!-- ============================ HOW ============================ -->
-<section class="panel" id="p-how" role="tabpanel" aria-labelledby="t-how" hidden tabindex="0">
-  <h2>Notice → prove → offer</h2>
-  <ol class="steps">
-    <li><b>Notice.</b> Repeated sequences are grouped into a candidate workflow. A one-off is
-    not a pattern.</li>
-    <li><b>Prove.</b> A draft helper is replayed against your own recorded runs. The card shows
-    the real score — "tested against your last 21 runs, matched 19". Below a floor of runs no
-    score is claimed at all, because a 2-out-of-2 match is noise dressed as proof.</li>
-    <li><b>Offer.</b> Only then does a card appear, named after the work — "Update account
-    records in Salesforce" — with the steps it observed spelled out.</li>
-  </ol>
+        <h2>It also knows when to speak</h2>
+        <p>
+          Some work is periodic. Tell Maman when your close starts and it can offer to pre-stage
+          month-end work a few days ahead; renewals surface off dates read from the records
+          themselves. Quiet hours, a daily budget, audit weeks and full-screen presentations all
+          silence it, and a card held during a quiet week is queued rather than dropped.
+        </p>
 
-  <h2>It also knows when to speak</h2>
-  <p>Some work is periodic. Tell Maman when your close starts and it can offer to pre-stage
-  month-end work a few days ahead; renewals surface off dates read from the records themselves.
-  Quiet hours, a daily budget, audit weeks and full-screen presentations all silence it, and a
-  card held during a quiet week is queued rather than dropped.</p>
+        <h2>When it does not know, it says so</h2>
+        <p>
+          If a helper has not been tested enough, the card says there is nothing to claim rather
+          than inventing a number. If a date on a record is ambiguous — is 03/04 March or April? —
+          it stays silent instead of guessing.
+        </p>
+      </section>
 
-  <h2>When it does not know, it says so</h2>
-  <p>If a helper has not been tested enough, the card says there is nothing to claim rather
-  than inventing a number. If a date on a record is ambiguous — is 03/04 March or April? —
-  it stays silent instead of guessing.</p>
-</section>
+      <!-- ============================ TROUBLE ============================ -->
+      <section
+        class="panel"
+        id="p-trouble"
+        role="tabpanel"
+        aria-labelledby="t-trouble"
+        hidden
+        tabindex="0"
+      >
+        <h2>"Maman is damaged and can't be opened"</h2>
+        <p>
+          macOS quarantines apps downloaded from the internet, and an unsigned preview sometimes
+          gets this message instead of the milder one. Clear the quarantine flag:
+        </p>
+        <pre><code>xattr -dr com.apple.quarantine /Applications/Maman.app</code></pre>
+        <p class="note">
+          Only run this for software you meant to install. It tells macOS you accept responsibility
+          for this app, which is precisely what notarization would otherwise establish on our side.
+        </p>
 
-<!-- ============================ TROUBLE ============================ -->
-<section class="panel" id="p-trouble" role="tabpanel" aria-labelledby="t-trouble" hidden tabindex="0">
-  <h2>"Maman is damaged and can't be opened"</h2>
-  <p>macOS quarantines apps downloaded from the internet, and an unsigned preview sometimes gets
-  this message instead of the milder one. Clear the quarantine flag:</p>
-  <pre><code>xattr -dr com.apple.quarantine /Applications/Maman.app</code></pre>
-  <p class="note">Only run this for software you meant to install. It tells macOS you accept
-  responsibility for this app, which is precisely what notarization would otherwise establish
-  on our side.</p>
+        <h2>The dot is not green</h2>
+        <p>That is the point of the dot — it goes green only when Maman is genuinely observing.</p>
+        <ul class="plain">
+          <li><b>Grey or amber:</b> observation is paused, or the observer is still starting.</li>
+          <li>
+            <b>"Accessibility permission needed":</b> the switch in System Settings is off. Maman
+            can reopen that pane for you from Settings.
+          </li>
+          <li>
+            <b>"Needs keychain access" (red):</b> macOS did not release the database key. Quit
+            Maman, open it again, and click <b>Always Allow</b> when prompted. Do not delete the
+            keychain item — that orphans the encrypted database.
+          </li>
+        </ul>
 
-  <h2>The dot is not green</h2>
-  <p>That is the point of the dot — it goes green only when Maman is genuinely observing.</p>
-  <ul class="plain">
-    <li><b>Grey or amber:</b> observation is paused, or the observer is still starting.</li>
-    <li><b>"Accessibility permission needed":</b> the switch in System Settings is off. Maman
-    can reopen that pane for you from Settings.</li>
-    <li><b>"Needs keychain access" (red):</b> macOS did not release the database key. Quit
-    Maman, open it again, and click <b>Always Allow</b> when prompted. Do not delete the
-    keychain item — that orphans the encrypted database.</li>
-  </ul>
+        <h2>No suggestions yet</h2>
+        <p>
+          Expected early on. A workflow has to recur enough times, on enough separate days, and then
+          survive a replay test. The Suggestions tab shows exactly which bar it has yet to clear
+          rather than leaving you guessing.
+        </p>
 
-  <h2>No suggestions yet</h2>
-  <p>Expected early on. A workflow has to recur enough times, on enough separate days, and then
-  survive a replay test. The Suggestions tab shows exactly which bar it has yet to clear rather
-  than leaving you guessing.</p>
+        <h2>The status bar is in the way</h2>
+        <p>
+          Drag it anywhere — where you drop it, it stays. <b>Settings → Status bar</b> can dock it
+          to the window you are working in, let clicks pass through it, or reset its position.
+        </p>
 
-  <h2>The status bar is in the way</h2>
-  <p>Drag it anywhere — where you drop it, it stays. <b>Settings → Status bar</b> can dock it to
-  the window you are working in, let clicks pass through it, or reset its position.</p>
-
-  <h2>Removing it completely</h2>
-  <pre><code>rm -rf /Applications/Maman.app
+        <h2>Removing it completely</h2>
+        <pre><code>rm -rf /Applications/Maman.app
 rm -rf ~/Library/Application\ Support/com.maman.desktop</code></pre>
-  <p class="note">The second line deletes the encrypted database. Privacy → Delete device data
-  does the same from inside the app, including the keychain key.</p>
-</section>
+        <p class="note">
+          The second line deletes the encrypted database. Privacy → Delete device data does the same
+          from inside the app, including the keychain key.
+        </p>
+      </section>
 
-<footer>
-  <p>Maman runs entirely on your Mac. Unsigned developer preview — not yet notarized.</p>
-</footer>
+      <footer>
+        <p>Maman runs entirely on your Mac. Unsigned developer preview — not yet notarized.</p>
+      </footer>
+    </div>
+    <script>
+      // Tabs: plain buttons, no framework. Deep-links via #hash so a support answer
+      // can point straight at a section.
+      var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+      function select(id) {
+        tabs.forEach(function (t) {
+          var on = t.id === id;
+          t.setAttribute("aria-selected", String(on));
+          document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+        });
+      }
+      tabs.forEach(function (t) {
+        t.addEventListener("click", function () {
+          select(t.id);
+          history.replaceState(null, "", "#" + t.id.slice(2));
+        });
+      });
+      var initial = location.hash.replace("#", "");
+      if (initial && document.getElementById("t-" + initial)) select("t-" + initial);
 
-</div>
-<script>
-  // Tabs: plain buttons, no framework. Deep-links via #hash so a support answer
-  // can point straight at a section.
-  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
-  function select(id){
-    tabs.forEach(function(t){
-      var on = t.id === id;
-      t.setAttribute('aria-selected', String(on));
-      document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
-    });
-  }
-  tabs.forEach(function(t){
-    t.addEventListener('click', function(){
-      select(t.id);
-      history.replaceState(null, '', '#' + t.id.slice(2));
-    });
-  });
-  var initial = location.hash.replace('#','');
-  if (initial && document.getElementById('t-' + initial)) select('t-' + initial);
-
-  // Intel Macs cannot report their arch from the browser reliably, so the button
-  // is one universal download rather than a guess that could hand someone a
-  // binary their machine cannot run.
-</script>
-</body>
+      // Intel Macs cannot report their arch from the browser reliably, so the button
+      // is one universal download rather than a guess that could hand someone a
+      // binary their machine cannot run.
+    </script>
+  </body>
 </html>
