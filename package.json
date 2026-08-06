@@ -45,7 +45,10 @@
     "audit:dependencies": "pnpm audit --audit-level high",
     "audit:licenses": "bash scripts/audit-licenses.sh",
     "audit:secrets": "bash scripts/audit-secrets.sh",
-    "packs:date-conformance:check": "pnpm --filter @maman/domain-packs packs:date-conformance:check"
+    "packs:date-conformance:check": "pnpm --filter @maman/domain-packs packs:date-conformance:check",
+    "teach:egress-conformance": "pnpm --filter @maman/teach-mode egress-conformance",
+    "teach:egress-conformance:check": "pnpm --filter @maman/teach-mode egress-conformance:check",
+    "teach:vision-probe": "pnpm --filter @maman/teach-mode vision-probe"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

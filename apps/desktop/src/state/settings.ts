@@ -18,6 +18,34 @@ export const localSettingsSchema = z
     allowlist_domains: z.array(z.string()).default([]),
     allowlist_bundles: z.array(z.string()).default([]),
     /**
+     * Origins a supervised browser run may WRITE to, stated in full
+     * (scheme + host), e.g. an org's own Salesforce host.
+     *
+     * Deliberately separate from `allowlist_domains`, which only grants
+     * observation: being watched and being typed into are different permissions,
+     * and this one is compared exactly rather than by domain suffix. Empty by
+     * default, and while it is empty a browser-lane plan is refused rather than
+     * sent — so actuation is off until the user names a site.
+     */
+    browser_actuation_origins: z.array(z.string()).default([]),
+    /**
+     * Whether Teach Mode sessions may be started at all.
+     *
+     * OFF by default, and the default matters more here than anywhere else in this
+     * file: this is the only setting whose "on" state causes pictures of the user's
+     * screen to leave the machine. Enabling it does not start a session — it only
+     * makes starting one possible.
+     */
+    teach_mode_enabled: z.boolean().default(false),
+    /**
+     * Vision model alias used to PRICE a Teach Mode session in the panel.
+     *
+     * The Rust core reads the real model from `ANTHROPIC_VISION_MODEL`; this is the
+     * same name so the quote matches what will actually run. Empty means nothing is
+     * configured, and the panel says so rather than quoting a number.
+     */
+    vision_model_alias: z.string().default(""),
+    /**
      * Explicit opt-in to observe EVERY app (except always-off / private ones),
      * instead of only the apps in allowlist_bundles. Hard-deny, user-private,
      * and secure-field boundaries still apply, so sensitive contexts are never

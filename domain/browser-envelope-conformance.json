@@ -1,0 +1,36 @@
+{
+  "_comment": "Cross-language drift contract for the signed native-message envelope. The desktop (Rust) SIGNS these and the extension (TypeScript) VERIFIES them, so a change to canonical JSON or to the set of signed fields on either side silently breaks browser actuation. Both sides assert against this file. secret_b64url is a TEST VECTOR (32 zero bytes) and protects nothing.",
+  "secret_b64url": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "signing_input": "{\"installation_id\":\"018f0000-0000-7000-8000-0000000000bb\",\"message_id\":\"018f0000-0000-7000-8000-0000000000aa\",\"nonce\":\"Y29uZm9ybWFuY2Utbm9uY2U\",\"payload\":{\"request\":{\"action\":{\"expect_current\":\"2026-09-30\",\"kind\":\"set_value\",\"target\":{\"name\":\"Close date\",\"role\":\"textbox\"},\"value\":\"2026-12-31\"},\"allowed_origins\":[\"https://acme.my.salesforce.com\"],\"authorization\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"consequential\":true,\"expires_at\":\"2026-08-05T12:01:00.000Z\",\"issued_at\":\"2026-08-05T11:59:30.000Z\",\"request_id\":\"018f0000-0000-7000-8000-000000000001\",\"run_id\":\"018f0000-0000-7000-8000-000000000002\",\"schema_version\":1,\"step_id\":\"step-1\",\"type\":\"browser_action_request\"},\"type\":\"browser_action_request\"},\"timestamp\":\"2026-08-05T12:00:00.000Z\"}",
+  "envelope": {
+    "message_id": "018f0000-0000-7000-8000-0000000000aa",
+    "installation_id": "018f0000-0000-7000-8000-0000000000bb",
+    "timestamp": "2026-08-05T12:00:00.000Z",
+    "nonce": "Y29uZm9ybWFuY2Utbm9uY2U",
+    "payload": {
+      "type": "browser_action_request",
+      "request": {
+        "schema_version": 1,
+        "type": "browser_action_request",
+        "request_id": "018f0000-0000-7000-8000-000000000001",
+        "run_id": "018f0000-0000-7000-8000-000000000002",
+        "step_id": "step-1",
+        "action": {
+          "kind": "set_value",
+          "target": {
+            "role": "textbox",
+            "name": "Close date"
+          },
+          "value": "2026-12-31",
+          "expect_current": "2026-09-30"
+        },
+        "authorization": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "allowed_origins": ["https://acme.my.salesforce.com"],
+        "consequential": true,
+        "issued_at": "2026-08-05T11:59:30.000Z",
+        "expires_at": "2026-08-05T12:01:00.000Z"
+      }
+    },
+    "signature": "60d00e7c0e01f8f5d03540759af7ecf1d90dfb7ab31310fac9f397a25eaf6245"
+  }
+}

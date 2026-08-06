@@ -13,6 +13,8 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@maman/browser-actuator": "workspace:*",
+    "@maman/contracts": "workspace:*",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -20,6 +22,7 @@
     "@maman/tsconfig": "workspace:*",
     "@types/chrome": "^0.0.287",
     "@vitest/coverage-v8": "^3.2.7",
+    "jsdom": "^25",
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
     "vitest": "^3.2.7"

@@ -71,6 +71,20 @@ pub enum ObserverLine {
     /// `None` means nothing is monitored right now — the bar must detach rather
     /// than stay pinned to a stale rectangle. Transient: never persisted.
     WindowFrame { frame: Option<WindowFrame> },
+    /// One masked Teach Mode frame. `jpeg_b64` is PIXELS: it must never be
+    /// logged, persisted, or attached to any schema — it goes to the vision
+    /// egress and is dropped. `meta` is the safe part (ids, geometry, mask count).
+    TeachFrame {
+        meta: Value,
+        jpeg_b64: String,
+    },
+    /// Teach session lifecycle and per-frame refusals — reason strings only,
+    /// surfaced to the panel so the user can see why nothing is being learned.
+    TeachStatus {
+        session_id: String,
+        state: String,
+        detail: Option<String>,
+    },
     /// Malformed or an unrecognized message type — dropped, never crashes.
     Ignored,
 }
@@ -124,6 +138,32 @@ pub fn parse_observer_line(line: &str) -> ObserverLine {
             });
             ObserverLine::WindowFrame { frame }
         }
+        Some("teach_frame") => {
+            // Both halves must be present and well-formed, or the line is dropped
+            // whole: a frame without its metadata cannot be gated downstream, and
+            // metadata without pixels is a protocol bug worth losing.
+            match (
+                v.get("frame").filter(|m| m.is_object()),
+                v.get("jpeg_b64").and_then(|j| j.as_str()),
+            ) {
+                (Some(meta), Some(jpeg)) if !jpeg.is_empty() => ObserverLine::TeachFrame {
+                    meta: meta.clone(),
+                    jpeg_b64: jpeg.to_string(),
+                },
+                _ => ObserverLine::Ignored,
+            }
+        }
+        Some("teach_status") => match (
+            v.get("session_id").and_then(|s| s.as_str()),
+            v.get("state").and_then(|s| s.as_str()),
+        ) {
+            (Some(session_id), Some(state)) => ObserverLine::TeachStatus {
+                session_id: session_id.to_string(),
+                state: state.to_string(),
+                detail: v.get("detail").and_then(|d| d.as_str()).map(str::to_string),
+            },
+            _ => ObserverLine::Ignored,
+        },
         Some("error") => ObserverLine::Error {
             code: v.get("code").and_then(|s| s.as_str()).unwrap_or("").to_string(),
             fatal: v.get("fatal").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -290,6 +330,53 @@ mod tests {
                 code: ACCESSIBILITY_PERMISSION_CODE.into(),
                 fatal: false
             }
+        );
+    }
+
+    #[test]
+    fn teach_frame_lines_carry_meta_and_pixels_or_are_dropped_whole() {
+        let line = r#"{"type":"teach_frame","frame":{"frame_id":"f1","session_id":"s1","captured_at":"2026-08-05T12:00:00.000Z","bundle_id":"com.google.Chrome","width":1400,"height":900,"masked_regions":2},"jpeg_b64":"/9j/4AAQ"}"#;
+        match parse_observer_line(line) {
+            ObserverLine::TeachFrame { meta, jpeg_b64 } => {
+                assert_eq!(meta.get("frame_id").and_then(|v| v.as_str()), Some("f1"));
+                assert_eq!(meta.get("masked_regions").and_then(|v| v.as_i64()), Some(2));
+                assert_eq!(jpeg_b64, "/9j/4AAQ");
+            }
+            other => panic!("expected TeachFrame, got {other:?}"),
+        }
+        // Metadata without pixels, or pixels without metadata: dropped whole.
+        for bad in [
+            r#"{"type":"teach_frame","frame":{"frame_id":"f1"}}"#,
+            r#"{"type":"teach_frame","frame":{"frame_id":"f1"},"jpeg_b64":""}"#,
+            r#"{"type":"teach_frame","jpeg_b64":"/9j/"}"#,
+        ] {
+            assert_eq!(parse_observer_line(bad), ObserverLine::Ignored, "{bad}");
+        }
+    }
+
+    #[test]
+    fn teach_status_lines_carry_reasons_never_content() {
+        assert_eq!(
+            parse_observer_line(
+                r#"{"type":"teach_status","session_id":"s1","state":"frame_refused","detail":"secure_field_focused","occurred_at":"x"}"#
+            ),
+            ObserverLine::TeachStatus {
+                session_id: "s1".into(),
+                state: "frame_refused".into(),
+                detail: Some("secure_field_focused".into()),
+            }
+        );
+        assert_eq!(
+            parse_observer_line(r#"{"type":"teach_status","session_id":"s1","state":"started","occurred_at":"x"}"#),
+            ObserverLine::TeachStatus {
+                session_id: "s1".into(),
+                state: "started".into(),
+                detail: None,
+            }
+        );
+        assert_eq!(
+            parse_observer_line(r#"{"type":"teach_status","state":"started"}"#),
+            ObserverLine::Ignored
         );
     }
 

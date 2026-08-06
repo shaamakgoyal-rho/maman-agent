@@ -5,11 +5,13 @@
 //! calling window's label (the pet window may never reach privileged surfaces).
 
 pub mod browser_bridge;
+pub mod browser_relay;
 pub mod domain;
 pub mod observer;
 pub mod redaction;
 pub mod store;
 pub mod sync;
+pub mod vision;
 
 use std::collections::HashMap;
 use std::fs;
@@ -181,6 +183,10 @@ struct GateSettings {
     /// secure-field boundaries still apply first, so sensitive contexts are
     /// never observed.
     observe_all_apps: bool,
+    /// Whether Teach Mode SESSIONS may be started at all. Defaults to false on
+    /// every failure path below, because a missing or unparseable settings file
+    /// must never be the reason pixels start leaving the device.
+    teach_mode_enabled: bool,
 }
 
 fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
@@ -215,6 +221,10 @@ fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
             .unwrap_or_default(),
         observe_all_apps: json
             .get("observe_all_apps")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        teach_mode_enabled: json
+            .get("teach_mode_enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     }
@@ -1548,6 +1558,28 @@ fn handle_bridge_request<R: Runtime>(
                 return serde_json::json!({"ok": false, "error": "bad signature"});
             }
             let payload = envelope.get("payload").cloned().unwrap_or_default();
+
+            // The answer to a pushed action. It arrives on a fresh connection —
+            // the extension replies through the ordinary extension → host → desktop
+            // path — so it is matched to the waiting thread by `request_id`.
+            //
+            // Only the correlation field is checked here. The result is relayed to
+            // the webview verbatim and parsed there against
+            // `browserActionResultSchema`, because strict validation belongs where
+            // the contract lives; treating extension output as trusted merely
+            // because its HMAC verified would be the wrong lesson from the
+            // signature. The signature proves the sender, not the shape.
+            if payload.get("type").and_then(|v| v.as_str()) == Some("browser_action_result") {
+                let Some(result) = payload.get("result") else {
+                    return serde_json::json!({"ok": false, "error": "missing result"});
+                };
+                let Some(request_id) = result.get("request_id").and_then(|v| v.as_str()) else {
+                    return serde_json::json!({"ok": false, "error": "missing request_id"});
+                };
+                let delivered = browser_relay::relay().deliver(request_id, result.clone());
+                return serde_json::json!({"ok": true, "delivered": delivered});
+            }
+
             if payload.get("type").and_then(|v| v.as_str()) != Some("semantic_event") {
                 return serde_json::json!({"ok": false, "error": "unsupported payload"});
             }
@@ -1627,21 +1659,209 @@ fn start_bridge_listener<R: Runtime>(app: AppHandle<R>) {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
         }
+        // A THREAD PER CONNECTION, and each connection may carry MANY lines.
+        //
+        // Both changes are required by the relay: its connection stays open for the
+        // life of the browser session. Serving connections one at a time from this
+        // loop — which is what it used to do — would mean the relay's own
+        // connection blocked every other one behind it, including the event
+        // forwarding that was working before.
         for stream in listener.incoming().flatten() {
-            use std::io::{BufRead, BufReader, Write};
-            let mut reader = BufReader::new(&stream);
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_err() {
-                continue;
-            }
-            let reply = match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(request) => handle_bridge_request(&app, &request),
-                Err(e) => serde_json::json!({"ok": false, "error": format!("bad json: {e}")}),
-            };
-            let mut writer = &stream;
-            let _ = writer.write_all(format!("{reply}\n").as_bytes());
+            let app = app.clone();
+            std::thread::spawn(move || serve_bridge_connection(app, stream));
         }
     });
+}
+
+/// One bridge connection: read JSON lines until the peer goes away.
+fn serve_bridge_connection<R: Runtime>(app: AppHandle<R>, stream: std::os::unix::net::UnixStream) {
+    use std::io::{BufRead, BufReader, Write};
+    let Ok(read_half) = stream.try_clone() else { return };
+    let mut writer = stream;
+    for line in BufReader::new(read_half).lines() {
+        let Ok(line) = line else { return };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let reply = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(request) => {
+                // `relay_register` is handled HERE rather than in
+                // `handle_bridge_request` because it is the only request whose
+                // effect is to keep the connection itself — the handler only sees
+                // parsed JSON and has no way to hand over a socket.
+                if request.get("type").and_then(|v| v.as_str()) == Some("relay_register") {
+                    register_relay(&writer, &request)
+                } else {
+                    handle_bridge_request(&app, &request)
+                }
+            }
+            Err(e) => serde_json::json!({"ok": false, "error": format!("bad json: {e}")}),
+        };
+        if writer.write_all(format!("{reply}\n").as_bytes()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Takes over the push channel for the extension that just identified itself.
+fn register_relay(
+    stream: &std::os::unix::net::UnixStream,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(installation_id) = request.get("installation_id").and_then(|v| v.as_str()) else {
+        return serde_json::json!({"ok": false, "error": "missing installation_id"});
+    };
+    // Registration is NOT authentication and grants nothing: a registered relay can
+    // only carry envelopes the desktop signed, to an extension that verifies them.
+    // The worst a bogus registration achieves is taking delivery of requests it
+    // cannot read the intent of and cannot answer, which surfaces as a timeout.
+    let Ok(write_half) = stream.try_clone() else {
+        return serde_json::json!({"ok": false, "error": "cannot clone socket"});
+    };
+    browser_relay::relay().register(write_half, installation_id);
+    serde_json::json!({"ok": true})
+}
+
+/// Starts a Teach Mode capture session.
+///
+/// Three gates, all here rather than deeper down, so a refusal is immediate and
+/// legible: the panel must be the caller, the user must have enabled Teach Mode,
+/// and the request must name a bounded time box and at least one app. The observer
+/// re-checks every one of them per frame; this is the early, honest "no".
+#[tauri::command]
+fn teach_mode_start<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    max_seconds: u32,
+    scope_bundle_ids: Vec<String>,
+) -> Result<String, String> {
+    require_panel(&window)?;
+
+    // The setting is the standing consent. Without it there is no session, and no
+    // amount of asking from the webview changes that.
+    if !load_gate_settings(&app).teach_mode_enabled {
+        return Err("Teach Mode is off — enable it in Privacy first".into());
+    }
+    if scope_bundle_ids.is_empty() {
+        return Err("a session must name at least one app to demonstrate in".into());
+    }
+    // Matches the observer's protocol bound; a session is not something you can
+    // leave running.
+    if max_seconds == 0 || max_seconds > 900 {
+        return Err("a session lasts between 1 and 900 seconds".into());
+    }
+    if !observer::ObserverGate::should_observe(&load_observer_gate(&app)) {
+        return Err("observation is paused or consent is incomplete".into());
+    }
+
+    let session_id = uuid_v4_like(&browser_bridge::sha256_hex(
+        format!("teach:{}", browser_bridge::now_unix_ms()).as_bytes(),
+    ));
+    let line = serde_json::json!({
+        "type": "teach_mode_start",
+        "session_id": session_id,
+        "max_seconds": max_seconds,
+        "scope_bundle_ids": scope_bundle_ids,
+    })
+    .to_string();
+    queue_teach_control(&app, line)?;
+    Ok(session_id)
+}
+
+/// Stops the running session immediately. Never fails on "nothing running" — a
+/// stop the user asked for should not report an error for having been redundant.
+#[tauri::command]
+fn teach_mode_stop<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<(), String> {
+    require_panel(&window)?;
+    queue_teach_control(&app, "{\"type\":\"teach_mode_stop\"}".to_string())
+}
+
+fn queue_teach_control<R: Runtime>(app: &AppHandle<R>, line: String) -> Result<(), String> {
+    let state = app
+        .try_state::<TeachControlState>()
+        .ok_or("teach control channel unavailable")?;
+    let mut queue = state.0.lock().map_err(|_| "teach control channel poisoned")?;
+    // A bounded queue: if the observer is not draining, the session is not running
+    // and piling up start lines would only start a burst later.
+    if queue.len() >= 8 {
+        return Err("teach control queue is full — the observer is not running".into());
+    }
+    queue.push(line);
+    Ok(())
+}
+
+/// Whether a browser relay is currently connected, for the run UI to show before
+/// it offers a browser-lane step.
+#[tauri::command]
+fn browser_relay_status<R: Runtime>(window: Window<R>) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    Ok(serde_json::json!({
+        "connected": browser_relay::relay().is_connected(),
+        "in_flight": browser_relay::relay().pending_count(),
+    }))
+}
+
+/// Pushes ONE approved browser action to the extension and returns its result.
+///
+/// The request arrives already built and policy-checked by the run path — this
+/// command is transport, and deliberately adds no judgement of its own. What it
+/// does add is the signature: the extension must be able to tell a request from
+/// the desktop apart from anything the native host could have injected, and the
+/// host holds no key material precisely so that it cannot.
+///
+/// Panel-only. The status bar webview must not be able to drive the browser.
+#[tauri::command]
+async fn browser_action_dispatch<R: Runtime>(
+    window: Window<R>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+
+    let request_id = request
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .ok_or("request must carry request_id")?
+        .to_string();
+
+    let secret = keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
+        .and_then(|e| e.get_password())
+        .map_err(|_| "not paired with a browser".to_string())?;
+    let installation_id = browser_relay::relay()
+        .installation_id()
+        .ok_or("no browser relay connected")?;
+
+    let now = browser_bridge::now_unix_ms();
+    let mut nonce_bytes = [0u8; 16];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = browser_bridge::base64url_encode(&nonce_bytes);
+    let message_id = uuid_v4_like(&browser_bridge::sha256_hex(
+        format!("{request_id}:{now}:{nonce}").as_bytes(),
+    ));
+
+    let envelope = browser_bridge::sign_envelope_hmac(
+        &message_id,
+        &installation_id,
+        &store::iso_from_unix_ms(now),
+        &nonce,
+        serde_json::json!({ "type": "browser_action_request", "request": request }),
+        &secret,
+    )
+    .ok_or("cannot sign the action request")?;
+
+    // Interest is registered BEFORE the push: the extension can answer faster than
+    // this thread gets back from `push`, and a result with no waiter is dropped.
+    tauri::async_runtime::spawn_blocking(move || {
+        let relay = browser_relay::relay();
+        let rx = relay.begin(&request_id);
+        if let Err(e) = relay.push(&envelope) {
+            relay.abandon(&request_id);
+            return Err(e);
+        }
+        relay.wait(&request_id, rx, browser_relay::ACTION_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("dispatch thread failed: {e}"))?
 }
 
 /// Explicit “Delete this device's data”: removes the database and Keychain key.
@@ -2009,6 +2229,14 @@ use observer::{ObserverGate, ObserverStatus};
 /// Live observer status, surfaced to the pet UI (honest, never a silent degrade).
 pub struct ObserverState(pub std::sync::Mutex<ObserverStatus>);
 
+/// Control lines waiting to be written to the observer's stdin.
+///
+/// The supervisor owns that pipe inside its loop, so a Tauri command cannot write
+/// to it directly. Commands push a line here and the supervisor drains it on its
+/// existing ~2s tick — which also means a queued line is DROPPED when the observer
+/// is not running, rather than starting a session against a dead child.
+pub struct TeachControlState(pub std::sync::Mutex<Vec<String>>);
+
 fn set_observer_status<R: Runtime>(app: &AppHandle<R>, status: ObserverStatus) {
     if let Some(state) = app.try_state::<ObserverState>() {
         if let Ok(mut guard) = state.0.lock() {
@@ -2131,6 +2359,79 @@ async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_jso
     record_observation_stats(app, &deltas);
 }
 
+/// Handles one masked Teach Mode frame: send it to the vision API, turn the
+/// answer into a canonical event, and DROP THE PIXELS.
+///
+/// The safety decision already happened in the observer's egress gate, before
+/// these bytes crossed the pipe. What is left here is transport and translation,
+/// and one rule: `jpeg_b64` is never logged, never persisted, and never attached
+/// to the event that results from it.
+async fn ingest_teach_frame<R: Runtime>(
+    app: &AppHandle<R>,
+    client: &reqwest::Client,
+    meta: &serde_json::Value,
+    jpeg_b64: &str,
+) {
+    let frame_id = meta.get("frame_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let session_id = meta.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    if frame_id.is_empty() || session_id.is_empty() {
+        return;
+    }
+
+    // Model + key come from configuration. Unset means Teach Mode infers nothing
+    // rather than guessing a model name in source.
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let model = std::env::var("ANTHROPIC_VISION_MODEL").unwrap_or_default();
+
+    let outcome = match vision::infer_frame(
+        client,
+        vision::FrameRequest {
+            frame_id,
+            session_id,
+            jpeg_b64,
+            api_key: &api_key,
+            model: &model,
+        },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // The reason is safe to surface; the frame is not part of it.
+            let _ = app.emit(
+                "teach:status",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "state": "inference_failed",
+                    "detail": e.to_string(),
+                }),
+            );
+            return;
+        }
+    };
+
+    // The webview owns interpretation: `interpretVisionResponse` parses this
+    // against the strict schema, drops anything under the confidence floor, and
+    // builds the canonical event. Model output stays untrusted data all the way
+    // through, and the pixels are already gone by this point.
+    //
+    // `usage` rides along so the panel can show what a session ACTUALLY spent next
+    // to what it estimated. An estimate nobody checks is a guess with a decimal
+    // point.
+    let _ = app.emit(
+        "teach:observation",
+        serde_json::json!({
+            "frame": meta,
+            "observation": outcome.observation,
+            "usage": {
+                "input_tokens": outcome.usage.input_tokens,
+                "output_tokens": outcome.usage.output_tokens,
+                "cache_read_tokens": outcome.usage.cache_read_tokens,
+            },
+        }),
+    );
+}
+
 /// Supervises the observer sidecar: spawns only when the gate allows, streams
 /// its JSONL over stdio into the ingest gate, and applies the restart policy.
 /// A quiet loop re-checks the gate so pause/consent changes start/stop it.
@@ -2140,6 +2441,12 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
 
     tauri::async_runtime::spawn(async move {
         let mut policy = observer::RestartPolicy::new();
+        // One client for the supervisor's life: connection reuse matters when a
+        // Teach session sends a frame every few seconds.
+        let vision_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         loop {
             let gate = load_observer_gate(&app);
             if !gate.should_observe() {
@@ -2223,6 +2530,17 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                             let _ = stdin.flush().await;
                         }
                     }
+                    // Teach Mode start/stop lines queued by the panel.
+                    let queued: Vec<String> = app
+                        .try_state::<TeachControlState>()
+                        .and_then(|s| s.0.lock().ok().map(|mut q| std::mem::take(&mut *q)))
+                        .unwrap_or_default();
+                    for line in queued {
+                        if let Some(stdin) = control_stdin.as_mut() {
+                            let _ = stdin.write_all(format!("{line}\n").as_bytes()).await;
+                            let _ = stdin.flush().await;
+                        }
+                    }
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(2),
                         lines.next_line(),
@@ -2241,6 +2559,24 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                                 // Transient UI state only: dock the subtitle bar
                                 // to the monitored window. Nothing is stored.
                                 dock_statusbar(&app, frame);
+                            }
+                            observer::ObserverLine::TeachFrame { meta, jpeg_b64 } => {
+                                // Awaited rather than spawned: a vision call per
+                                // frame, run serially, is what keeps a 15-minute
+                                // session from issuing hundreds of concurrent
+                                // requests. The observer's own 2.5s cadence plus
+                                // its in-flight guard mean nothing queues up here.
+                                ingest_teach_frame(&app, &vision_client, &meta, &jpeg_b64).await;
+                            }
+                            observer::ObserverLine::TeachStatus { session_id, state, detail } => {
+                                let _ = app.emit(
+                                    "teach:status",
+                                    serde_json::json!({
+                                        "session_id": session_id,
+                                        "state": state,
+                                        "detail": detail,
+                                    }),
+                                );
                             }
                             observer::ObserverLine::Heartbeat { .. }
                             | observer::ObserverLine::Hello { .. }
@@ -2291,6 +2627,7 @@ pub fn run() {
         .manage(KeyAcquireState(store::GuardedKeyAcquire::new()))
         .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
         .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
+        .manage(TeachControlState(std::sync::Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![
             settings_load,
             settings_save,
@@ -2344,6 +2681,10 @@ pub fn run() {
             statusbar_set_visible,
             statusbar_position_save,
             statusbar_position_reset,
+            browser_relay_status,
+            teach_mode_start,
+            teach_mode_stop,
+            browser_action_dispatch,
             statusbar_apply_click_through,
             open_accessibility_settings
         ])
@@ -2411,6 +2752,24 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod teach_mode_default_tests {
+    use super::GateSettings;
+
+    #[test]
+    fn teach_mode_is_off_in_a_default_gate_settings() {
+        // Every failure path in load_gate_settings falls back to Default. A missing
+        // or unparseable settings file must never be the reason screen capture
+        // becomes possible, so the default is asserted rather than assumed.
+        let defaults = GateSettings::default();
+        assert!(!defaults.teach_mode_enabled, "Teach Mode must default to OFF");
+        assert!(
+            !defaults.observe_all_apps,
+            "observe-all must default to OFF for the same reason"
+        );
+    }
+}
+
+#[cfg(test)]
 mod gate_tests {
     use super::{gate_event, GateSettings};
     use serde_json::json;
@@ -2422,6 +2781,7 @@ mod gate_tests {
             allowlist_domains: vec!["salesforce.com".into(), "docs.google.com".into()],
             allowlist_bundles: vec!["com.google.Chrome".into()],
             observe_all_apps: false,
+            teach_mode_enabled: false,
         }
     }
 
@@ -2662,6 +3022,7 @@ mod label_pattern_tests {
             allowlist_domains: vec!["salesforce.com".into()],
             allowlist_bundles: vec!["com.google.Chrome".into()],
             observe_all_apps: false,
+            teach_mode_enabled: false,
         };
         let line = observer_configure_line(&settings, &["INV-".into(), "invoice".into()], "com.maman.desktop");
         let json: serde_json::Value = serde_json::from_str(&line).unwrap();

@@ -13,7 +13,33 @@ distilled rules below are binding for all code in this repository.
   logging to make a test pass.
 - LLM output is untrusted data: parse against strict Zod schemas, policy-check, and
   reject safely. The LLM may never change eligibility, risk, permissions, or value.
-- Raw captured pixels never cross the device boundary. Raw typed input is never collected.
+- **Raw typed input is never collected.** No exceptions, no setting, no mode. Nothing
+  in this codebase reads a key event.
+- **Pixels leave the device only inside an explicit Teach Mode session**, and only
+  after the on-device redaction pass has cleared the frame. This AMENDS the earlier
+  rule "raw captured pixels never cross the device boundary", which was true until
+  Teach Mode (M33) and is no longer. The owner authorised the change deliberately,
+  in exchange for vision-derived action inference; the constraints that survive it
+  are not negotiable and are enforced in `packages/teach-mode/src/redact.ts`:
+  - A session is user-started, scoped to chosen apps, and self-terminating (≤900s).
+    There is no default-on capture and no way to leave it running.
+  - `frameEgressDecision` FAILS CLOSED: no session, an expired box, a paused user,
+    an unidentifiable app, a hard-denied app, a private app (including Maman
+    itself), private browsing, a focused secure field, an out-of-scope app, or a
+    frame that would be more mask than picture — every one refuses the whole frame.
+  - Credential-shaped regions are masked BEFORE egress, because "secret material
+    never enters prompts" was not waived and a frame is now prompt content.
+  - Pixels are never persisted, synced or logged. `containsForbiddenEventField`
+    still rejects any payload with a `screenshot` field; frames are interpreted and
+    discarded, and only the derived canonical event is stored.
+  - Vision output cannot assert eligibility, risk, permissions or value — not
+    "is checked afterwards", but has nowhere to put them (`visionActionSchema`).
+  - Teach Mode is a THIRD source, not a replacement: it emits the same canonical
+    token, and its readings can be wrong rather than merely incomplete, so they are
+    dropped below a confidence floor and always attributed to `teach_mode`.
+  - Any user-facing copy describing what Maman can see must be updated in the same
+    change as any alteration to the above. The product must not describe behaviour
+    it does not have.
 - Secret material never enters logs, analytics, prompts, or AgentSpec.
 - Cross-tenant resources return 404 (never 403). Every repository call requires TenantContext.
 - Deterministic logic for security, policy, cost, and workflow execution. LLM only for

@@ -32,6 +32,13 @@ export const serverEnvSchema = z
     ANTHROPIC_API_KEY: z.string().optional(),
     ANTHROPIC_CLASSIFIER_MODEL: z.string().optional(),
     ANTHROPIC_COMPILER_MODEL: z.string().optional(),
+    /**
+     * Vision model for Teach Mode frame interpretation. Read by the Rust core,
+     * which is where the request originates — the Swift observer has no network
+     * code and the webview may not talk HTTP. Unset means Teach Mode captures
+     * nothing rather than falling back to a hardcoded model name.
+     */
+    ANTHROPIC_VISION_MODEL: z.string().optional(),
     SALESFORCE_CLIENT_ID: z.string().optional(),
     SALESFORCE_CLIENT_SECRET: z.string().optional(),
     SALESFORCE_REDIRECT_URI: z.string().optional(),

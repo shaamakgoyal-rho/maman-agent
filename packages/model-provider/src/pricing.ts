@@ -16,6 +16,30 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrice> = {
 };
 
 /**
+ * Price used to quote a Teach Mode session before the user starts it.
+ *
+ * Resolved from the configured vision model when it is priced above, and otherwise
+ * from the DEAREST known price rather than zero. Quoting $0 for an unpriced model
+ * would understate a real spend, and understating the cost of the one feature that
+ * sends pictures of someone's screen somewhere is the wrong direction to be wrong
+ * in.
+ */
+export function visionSessionPrice(
+  modelAlias: string,
+  prices: Record<string, ModelPrice> = DEFAULT_MODEL_PRICES,
+): ModelPrice {
+  const known = prices[modelAlias];
+  if (known) return known;
+  if (modelAlias === "" || modelAlias === "demo") {
+    return { input_per_mtok_usd: 0, output_per_mtok_usd: 0 };
+  }
+  return Object.values(prices).reduce(
+    (dearest, price) => (price.input_per_mtok_usd > dearest.input_per_mtok_usd ? price : dearest),
+    { input_per_mtok_usd: 0, output_per_mtok_usd: 0 },
+  );
+}
+
+/**
  * Cost for a single model call. An unknown alias costs 0 but is reported so the
  * caller can surface "unpriced model" rather than silently under-count — here
  * we return 0 and let the alias travel with the usage for auditing.

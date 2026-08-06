@@ -1,0 +1,30 @@
+{
+  "name": "@maman/teach-mode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "egress-conformance": "tsx scripts/generate-egress-conformance.ts",
+    "egress-conformance:check": "tsx scripts/generate-egress-conformance.ts --check",
+    "vision-probe": "tsx scripts/vision-probe.ts"
+  },
+  "dependencies": {
+    "@maman/contracts": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@maman/tsconfig": "workspace:*",
+    "@vitest/coverage-v8": "^3.2.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7"
+  }
+}

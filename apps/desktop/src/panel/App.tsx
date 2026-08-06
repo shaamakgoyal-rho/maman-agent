@@ -10,8 +10,9 @@ import { Settings } from "./screens/Settings.js";
 import { Activity } from "./screens/Activity.js";
 import { Suggestions } from "./screens/Suggestions.js";
 import { Agents } from "./screens/Agents.js";
+import { Teach } from "./screens/Teach.js";
 
-const TABS = ["Home", "Suggestions", "Agents", "Activity", "Privacy", "Settings"] as const;
+const TABS = ["Home", "Suggestions", "Agents", "Teach", "Activity", "Privacy", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App() {
@@ -136,6 +137,7 @@ export function App() {
         {tab === "Home" && <Home petState={petState} />}
         {tab === "Suggestions" && <Suggestions />}
         {tab === "Agents" && <Agents />}
+        {tab === "Teach" && <Teach />}
         {tab === "Activity" && <Activity />}
         {tab === "Privacy" && <Privacy />}
         {tab === "Settings" && <Settings />}
