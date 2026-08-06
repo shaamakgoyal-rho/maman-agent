@@ -108,3 +108,22 @@ production). No framework, no build step, dark-mode aware.
 `all_except_custom_domains`, which redirects every `.vercel.app` visitor to a Vercel
 login — a status-code check still returns 200 because the _login page_ returns 200,
 so verify page CONTENT after deploying, not the status.
+
+### Connecting it to git (one-time, must be done by a human)
+
+Until this is done, the live page is whatever was last pushed by hand, and it can
+drift from `apps/site/index.html`. Connecting git removes that failure mode.
+
+It cannot be automated from here: linking a **private** repo requires authorizing
+Vercel's GitHub App, which is an OAuth grant, and there is no API path that avoids
+it.
+
+1. Vercel → project `maman` → **Settings → Git → Connect Git Repository**
+2. Choose `shaamakgoyal-rho/maman-agent`, authorize the GitHub App when asked
+3. Production branch: `main`. Leave Root Directory **empty** — the root
+   `vercel.json` already points the build at `apps/site`
+4. Confirm **Settings → Deployment Protection → Vercel Authentication** is still off
+
+After that, a push to `main` that touches the page deploys it. `vercel.json` sets
+`installCommand`/`buildCommand` to no-ops so a git deploy never installs or builds
+the whole monorepo just to serve one static file.
