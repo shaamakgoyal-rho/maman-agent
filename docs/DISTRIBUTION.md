@@ -79,6 +79,25 @@ step 3 from its install list — both are written to be removed.
   `keychain_access_required` honestly rather than hanging.
 - **Consent before observation.** Nothing is watched until the user chooses. That is
   the product's premise, not an onboarding cost to optimise away.
+- **Screen Recording permission, if the user wants Teach Mode.** Same as
+  Accessibility: macOS reserves the grant for the user.
+
+## Teach Mode sends pictures of the screen to Anthropic
+
+This is the only part of Maman where data leaves the device as PIXELS rather than as
+a derived shape, so it is called out separately rather than buried in a permissions
+list. It supersedes the earlier claim that raw pixels never cross the device
+boundary, which was true until M33.
+
+- Off until the user enables it, and enabling it only makes a session _possible_.
+- A session is scoped to chosen apps, lasts at most 15 minutes, and stops itself.
+- Before any frame leaves, an on-device pass masks anything credential-shaped and
+  **withholds the whole frame** if a secure field has focus, the app is denied or
+  private, the window is incognito, or more of the frame would be masked than left.
+- Keystrokes are never read — in Teach Mode or anywhere. That one has no exception.
+- Frames are never written to disk and never synced; they are read once and dropped.
+- What the model reports can be _wrong_, unlike the rest of the observation, so
+  low-confidence readings are discarded and the rest are shown to the user.
 
 ## The download page
 

@@ -7,6 +7,7 @@
  * or freeform message fields, and never serializes the DOM.
  */
 import { buildSemanticEvent, type FieldDescriptor } from "./lib/semantic.js";
+import { executeBrowserAction, type ActuationContext } from "./lib/actuate.js";
 
 function describeField(el: Element): FieldDescriptor {
   const input = el as HTMLInputElement;
@@ -75,3 +76,23 @@ document.addEventListener(
 
 document.addEventListener("copy", () => void send("copy"), { capture: true, passive: true });
 document.addEventListener("paste", () => void send("paste"), { capture: true, passive: true });
+
+/**
+ * Supervised actuation. Page scripts cannot reach this listener at all — only
+ * other parts of this extension can send runtime messages, and the sender check
+ * below rejects anything else. That, rather than the request's token, is what
+ * makes it impossible for page content to trigger an action; the token stops a
+ * replay of one the desktop already spent.
+ */
+chrome.runtime.onMessage.addListener(
+  (
+    message: { type?: string; request?: unknown; context?: ActuationContext },
+    sender,
+    sendResponse,
+  ) => {
+    if (sender.id !== chrome.runtime.id) return false;
+    if (message.type !== "browser_action_request" || !message.context) return false;
+    sendResponse(executeBrowserAction(message.request, message.context, document, new Date()));
+    return false; // answered synchronously
+  },
+);

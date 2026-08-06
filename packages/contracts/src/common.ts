@@ -25,7 +25,20 @@ export const schemaVersion1 = z.literal(1);
 export const sensitivity = z.enum(["public", "internal", "confidential", "restricted"]);
 export type Sensitivity = z.infer<typeof sensitivity>;
 
-export const eventSource = z.enum(["macos_ax", "chrome", "salesforce", "google", "demo"]);
+export const eventSource = z.enum([
+  "macos_ax",
+  "chrome",
+  "salesforce",
+  "google",
+  "demo",
+  /**
+   * Actions derived from screen frames by a vision model during an explicit,
+   * time-boxed Teach Mode session. A separate source because its provenance is
+   * genuinely different: inferred rather than observed, and therefore droppable
+   * below a confidence floor. See `teach-mode.ts`.
+   */
+  "teach_mode",
+]);
 export type EventSource = z.infer<typeof eventSource>;
 
 export const appCategory = z.enum([

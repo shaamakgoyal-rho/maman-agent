@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { APP_PRESETS, ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
 import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { deleteAllEvents, deleteAppHistory, fetchTimeline } from "../../lib/events.js";
+import { browserActuationOrigins } from "../../lib/browserRun.js";
 import { Button, Card, Muted, SectionTitle, StatusPill, Toggle } from "../ui.js";
 
 type ObservationStats = {
@@ -17,6 +18,8 @@ type ObservationStats = {
 export function Privacy() {
   const { settings, update } = useSettings();
   const [newDomain, setNewDomain] = useState("");
+  const [newOrigin, setNewOrigin] = useState("");
+  const [originError, setOriginError] = useState<string | null>(null);
   const [stats, setStats] = useState<ObservationStats | null>(null);
   const [hardDenied, setHardDenied] = useState<string[]>([]);
   const [syncPreview, setSyncPreview] = useState<unknown[] | null>(null);
@@ -101,6 +104,35 @@ export function Privacy() {
     setNewDomain("");
   };
 
+  const removeActuationOrigin = (origin: string) =>
+    void update({
+      browser_actuation_origins: settings.browser_actuation_origins.filter((o) => o !== origin),
+    });
+
+  /**
+   * Accepts only what `browserActuationOrigins` will accept, and says so when it
+   * does not: an entry silently dropped later would look like the permission was
+   * granted when it was not.
+   */
+  const addActuationOrigin = () => {
+    setOriginError(null);
+    const entered = newOrigin.trim();
+    if (entered === "") return;
+    const [origin] = browserActuationOrigins([entered]);
+    if (origin === undefined) {
+      setOriginError("Give the full https:// address, e.g. https://your-org.my.salesforce.com");
+      return;
+    }
+    if (settings.browser_actuation_origins.includes(origin)) {
+      setNewOrigin("");
+      return;
+    }
+    void update({
+      browser_actuation_origins: [...settings.browser_actuation_origins, origin],
+    });
+    setNewOrigin("");
+  };
+
   const toggleApp = (bundleId: string, on: boolean) =>
     void update({
       allowlist_bundles: on
@@ -137,8 +169,56 @@ export function Privacy() {
           </div>
           <div className="flex items-center justify-between">
             <span>Screen Recording</span>
-            <StatusPill tone="muted">Teach Mode only — never granted in advance</StatusPill>
+            <StatusPill tone={settings.teach_mode_enabled ? "warning" : "muted"}>
+              {settings.teach_mode_enabled
+                ? "Teach Mode on — frames are sent to Anthropic"
+                : "Teach Mode only — never granted in advance"}
+            </StatusPill>
           </div>
+        </div>
+      </Card>
+
+      {/* The one place in the product where data leaves the device as PIXELS, so it
+          says so in the plainest words available. Everything else Maman collects is
+          a derived shape; this is the picture itself. */}
+      <Card>
+        <SectionTitle>Teach Mode (screen capture)</SectionTitle>
+        <Muted>
+          Off unless you turn it on. When you start a session, Maman captures frames of the apps you
+          picked and <strong>sends those pictures to Anthropic</strong> to work out what you did.
+          This is the only thing Maman does that sends images of your screen anywhere. Everything
+          else it collects is a shape — which kind of field, which app — never a picture.
+        </Muted>
+        <ul className="mt-2 space-y-1 text-[11px] text-muted">
+          <li>
+            · A session lasts at most 15 minutes and stops itself. There is no always-on mode.
+          </li>
+          <li>
+            · Only the apps you pick for that session. Anything else on screen is not captured.
+          </li>
+          <li>
+            · Before a frame is sent, Maman blanks out anything that looks like a password, card
+            number, API key, one-time code or password-manager popup — and if a password field has
+            focus, or too much of the screen would need blanking, the whole frame is thrown away
+            instead.
+          </li>
+          <li>· Keystrokes are never read. Not in Teach Mode, not anywhere, not as an option.</li>
+          <li>
+            · Frames are never saved to disk and never synced. They are read once and dropped.
+          </li>
+          <li>
+            · What Maman thinks it saw can be <em>wrong</em>, unlike the rest of its observation, so
+            it is shown to you and low-confidence readings are discarded.
+          </li>
+        </ul>
+        <div className="mt-2">
+          <Toggle
+            id="teach-mode-enabled"
+            checked={settings.teach_mode_enabled}
+            onChange={(on) => void update({ teach_mode_enabled: on })}
+            label="Allow Teach Mode sessions"
+            description="Turning this on does not start anything. It only makes starting a session possible."
+          />
         </div>
       </Card>
 
@@ -175,6 +255,52 @@ export function Privacy() {
             Allow
           </Button>
         </div>
+      </Card>
+
+      {/* WRITING to a site is a separate, larger permission than watching it, so it
+          is a separate list — and it is compared EXACTLY, which is why the full
+          origin is required rather than a domain. While this list is empty the
+          browser lane is off and a browser plan is refused rather than sent. */}
+      <Card>
+        <SectionTitle>Sites Maman may type into</SectionTitle>
+        <Muted>
+          Only for systems with no usable API. Every change is planned, shown to you action by
+          action, and needs your approval — and Maman refuses password, payment and one-time-code
+          fields outright. Give the full address, including https://, because it is matched exactly:
+          an org on its own subdomain has to be named as such.
+        </Muted>
+        {settings.browser_actuation_origins.length === 0 ? (
+          <Muted>No sites — Maman cannot type into anything.</Muted>
+        ) : (
+          <ul className="mt-1 space-y-1">
+            {settings.browser_actuation_origins.map((origin) => (
+              <li key={origin} className="flex items-center justify-between text-sm">
+                <span className="break-all">{origin}</span>
+                <Button
+                  variant="ghost"
+                  onClick={() => removeActuationOrigin(origin)}
+                  ariaLabel={`Stop writing to ${origin}`}
+                >
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-2 flex gap-2">
+          <input
+            value={newOrigin}
+            onChange={(e) => setNewOrigin(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addActuationOrigin()}
+            placeholder="full address, e.g. https://your-org.my.salesforce.com"
+            aria-label="Add a site Maman may type into"
+            className="flex-1 rounded-lg border border-line bg-panel px-2.5 py-1.5 text-sm placeholder:text-muted"
+          />
+          <Button variant="secondary" onClick={addActuationOrigin}>
+            Allow writing
+          </Button>
+        </div>
+        {originError && <p className="mt-1 text-xs text-danger">{originError}</p>}
       </Card>
 
       <Card>

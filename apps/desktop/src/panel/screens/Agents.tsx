@@ -3,6 +3,7 @@ import { describeAgentSpec } from "@maman/agent-runtime";
 import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
 import { useRuns } from "../../lib/runs.js";
+import { browserActuationOrigins } from "../../lib/browserRun.js";
 import { useServerRuns } from "../../lib/serverRuns.js";
 import { isTauri } from "../../lib/bridge.js";
 import { useEnrollment } from "../../state/enrollment.js";
@@ -204,6 +205,8 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
   const serverMode = isTauri() && settings.server_enabled && enrollment.phase === "enrolled";
   const runs = serverMode ? serverRuns : localRuns;
   const diff = runs.diff;
+  // Origins the user named for browser writes. Empty means the lane stays off.
+  const actuationOrigins = browserActuationOrigins(settings.browser_actuation_origins);
 
   const start = async (mode: "shadow" | "supervised") => {
     setStartError(null);
@@ -250,6 +253,35 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
           <Button variant="secondary" disabled={starting} onClick={() => void start("supervised")}>
             Run supervised
           </Button>
+        </div>
+      )}
+
+      {/* LANE. The API path is preferred and is the default; the browser path is
+          for systems with no usable API. Choosing it is the user's decision, never
+          an automatic fallback from a failed API write — a consequential step that
+          fails stops and asks. Only offered when a site has been named for
+          actuation, because without one there is nothing to check an origin against. */}
+      {runs.phase === "idle" && !serverMode && "setLane" in localRuns && (
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-[11px] text-muted">Write via</span>
+          <Button
+            variant={localRuns.lane === "api" ? "primary" : "secondary"}
+            onClick={() => localRuns.setLane("api")}
+          >
+            API
+          </Button>
+          <Button
+            variant={localRuns.lane === "browser" ? "primary" : "secondary"}
+            disabled={actuationOrigins.length === 0}
+            onClick={() => localRuns.setLane("browser", actuationOrigins)}
+          >
+            Browser
+          </Button>
+          {actuationOrigins.length === 0 && (
+            <span className="text-[11px] text-muted">
+              add a site under Settings → browser actuation to enable
+            </span>
+          )}
         </div>
       )}
       {starting && <Muted>Registering this agent on the server…</Muted>}
@@ -322,8 +354,43 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
             diff hash {runs.pending.diff_sha256.slice(0, 16)}… · {diff.summary.change_count} changes
             across {diff.summary.accounts_affected} accounts · destination Salesforce
           </p>
+
+          {/* THE PLAN, for a browser-lane run. "Update 4 fields" is not something
+              anyone can consent to when the mechanism is a real browser typing into
+              a real page, so the exact ordered actions are what is shown. */}
+          {"browserPlan" in runs && runs.browserPlan && (
+            <div className="mt-2 rounded border border-line bg-surface p-2">
+              <p className="text-[11px] font-medium text-ink">
+                In the browser, on {runs.browserPlan.record} — {runs.browserPlan.writes} action
+                {runs.browserPlan.writes === 1 ? "" : "s"} that change anything:
+              </p>
+              <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-[11px] text-muted">
+                {runs.browserPlan.lines.map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+              </ol>
+              {runs.browserPlan.deferred > 0 && (
+                <p className="mt-1 text-[11px] text-muted">
+                  {runs.browserPlan.deferred} change
+                  {runs.browserPlan.deferred === 1 ? " is" : "s are"} on other records (
+                  {runs.browserPlan.deferred_records.join(", ")}) and will be left alone — the
+                  browser acts on the page you have open.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* A plan that could not be built blocks the gate rather than offering an
+              approval that would fail on arrival. */}
+          {"browserPlanRefusal" in runs && runs.browserPlanRefusal && (
+            <p className="mt-2 text-[11px] text-danger">
+              No browser plan: {runs.browserPlanRefusal}
+            </p>
+          )}
+
           <div className="mt-2 flex gap-2">
             <Button
+              disabled={"browserPlanRefusal" in runs && Boolean(runs.browserPlanRefusal)}
               onClick={async () => {
                 await runs.approve();
                 // An approved run that COMPLETED counts toward earned autonomy.
@@ -335,10 +402,31 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
                 }
               }}
             >
-              Approve &amp; write once
+              {"browserPlan" in runs && runs.browserPlan
+                ? "Approve & do it in the browser"
+                : "Approve & write once"}
             </Button>
             <Button variant="secondary" onClick={() => void runs.reject()}>
               Reject
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* REVERT. Only offered when something was actually applied, and it is itself
+          a consequential write that goes through the same gate — reverting is not an
+          escape hatch from the rules the change was made under. */}
+      {"revertable" in runs && runs.revertable.length > 0 && (
+        <div className="mt-2 card border-line p-2">
+          <p className="text-xs font-medium text-ink">
+            {runs.revertable.length} change{runs.revertable.length === 1 ? "" : "s"} can be put back
+          </p>
+          <p className="mt-0.5 text-[11px] text-muted">
+            Restores what the page held before, and refuses if someone has changed the field since.
+          </p>
+          <div className="mt-2">
+            <Button variant="secondary" onClick={() => void localRuns.revert()}>
+              Revert
             </Button>
           </div>
         </div>

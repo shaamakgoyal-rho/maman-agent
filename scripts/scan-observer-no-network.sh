@@ -21,6 +21,27 @@ if grep -rnE "CGEventTap|addGlobalMonitorForEvents|addLocalMonitorForEvents|keyD
   FAIL=1
 fi
 
+# Teach Mode made the observer the only process that reads pixels. Frames live in
+# memory and go out on stdout; anything that could put them on disk is a new
+# invariant worth a grep, since a leaked frame is unrecoverable once written.
+echo "== scanning observer sources for frame-to-disk APIs"
+if grep -rnE "CGImageDestinationCreateWithURL|NSBitmapImageRep.*representation.*writeTo|\.write\(to:|FileManager\.default\.(createFile|copyItem|moveItem)|NSImage.*writeTo" \
+    "$PKG/Sources" 2>/dev/null; then
+  echo "FAIL: a frame-to-disk API found in observer sources" >&2
+  FAIL=1
+fi
+
+# Screen capture is allowed in exactly ONE file, so a second capture site cannot
+# appear without this failing and someone reading the reason.
+echo "== scanning for screen capture outside the Teach Mode capture file"
+CAPTURE_SITES=$(grep -rlE "SCScreenshotManager|SCStream|CGWindowListCreateImage|CGDisplayCreateImage" \
+  "$PKG/Sources" 2>/dev/null | grep -v "TeachCapture.swift" || true)
+if [[ -n "$CAPTURE_SITES" ]]; then
+  echo "FAIL: screen capture outside TeachCapture.swift:" >&2
+  echo "$CAPTURE_SITES" >&2
+  FAIL=1
+fi
+
 echo "== scanning dependency graph"
 if [[ -f "$PKG/Package.resolved" ]]; then
   if grep -iE "nio|network|alamofire|urlsession" "$PKG/Package.resolved"; then

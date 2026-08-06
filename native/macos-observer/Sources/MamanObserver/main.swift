@@ -29,6 +29,12 @@ final class ObserverRuntime {
     private var permissionErrorEmitted = false
 
     private let out = FileHandle.standardOutput
+    /// Teach Mode capture. Lazy so `emit` exists first; the closure retain cycle
+    /// is deliberate — the runtime is a process-lifetime singleton.
+    private lazy var teach = TeachModeCapture(
+        emit: { [unowned self] message in self.emit(message) },
+        state: { [unowned self] in (paused: self.paused, privateApps: self.privateApps) }
+    )
     private let identity = (
         device: ProcessInfo.processInfo.environment["MAMAN_DEVICE_ID"]
             ?? "00000000-0000-7000-8000-000000000000",
@@ -50,7 +56,7 @@ final class ObserverRuntime {
     func start() {
         emit(.hello(
             observerVersion: "0.1.0",
-            capabilities: ["macos_ax"],
+            capabilities: ["macos_ax", "teach_mode"],
             pid: ProcessInfo.processInfo.processIdentifier
         ))
 
@@ -112,13 +118,14 @@ final class ObserverRuntime {
             privateApps = privates
         case .pause: paused = true
         case .resume: paused = false
-        case .teachModeStart, .teachModeStop:
-            // Teach Mode shell: session management arrives with the panel flow.
-            // ScreenCaptureKit is invoked ONLY from an explicit session; frames
-            // stay in memory and are never written to disk.
-            emit(.error(code: "teach_mode_unavailable",
-                        message: "Teach Mode capture lands in a later milestone",
-                        fatal: false))
+        case let .teachModeStart(sessionId, maxSeconds, scopeBundleIds):
+            // ScreenCaptureKit is invoked ONLY from this explicit session; frames
+            // stay in memory and are never written to disk. The gate mirrored in
+            // TeachModeGate decides, per frame, whether anything may leave.
+            teach.start(
+                sessionId: sessionId, maxSeconds: maxSeconds, scopeBundleIds: scopeBundleIds)
+        case .teachModeStop:
+            teach.stop()
         case .shutdown:
             exit(0)
         }
@@ -413,4 +420,8 @@ final class ObserverRuntime {
     }
 }
 
-ObserverRuntime().start()
+// A named, process-lifetime binding, not a temporary: the runtime registers
+// weak-self observers and timers, and a temporary would be deallocatable the
+// moment start() were able to return.
+let runtime = ObserverRuntime()
+runtime.start()

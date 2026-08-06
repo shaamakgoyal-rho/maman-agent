@@ -3,7 +3,7 @@ import CryptoKit
 
 /// The WorkflowEvent shape the observer emits (subset builder — the Rust core
 /// re-validates against the full schema before persistence).
-public struct SemanticEvent: Encodable {
+public struct SemanticEvent: Encodable, Sendable {
     public let schemaVersion = 1
     public var eventId: String
     public var deviceId: String
@@ -20,7 +20,7 @@ public struct SemanticEvent: Encodable {
     public var sensitivity: String
     public var redaction: Redaction
 
-    public struct App: Encodable {
+    public struct App: Encodable, Sendable {
         public var bundleId: String?
         public var displayName: String
         enum CodingKeys: String, CodingKey {
@@ -31,7 +31,7 @@ public struct SemanticEvent: Encodable {
             self.displayName = displayName
         }
     }
-    public struct Target: Encodable {
+    public struct Target: Encodable, Sendable {
         public var role: String?
         public var semanticType: String?
         public var stableIdHash: String?
@@ -46,7 +46,7 @@ public struct SemanticEvent: Encodable {
 
         /// One date read from a label. Deliberately has no field for the text it
         /// came from: there is no shape here that could carry content.
-        public struct LabelDate: Encodable, Equatable {
+        public struct LabelDate: Encodable, Equatable, Sendable {
             public let date: String
             public let confidence: Double
             public init(date: String, confidence: Double) {
@@ -72,7 +72,7 @@ public struct SemanticEvent: Encodable {
             self.labelDates = labelDates
         }
     }
-    public struct Context: Encodable {
+    public struct Context: Encodable, Sendable {
         public var pageType: String?
         public var objectType: String?
         enum CodingKeys: String, CodingKey {
@@ -83,7 +83,7 @@ public struct SemanticEvent: Encodable {
             self.objectType = objectType
         }
     }
-    public struct Redaction: Encodable {
+    public struct Redaction: Encodable, Sendable {
         public var applied: Bool
         public var reasons: [String]
         public init(applied: Bool, reasons: [String]) {

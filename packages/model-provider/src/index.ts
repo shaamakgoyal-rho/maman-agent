@@ -12,7 +12,13 @@ export {
 } from "./provider.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
-export { modelCostUsd, sumUsage, DEFAULT_MODEL_PRICES, type ModelPrice } from "./pricing.js";
+export {
+  modelCostUsd,
+  sumUsage,
+  visionSessionPrice,
+  DEFAULT_MODEL_PRICES,
+  type ModelPrice,
+} from "./pricing.js";
 
 import { DemoModelProvider } from "./demo.js";
 import { AnthropicModelProvider } from "./anthropic.js";

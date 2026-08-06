@@ -18,10 +18,20 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+/// Where the desktop core listens.
+///
+/// `MAMAN_BROWSER_HOST_SOCKET` overrides it so the relay can be exercised against
+/// a socket a test owns. Chrome cannot pass env vars to a native host, so this can
+/// never be set in the path Chrome launches — the same reason
+/// `MAMAN_ALLOWED_EXTENSION_IDS` has to fall back to the installed manifest.
 fn socket_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MAMAN_BROWSER_HOST_SOCKET") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
-        .join("Library/Application Support/com.maman.desktop/browser-host.sock")
+    PathBuf::from(home).join("Library/Application Support/com.maman.desktop/browser-host.sock")
 }
 
 /// Path of the installed native-messaging manifest (the file Chrome itself
@@ -95,6 +105,64 @@ fn allowed_extension_ids() -> Vec<String> {
     ids
 }
 
+/// Opens the PERSISTENT desktop connection that carries pushed action requests,
+/// registers this relay, and pumps every subsequent desktop line to Chrome.
+///
+/// Chrome runs this same binary two ways: `sendNativeMessage` launches a
+/// short-lived process for one request/response (pairing does this), while
+/// `connectNative` keeps one alive for the session. Only the long-lived one asks
+/// for a push channel, which is why registration is driven by an explicit
+/// `relay_open` from the extension rather than done unconditionally at startup —
+/// a one-shot process registering and immediately dying would keep replacing the
+/// live registration with a dead one.
+///
+/// This host still holds NO key material. It cannot read the requests it relays
+/// and cannot forge one: they are signed by the desktop and verified by the
+/// extension.
+fn open_relay_channel(
+    installation_id: &str,
+    stdout: std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
+) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket_path())
+        .map_err(|e| format!("desktop core unavailable: {e}"))?;
+    let register = serde_json::json!({
+        "type": "relay_register",
+        "installation_id": installation_id,
+    });
+    let line = serde_json::to_string(&register).map_err(|e| e.to_string())?;
+    stream
+        .write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    let read_half = stream.try_clone().map_err(|e| e.to_string())?;
+    // The stream must outlive this function: dropping it would close the channel
+    // the desktop just registered. The pump thread owns it from here.
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(read_half);
+        let mut first = String::new();
+        // The registration ack, consumed so it is not relayed to Chrome as if it
+        // were a pushed request.
+        if reader.read_line(&mut first).is_err() {
+            return;
+        }
+        let _keep_write_half_alive = stream;
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue; // not ours to interpret; dropping is the safe reading
+            };
+            let Ok(mut out) = stdout.lock() else { return };
+            if write_frame(&mut *out, &value).is_err() {
+                return; // Chrome closed the pipe
+            }
+        }
+    });
+    Ok(())
+}
+
 fn desktop_request(request: &serde_json::Value) -> Result<serde_json::Value, String> {
     let mut stream = UnixStream::connect(socket_path())
         .map_err(|e| format!("desktop core unavailable: {e}"))?;
@@ -108,18 +176,44 @@ fn desktop_request(request: &serde_json::Value) -> Result<serde_json::Value, Str
     serde_json::from_str(&response).map_err(|e| e.to_string())
 }
 
+/// Chrome's stdout is now written by two threads — this loop and the relay pump —
+/// so every frame goes out under the lock. Interleaved frames would corrupt the
+/// length-prefixed stream, which fails as a protocol error rather than as a
+/// visible bug.
+fn emit(stdout: &std::sync::Mutex<std::io::Stdout>, value: &serde_json::Value) {
+    if let Ok(mut out) = stdout.lock() {
+        let _ = write_frame(&mut *out, value);
+    }
+}
+
+/// Handles the extension asking for a push channel. Separate from
+/// `handle_message` because `relay_open` is not an envelope: it carries no payload
+/// to forward and gets no signature check, since granting it conveys nothing —
+/// see `open_relay_channel`.
+fn handle_relay_open(
+    message: &serde_json::Value,
+    stdout: &std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
+) -> serde_json::Value {
+    match message.get("installation_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => match open_relay_channel(id, stdout.clone()) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        },
+        _ => serde_json::json!({ "ok": false, "error": "missing installation_id" }),
+    }
+}
+
 fn main() {
     let origin = std::env::args().nth(1);
     let allowed = allowed_extension_ids();
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
     let mut reader = stdin.lock();
-    let mut writer = stdout.lock();
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let mut nonce_cache = NonceCache::default();
 
     if !origin_allowed(origin.as_deref(), &allowed) {
-        let _ = write_frame(
-            &mut writer,
+        emit(
+            &stdout,
             &serde_json::json!({ "ok": false, "error": "origin_denied" }),
         );
         return;
@@ -130,16 +224,20 @@ fn main() {
             Ok(Some(m)) => m,
             Ok(None) => return, // Chrome closed the pipe
             Err(e) => {
-                let _ = write_frame(
-                    &mut writer,
+                emit(
+                    &stdout,
                     &serde_json::json!({ "ok": false, "error": e.to_string() }),
                 );
                 continue;
             }
         };
 
-        let reply = handle_message(&message, origin.as_deref().unwrap_or(""), &mut nonce_cache);
-        let _ = write_frame(&mut writer, &reply);
+        let reply = if message.get("type").and_then(|v| v.as_str()) == Some("relay_open") {
+            handle_relay_open(&message, &stdout)
+        } else {
+            handle_message(&message, origin.as_deref().unwrap_or(""), &mut nonce_cache)
+        };
+        emit(&stdout, &reply);
     }
 }
 

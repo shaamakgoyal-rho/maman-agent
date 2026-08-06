@@ -86,15 +86,25 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(matchLabelPatterns(label: "invoice", patterns: []), [])
     }
 
-    func testTeachModeIsTimeBoxed() {
+    func testTeachModeIsTimeBoxedAndScoped() {
         XCTAssertEqual(
-            ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300}"#),
-            .teachModeStart(maxSeconds: 300)
+            ObserverControl.parse(
+                line: #"{"type":"teach_mode_start","max_seconds":300,"session_id":"s-1","scope_bundle_ids":["com.google.Chrome"]}"#),
+            .teachModeStart(
+                sessionId: "s-1", maxSeconds: 300, scopeBundleIds: ["com.google.Chrome"])
         )
         XCTAssertNil(
-            ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":901}"#),
+            ObserverControl.parse(
+                line: #"{"type":"teach_mode_start","max_seconds":901,"session_id":"s","scope_bundle_ids":["a"]}"#),
             "sessions above 15 minutes are rejected at the protocol layer"
         )
+        // A start without a session id or scope must NOT parse: scope is what makes
+        // starting a session something other than consent to film everything.
+        XCTAssertNil(
+            ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300}"#))
+        XCTAssertNil(
+            ObserverControl.parse(
+                line: #"{"type":"teach_mode_start","max_seconds":300,"session_id":"s","scope_bundle_ids":[]}"#))
     }
 
     func testUnknownControlTypesAreRejected() {

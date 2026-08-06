@@ -25,6 +25,14 @@ import {
 } from "@maman/contracts";
 import { emitAppEvent } from "./bridge.js";
 import type { StatusBeat } from "./status.js";
+import {
+  previewBrowserPlan,
+  runBrowserPlan,
+  revertBrowserRun,
+  changesForRecord,
+  type BrowserLaneResult,
+  type BrowserPlanPreview,
+} from "./browserRun.js";
 
 /**
  * Desktop-local run executor (Journeys E & F). Drives the SAME pure run engine
@@ -51,6 +59,32 @@ export type RunPhase =
 export type PendingApproval = { step_id: string; diff: ProposedDiff; diff_sha256: string };
 
 /**
+ * Which lane the write will actually use.
+ *
+ * `api` is the demo/connector path and is preferred — `capability-router` scores it
+ * above the browser. `browser` is for systems with no usable API, and it is the
+ * user's decision to take it, not an automatic fallback from a failed API write:
+ * a consequential step that fails stops and asks.
+ */
+export type RunLane = "api" | "browser";
+
+/**
+ * The exact actions a browser-lane run will perform, shown BEFORE approval.
+ *
+ * A diff summary ("update 4 fields") is not something anyone can consent to
+ * meaningfully when the mechanism is a real browser typing into a real page. These
+ * are the per-step lines the user reads instead.
+ */
+export type BrowserPlanView = {
+  lines: string[];
+  writes: number;
+  record: string;
+  /** Changes on records other than the one open in the browser. */
+  deferred: number;
+  deferred_records: string[];
+};
+
+/**
  * A run blocked by DOMAIN POLICY (L3) before anything executed. Distinct from
  * an approval: an approval is a gate the worker can pass, while a policy hold
  * means this agent may not perform the step at all (segregation of duties) or
@@ -68,13 +102,30 @@ export type PolicyHold = {
 type RunsStore = {
   phase: RunPhase;
   mode: "shadow" | "supervised";
+  lane: RunLane;
   diff: ProposedDiff | null;
   pending: PendingApproval | null;
+  /** The plan the user is approving, when the lane is the browser. */
+  browserPlan: BrowserPlanView | null;
+  /** Why a browser plan could not be built, named down to the change. */
+  browserPlanRefusal: string | null;
+  /** Set after a browser run applied something that could be put back. */
+  revertable: BrowserLaneResult["revertable"];
   /** Set when domain policy blocked the run before execution. */
   policyHold: PolicyHold | null;
   receipt: ExecutionReceipt | null;
   receiptSummary: string | null;
   error: string | null;
+  /** Origins actuation may touch, from the user's allowlist. Never hardcoded. */
+  browserOrigins: string[];
+  /**
+   * Chooses the lane for the next supervised run. `origins` comes from the
+   * settings allowlist: with none, a browser write has nothing to be checked
+   * against and the plan is refused rather than sent.
+   */
+  setLane: (lane: RunLane, origins?: readonly string[]) => void;
+  /** Undoes an applied browser run. Consequential, so it re-approves. */
+  revert: () => Promise<void>;
   startShadow: (
     candidate: PatternCandidate,
     generalizedIntent?: string,
@@ -200,7 +251,15 @@ function buildReceipt(
   diff: ProposedDiff,
   writes: { completed: number; verified: boolean } | null,
   interventionMs: number,
+  /**
+   * The lane the write actually used. This was hardcoded to "api" before the
+   * browser lane existed, which would have made every browser run's receipt claim
+   * an API call it never made — the receipt is the audit record, so it reports
+   * what happened rather than what was expected.
+   */
+  lane: RunLane = "api",
 ): ExecutionReceipt {
+  const writeSource = lane === "browser" ? "browser_extension" : "api";
   return {
     schema_version: 1,
     receipt_id: uuidv7(),
@@ -215,7 +274,9 @@ function buildReceipt(
     steps: spec.steps.map((s) => ({
       step_id: s.step_id,
       capability_id: s.capability_id,
-      source: "api",
+      // Reads still come from the API/demo adapters in both lanes; only the write
+      // step changes hands.
+      source: s.mode === "write" ? writeSource : "api",
       records_read: 0,
       writes_proposed: s.mode === "propose_write" ? diff.summary.change_count : 0,
       writes_completed: s.mode === "write" && writes ? writes.completed : 0,
@@ -260,11 +321,26 @@ function ctx(mode: "shadow" | "supervised"): CapabilityContext {
   return { run_id: activeRunId, organization_id: ORG, owner_user_id: OWNER, mode };
 }
 
+/**
+ * The plan compiled at the approval gate, held until the user approves.
+ *
+ * Deliberately NOT recomputed in `approve`: the user approves a specific list of
+ * actions, and rebuilding it afterwards would mean they consented to one plan and
+ * a different one ran. Staleness is handled instead by each write carrying the
+ * value it expects to find, so a page that moved on refuses rather than overwrites.
+ */
+let activeBrowserPlan: BrowserPlanPreview | null = null;
+
 export const useRuns = create<RunsStore>((set) => ({
   phase: "idle",
   mode: "shadow",
+  lane: "api",
+  browserOrigins: [],
   diff: null,
   pending: null,
+  browserPlan: null,
+  browserPlanRefusal: null,
+  revertable: [],
   policyHold: null,
   receipt: null,
   receiptSummary: null,
@@ -403,14 +479,99 @@ export const useRuns = create<RunsStore>((set) => ({
         });
         return;
       }
+      // BROWSER LANE: compile the plan NOW, so the approval the user gives is for
+      // the actions they read. A plan that cannot be built blocks the gate with the
+      // reason rather than presenting an approval that would fail on arrival.
+      activeBrowserPlan = null;
+      let browserPlan: BrowserPlanView | null = null;
+      let browserPlanRefusal: string | null = null;
+      if (useRuns.getState().lane === "browser") {
+        const planned =
+          useRuns.getState().browserOrigins.length === 0
+            ? {
+                ok: false as const,
+                reason:
+                  "no allow-listed origin for browser actuation — add the site in Settings first",
+              }
+            : previewBrowserPlan(pending.diff);
+        if (planned.ok) {
+          activeBrowserPlan = planned.preview;
+          browserPlan = {
+            lines: planned.preview.lines,
+            writes: planned.preview.writes,
+            record: planned.preview.record,
+            deferred: planned.preview.deferred,
+            deferred_records: planned.preview.deferred_records,
+          };
+        } else {
+          browserPlanRefusal = planned.reason;
+        }
+      }
+
       interventionStart = Date.now();
       await emitAppEvent({ type: "simulate_pet_event", event: "APPROVAL_REQUIRED" });
       await beat({ kind: "approval_needed", title: activeAgentName });
-      set({ phase: "waiting_approval", diff: pending.diff, pending });
+      set({
+        phase: "waiting_approval",
+        diff: pending.diff,
+        pending,
+        browserPlan,
+        browserPlanRefusal,
+      });
     } catch (e) {
       await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
       await beat({ kind: "run_failed", title: activeAgentName });
       set({ phase: "failed", error: e instanceof Error ? e.message : "run failed" });
+    }
+  },
+
+  setLane: (lane, origins) =>
+    set({
+      lane,
+      browserPlan: null,
+      browserPlanRefusal: null,
+      ...(origins === undefined ? {} : { browserOrigins: [...origins] }),
+    }),
+
+  revert: async () => {
+    const { revertable, lane } = useRuns.getState();
+    if (lane !== "browser" || revertable.length === 0) return;
+    set({ phase: "applying_write" });
+    try {
+      // A revert is a consequential write and goes through the same gate. The
+      // approval is the user pressing Revert; presence is implied by that, and
+      // policy still has to allow browser writes at all.
+      const result = await revertBrowserRun(revertable, {
+        runId: activeRunId,
+        routedSource: "browser_extension",
+        mode: "supervised",
+        allowSupervisedBrowserWrites: true,
+        approvalGranted: true,
+        userPresent: true,
+        allowedOrigins: useRuns.getState().browserOrigins,
+      });
+      if (!result.ok) {
+        set({ phase: "completed_with_warnings", error: `could not revert: ${result.reason}` });
+        return;
+      }
+      const clean = result.outcome.halted_at === null && result.outcome.all_writes_verified;
+      await beat({
+        kind: "run_done",
+        title: activeAgentName,
+        summary: clean
+          ? `put back ${result.outcome.writes_applied} changes`
+          : `revert stopped: ${result.outcome.halted_because ?? "unverified"}`,
+      });
+      set({
+        phase: clean ? "completed" : "completed_with_warnings",
+        revertable: clean ? [] : revertable,
+        ...(clean ? {} : { error: result.outcome.halted_because ?? "revert unverified" }),
+      });
+    } catch (e) {
+      set({
+        phase: "completed_with_warnings",
+        error: e instanceof Error ? e.message : "revert failed",
+      });
     }
   },
 
@@ -420,6 +581,95 @@ export const useRuns = create<RunsStore>((set) => ({
     if (!pending) return;
     await emitAppEvent({ type: "simulate_pet_event", event: "APPROVAL_RESOLVED" });
     set({ phase: "applying_write", pending: null });
+
+    // BROWSER LANE. Not a fallback from a failed API write — the lane was chosen
+    // before the run, and the plan was approved as read.
+    if (useRuns.getState().lane === "browser") {
+      if (activeBrowserPlan === null) {
+        set({ phase: "failed", error: "no approved browser plan" });
+        return;
+      }
+      try {
+        const scoped = changesForRecord(pending.diff, activeBrowserPlan.record);
+        const result = await runBrowserPlan(activeBrowserPlan, scoped.changes, {
+          runId: activeRunId,
+          routedSource: "browser_extension",
+          mode: "supervised",
+          allowSupervisedBrowserWrites: true,
+          approvalGranted: true,
+          userPresent: true,
+          allowedOrigins: useRuns.getState().browserOrigins,
+        });
+        set({ phase: "verifying" });
+        const interventionMs = Date.now() - interventionStart;
+        const writes = {
+          completed: result.outcome.writes_applied,
+          verified: result.outcome.all_writes_verified && result.outcome.halted_at === null,
+        };
+
+        // A HALTED RUN THAT APPLIED NOTHING IS A FAILURE, not a warning.
+        //
+        // Found by running it: with no relay connected, every step failed, yet the
+        // run reported "finished a read-only run, saved approximately 10 minutes"
+        // and counted toward earned autonomy. Zero writes made the receipt look
+        // read-only, and `completed_with_warnings` counts as a completed approved
+        // run. Nothing was written, nothing was saved, and nothing was earned.
+        if (result.outcome.halted_at !== null && writes.completed === 0) {
+          await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
+          await beat({ kind: "run_failed", title: activeAgentName });
+          set({
+            phase: "failed",
+            revertable: [],
+            error: result.outcome.halted_because ?? "the browser did not perform the plan",
+          });
+          return;
+        }
+
+        const receipt = buildReceipt(
+          activeSpec,
+          "supervised",
+          pending.diff,
+          writes,
+          interventionMs,
+          "browser",
+        );
+        const deferredNote =
+          activeBrowserPlan.deferred > 0
+            ? `; ${activeBrowserPlan.deferred} left on other records`
+            : "";
+        await emitAppEvent({
+          type: "simulate_pet_event",
+          event: writes.verified ? "RUN_SUCCEEDED" : "RUN_FAILED",
+        });
+        await beat(
+          writes.verified
+            ? {
+                kind: "run_done",
+                title: activeAgentName,
+                summary: `applied ${writes.completed} changes in the browser${deferredNote}`,
+              }
+            : { kind: "run_failed", title: activeAgentName },
+        );
+        set({
+          phase: writes.verified ? "completed" : "completed_with_warnings",
+          receipt,
+          receiptSummary: petReceiptSummary(receipt),
+          revertable: result.revertable,
+          // The halt reason is shown verbatim: "the browser refused:
+          // precondition_failed" tells the user their page changed under the plan,
+          // which a generic failure would not.
+          ...(result.outcome.halted_because === null
+            ? {}
+            : { error: result.outcome.halted_because }),
+        });
+      } catch (e) {
+        await emitAppEvent({ type: "simulate_pet_event", event: "RUN_FAILED" });
+        await beat({ kind: "run_failed", title: activeAgentName });
+        set({ phase: "failed", error: e instanceof Error ? e.message : "browser write failed" });
+      }
+      return;
+    }
+
     try {
       const registry = demoAdapterRegistry(activeWorld);
       const writeStep = activeSpec.steps.find((s) => s.mode === "write")!;
@@ -463,14 +713,19 @@ export const useRuns = create<RunsStore>((set) => ({
     set({ phase: "cancelled", pending: null });
   },
 
-  reset: () =>
+  reset: () => {
+    activeBrowserPlan = null;
     set({
       phase: "idle",
       diff: null,
       pending: null,
+      browserPlan: null,
+      browserPlanRefusal: null,
+      revertable: [],
       policyHold: null,
       receipt: null,
       receiptSummary: null,
       error: null,
-    }),
+    });
+  },
 }));

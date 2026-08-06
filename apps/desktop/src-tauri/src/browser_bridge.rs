@@ -129,6 +129,45 @@ pub fn verify_envelope_hmac(envelope: &serde_json::Value, secret_b64url: &str) -
         == 0
 }
 
+/// Signs an envelope exactly the way the extension's `signEnvelope` does.
+///
+/// This exists because actuation reverses the direction of the channel: until
+/// now the desktop only ever VERIFIED envelopes the extension sent. When the
+/// desktop pushes an action request the other way, the extension has to be able
+/// to tell that it came from here and not from the native host that relayed it —
+/// the host deliberately holds no key material, so relaying is all it can do.
+///
+/// The signed fields and their canonical form must stay identical to
+/// `verify_envelope_hmac` and to the extension's `signingInput`; the round-trip
+/// test below and the extension's own verify test are what keep the three in step.
+pub fn sign_envelope_hmac(
+    message_id: &str,
+    installation_id: &str,
+    timestamp: &str,
+    nonce: &str,
+    payload: serde_json::Value,
+    secret_b64url: &str,
+) -> Option<serde_json::Value> {
+    let signing_input = canonical_json(&serde_json::json!({
+        "message_id": message_id,
+        "installation_id": installation_id,
+        "timestamp": timestamp,
+        "nonce": nonce,
+        "payload": payload,
+    }));
+    let key = base64url_decode(secret_b64url)?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).ok()?;
+    mac.update(signing_input.as_bytes());
+    Some(serde_json::json!({
+        "message_id": message_id,
+        "installation_id": installation_id,
+        "timestamp": timestamp,
+        "nonce": nonce,
+        "payload": payload,
+        "signature": hex::encode(mac.finalize().into_bytes()),
+    }))
+}
+
 /// Converts a verified extension semantic shape into a full WorkflowEvent
 /// JSON value for the standard ingest pipeline.
 pub fn shape_to_workflow_event(
@@ -179,6 +218,120 @@ mod tests {
         let encoded = base64url_encode(&bytes);
         assert_eq!(encoded, SECRET);
         assert_eq!(base64url_decode(&encoded).unwrap(), bytes.to_vec());
+    }
+
+    #[test]
+    fn a_desktop_signed_envelope_verifies_and_a_tampered_one_does_not() {
+        let envelope = sign_envelope_hmac(
+            "msg-1",
+            "install-1",
+            "2026-08-05T12:00:00.000Z",
+            "nonce-1",
+            json!({"type": "browser_action_request", "request": {"step_id": "step-1"}}),
+            SECRET,
+        )
+        .expect("signs");
+        assert!(verify_envelope_hmac(&envelope, SECRET));
+
+        // Changing the payload after signing must invalidate it — otherwise a relay
+        // could swap the action for a different one on the way to the browser.
+        let mut swapped = envelope.clone();
+        swapped["payload"]["request"]["step_id"] = json!("step-2");
+        assert!(!verify_envelope_hmac(&swapped, SECRET));
+
+        // And a different secret must not verify it.
+        assert!(!verify_envelope_hmac(
+            &envelope,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+    }
+
+    #[test]
+    fn signing_covers_exactly_the_five_fields_the_extension_signs() {
+        let envelope = sign_envelope_hmac(
+            "msg-1",
+            "install-1",
+            "2026-08-05T12:00:00.000Z",
+            "nonce-1",
+            json!({"type": "browser_action_request"}),
+            SECRET,
+        )
+        .expect("signs");
+        // A field the extension does not sign must not change the signature, and the
+        // envelope must carry nothing beyond the five signed fields plus signature.
+        let mut keys: Vec<&str> = envelope.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "installation_id",
+                "message_id",
+                "nonce",
+                "payload",
+                "signature",
+                "timestamp"
+            ]
+        );
+    }
+
+    /// DRIFT CONTRACT. The desktop signs these envelopes and the extension
+    /// verifies them, in different languages. A change to canonical JSON or to the
+    /// set of signed fields on either side breaks actuation with no other symptom,
+    /// so both sides assert against the same committed fixture — and the fixture's
+    /// signature was produced by a third, independent implementation, so agreement
+    /// between them means the canonical form is genuinely pinned rather than two
+    /// copies of the same mistake.
+    ///
+    /// A MISSING fixture must FAIL, not skip: skipping quietly is how the two
+    /// implementations would be free to drift apart.
+    #[test]
+    fn envelope_signing_matches_the_committed_cross_language_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../domain/browser-envelope-conformance.json"
+        );
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("browser-envelope-conformance.json unreadable: {e}"));
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
+        let secret = fixture["secret_b64url"].as_str().expect("secret");
+        let expected = &fixture["envelope"];
+
+        // 1. The canonical string this implementation builds is byte-identical.
+        let signed_fields = serde_json::json!({
+            "message_id": expected["message_id"],
+            "installation_id": expected["installation_id"],
+            "timestamp": expected["timestamp"],
+            "nonce": expected["nonce"],
+            "payload": expected["payload"],
+        });
+        assert_eq!(
+            canonical_json(&signed_fields),
+            fixture["signing_input"].as_str().expect("signing_input"),
+            "canonical JSON drifted from the fixture"
+        );
+
+        // 2. Re-signing the same inputs reproduces the same signature.
+        let resigned = sign_envelope_hmac(
+            expected["message_id"].as_str().unwrap(),
+            expected["installation_id"].as_str().unwrap(),
+            expected["timestamp"].as_str().unwrap(),
+            expected["nonce"].as_str().unwrap(),
+            expected["payload"].clone(),
+            secret,
+        )
+        .expect("signs");
+        assert_eq!(
+            resigned["signature"], expected["signature"],
+            "signature drifted from the fixture"
+        );
+
+        // 3. And the committed envelope verifies as-is.
+        assert!(verify_envelope_hmac(expected, secret));
+    }
+
+    #[test]
+    fn signing_refuses_a_malformed_secret_rather_than_producing_a_weak_signature() {
+        assert!(sign_envelope_hmac("m", "i", "t", "n", json!({}), "not base64url!!!").is_none());
     }
 
     #[test]

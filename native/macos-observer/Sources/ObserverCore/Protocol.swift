@@ -2,7 +2,7 @@ import Foundation
 
 /// Observer → core messages, mirroring `observer-protocol.ts` in
 /// @maman/contracts. One JSON object per line over stdout.
-public enum ObserverMessage: Encodable {
+public enum ObserverMessage: Encodable, Sendable {
     case hello(observerVersion: String, capabilities: [String], pid: Int32)
     case event(SemanticEvent)
     case boundary(reason: BoundaryReason, occurredAt: String)
@@ -14,10 +14,19 @@ public enum ObserverMessage: Encodable {
     /// rectangle only. `frame: nil` means "nothing is being monitored right now",
     /// which detaches the bar rather than leaving it stuck to a stale position.
     case windowFrame(frame: WindowFrame?, occurredAt: String)
+    /// One MASKED Teach Mode frame, as an in-memory JPEG. The pixels ride the
+    /// pipe to the Rust core exactly once and exist nowhere else: never written
+    /// to disk, never logged, never persisted — the core forwards them to the
+    /// vision API and drops them. Everything the gate decided (mask count, app)
+    /// travels alongside as metadata.
+    case teachFrame(meta: TeachFrameMeta, jpegBase64: String)
+    /// Session lifecycle + per-frame refusals, so the UI can say honestly why
+    /// nothing is being learned. Carries a reason string, never content.
+    case teachStatus(sessionId: String, state: String, detail: String?, occurredAt: String)
 
     /// Logical points, top-left origin — the same convention as AX and as Tauri's
     /// logical coordinates, so no conversion happens anywhere in between.
-    public struct WindowFrame: Encodable, Equatable {
+    public struct WindowFrame: Encodable, Equatable, Sendable {
         public let x: Double
         public let y: Double
         public let width: Double
@@ -30,7 +39,37 @@ public enum ObserverMessage: Encodable {
         }
     }
 
-    public enum BoundaryReason: String, Encodable {
+    /// Metadata for one captured frame. Deliberately does NOT contain the
+    /// pixels — they travel as a sibling field, never inside a reusable shape.
+    public struct TeachFrameMeta: Encodable, Equatable, Sendable {
+        public let frameId: String
+        public let sessionId: String
+        public let capturedAt: String
+        public let bundleId: String
+        public let width: Int
+        public let height: Int
+        public let maskedRegions: Int
+
+        enum CodingKeys: String, CodingKey {
+            case frameId = "frame_id", sessionId = "session_id", capturedAt = "captured_at",
+                bundleId = "bundle_id", width, height, maskedRegions = "masked_regions"
+        }
+
+        public init(
+            frameId: String, sessionId: String, capturedAt: String, bundleId: String,
+            width: Int, height: Int, maskedRegions: Int
+        ) {
+            self.frameId = frameId
+            self.sessionId = sessionId
+            self.capturedAt = capturedAt
+            self.bundleId = bundleId
+            self.width = width
+            self.height = height
+            self.maskedRegions = maskedRegions
+        }
+    }
+
+    public enum BoundaryReason: String, Encodable, Sendable {
         case hardDenied = "hard_denied"
         case secureField = "secure_field"
         case privateWindow = "private_window"
@@ -40,7 +79,7 @@ public enum ObserverMessage: Encodable {
     enum CodingKeys: String, CodingKey {
         case type, observerVersion = "observer_version", capabilities, pid, event, reason,
             occurredAt = "occurred_at", eventsEmitted = "events_emitted", code, message, fatal,
-            frame
+            frame, jpegBase64 = "jpeg_b64", sessionId = "session_id", state, detail
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -73,6 +112,16 @@ public enum ObserverMessage: Encodable {
             // Explicit null rather than an omitted key: "monitoring stopped" is a
             // real state the core must act on, not an absence to be guessed at.
             try c.encode(frame, forKey: .frame)
+        case let .teachFrame(meta, jpegBase64):
+            try c.encode("teach_frame", forKey: .type)
+            try c.encode(meta, forKey: .frame)
+            try c.encode(jpegBase64, forKey: .jpegBase64)
+        case let .teachStatus(sessionId, state, detail, occurredAt):
+            try c.encode("teach_status", forKey: .type)
+            try c.encode(sessionId, forKey: .sessionId)
+            try c.encode(state, forKey: .state)
+            try c.encodeIfPresent(detail, forKey: .detail)
+            try c.encode(occurredAt, forKey: .occurredAt)
         }
     }
 
@@ -100,7 +149,7 @@ public enum ObserverControl: Equatable {
         labelPatterns: [String])
     case pause
     case resume
-    case teachModeStart(maxSeconds: Int)
+    case teachModeStart(sessionId: String, maxSeconds: Int, scopeBundleIds: [String])
     case teachModeStop
     case shutdown
 
@@ -120,8 +169,14 @@ public enum ObserverControl: Equatable {
         case "pause": return .pause
         case "resume": return .resume
         case "teach_mode_start":
-            guard let max = json["max_seconds"] as? Int, max >= 1, max <= 900 else { return nil }
-            return .teachModeStart(maxSeconds: max)
+            // ALL of these are required. A start without a session id cannot be
+            // correlated; one without scope would make starting a session consent
+            // to film everything — refusing to parse is the fail-closed answer.
+            guard let max = json["max_seconds"] as? Int, max >= 1, max <= 900,
+                let sessionId = json["session_id"] as? String, !sessionId.isEmpty,
+                let scope = json["scope_bundle_ids"] as? [String], !scope.isEmpty
+            else { return nil }
+            return .teachModeStart(sessionId: sessionId, maxSeconds: max, scopeBundleIds: scope)
         case "teach_mode_stop": return .teachModeStop
         case "shutdown": return .shutdown
         default: return nil

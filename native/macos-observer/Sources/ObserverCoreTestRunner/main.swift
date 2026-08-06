@@ -141,10 +141,15 @@ if let line = try? ObserverMessage.event(event).jsonLine(),
 }
 
 check(ObserverControl.parse(line: #"{"type":"pause"}"#) == .pause, "control pause parses")
-check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300}"#)
-      == .teachModeStart(maxSeconds: 300), "teach mode within box parses")
-check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":901}"#) == nil,
+check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300,"session_id":"s-1","scope_bundle_ids":["com.google.Chrome"]}"#)
+      == .teachModeStart(sessionId: "s-1", maxSeconds: 300, scopeBundleIds: ["com.google.Chrome"]),
+      "teach mode within box, with session + scope, parses")
+check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":901,"session_id":"s","scope_bundle_ids":["a"]}"#) == nil,
       "teach mode above 15 minutes rejected")
+check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300}"#) == nil,
+      "teach mode without session id + scope rejected — scope is not optional")
+check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300,"session_id":"s","scope_bundle_ids":[]}"#) == nil,
+      "teach mode with empty scope rejected")
 check(ObserverControl.parse(line: #"{"type":"capture_keystrokes"}"#) == nil,
       "unknown control types rejected (no keystroke channel)")
 
@@ -258,6 +263,112 @@ check(
     cleared.contains("\"frame\":null"),
     "a cleared frame is an explicit null, so the core detaches the bar"
 )
+
+// --- teach-mode egress gate: cross-language drift contract ---
+// domain/teach-egress-conformance.json is generated from the TS gate
+// (packages/teach-mode/src/redact.ts, the specification). The Swift mirror is
+// the copy that stands between captured pixels and the network, so a mismatch
+// here is a frame the specification would have refused. Missing fixture FAILS.
+struct TeachGateCase: Decodable {
+    struct Ctx: Decodable {
+        struct Sess: Decodable {
+            let session_id: String
+            let max_seconds: Int
+            let scope_bundle_ids: [String]
+        }
+        struct Region: Decodable {
+            let text: String
+            let x: Double
+            let y: Double
+            let width: Double
+            let height: Double
+            let secure: Bool
+        }
+        let session: Sess?
+        let bundle_id: String?
+        let elapsed_seconds: Double
+        let paused: Bool
+        let hard_denied_bundle_ids: [String]
+        let private_bundle_ids: [String]
+        let private_browsing: Bool
+        let secure_field_focused: Bool
+        let text_regions: [Region]
+    }
+    struct Expected: Decodable {
+        struct Mask: Decodable {
+            let x: Int
+            let y: Int
+            let width: Int
+            let height: Int
+            let reason: String
+        }
+        let send: Bool
+        let reason: String?
+        let masks: [Mask]
+    }
+    let name: String
+    let context: Ctx
+    let expected: Expected
+}
+struct TeachGateFixture: Decodable { let cases: [TeachGateCase] }
+
+let teachGatePath = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("domain/teach-egress-conformance.json")
+
+if let data = try? Data(contentsOf: teachGatePath),
+    let fixture = try? JSONDecoder().decode(TeachGateFixture.self, from: data)
+{
+    check(fixture.cases.count > 15, "teach-egress fixture has cases (\(fixture.cases.count))")
+    var gateMismatches: [String] = []
+    for c in fixture.cases {
+        let context = TeachModeGate.Context(
+            session: c.context.session.map {
+                TeachModeGate.Session(
+                    sessionId: $0.session_id, maxSeconds: $0.max_seconds,
+                    scopeBundleIds: $0.scope_bundle_ids)
+            },
+            bundleId: c.context.bundle_id,
+            elapsedSeconds: c.context.elapsed_seconds,
+            paused: c.context.paused,
+            hardDeniedBundleIds: c.context.hard_denied_bundle_ids,
+            privateBundleIds: c.context.private_bundle_ids,
+            privateBrowsing: c.context.private_browsing,
+            secureFieldFocused: c.context.secure_field_focused,
+            textRegions: c.context.text_regions.map {
+                TeachModeGate.TextRegion(
+                    text: $0.text, x: $0.x, y: $0.y, width: $0.width, height: $0.height,
+                    secure: $0.secure)
+            })
+        switch TeachModeGate.frameEgressDecision(context) {
+        case let .refuse(reason):
+            if c.expected.send || reason != c.expected.reason {
+                gateMismatches.append("\(c.name): swift refused (\(reason))")
+            }
+        case let .send(masks):
+            if !c.expected.send {
+                gateMismatches.append("\(c.name): swift sent, TS refused")
+            } else if masks.map({ [$0.x, $0.y, $0.width, $0.height] })
+                != c.expected.masks.map({ [$0.x, $0.y, $0.width, $0.height] })
+                || masks.map(\.reason) != c.expected.masks.map(\.reason)
+            {
+                gateMismatches.append("\(c.name): mask mismatch")
+            }
+        }
+    }
+    check(
+        gateMismatches.isEmpty,
+        "teach-egress gate matches TS on every case"
+            + (gateMismatches.isEmpty ? "" : " — " + gateMismatches.joined(separator: "; ")))
+} else {
+    // Deliberately a FAILURE, not a skip: a missing drift contract is how two
+    // implementations get to quietly disagree about what may leave the device.
+    check(false, "teach-egress-conformance.json missing or unreadable at \(teachGatePath.path)")
+}
 
 // The summary MUST stay at the very end of this file: it exits the process, so
 // any check written below it never runs (that silently disabled the
