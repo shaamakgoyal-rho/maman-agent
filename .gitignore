@@ -57,3 +57,5 @@ apps/desktop/src-tauri/binaries/
 # Cross-compile output for the universal observer sidecar (scripts/build-release-dmg.sh).
 native/macos-observer/.build-x86/
 dist/
+.vercel
+.env*
