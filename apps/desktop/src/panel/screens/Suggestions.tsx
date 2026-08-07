@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { describeProposedHelper } from "@maman/agent-runtime";
-import { stepPhrase } from "@maman/pattern-engine";
+import {
+  explainWorkflowSteps,
+  stepPhrase,
+  type WorkflowExplanation,
+  type AutomationStep,
+} from "@maman/pattern-engine";
 import { emitAppEvent } from "../../lib/bridge.js";
 import { useAgents } from "../../lib/agents.js";
 import {
@@ -209,6 +214,65 @@ function PipelineLegend({
   );
 }
 
+/** One automation chain as prose: exactly what the helper does for a step. */
+function automationPhrase(steps: AutomationStep[]): string {
+  const parts = steps.map((s) => {
+    if (s.mode === "read") return `${s.action} (reads only)`;
+    if (s.mode === "propose_write") return `${s.action} (shows you the change, writes nothing)`;
+    const reversal = s.reversible ? "" : "; not reversible";
+    return `${s.action} (writes once — only after you approve${reversal})`;
+  });
+  return parts.join(", then ");
+}
+
+/**
+ * The precision block: every observed step in order, with exactly what a
+ * helper would do about it. Derived from the same token → capability lookup
+ * feasibility scoring uses, so this list can never claim more automation than
+ * the engine scored. Steps a helper cannot or need not do say so explicitly.
+ */
+function StepByStepExplanation({ explanation }: { explanation: WorkflowExplanation }) {
+  let lastApp: string | null = null;
+  return (
+    <ol className="mt-1 space-y-1.5 text-xs list-decimal pl-4">
+      {explanation.steps.map((step) => {
+        const appChanged = step.app !== lastApp;
+        lastApp = step.app;
+        return (
+          <li key={step.order}>
+            <span className="text-ink">
+              {step.observed.charAt(0).toUpperCase() + step.observed.slice(1)}
+              {step.repeats > 1 && (
+                <span className="tabular-nums text-muted"> ×{step.repeats}</span>
+              )}
+              {appChanged && <span className="text-muted"> — in {step.app}</span>}
+            </span>
+            <p className="text-muted">
+              {step.automation.kind === "automated"
+                ? `→ Helper: ${automationPhrase(step.automation.steps)}`
+                : `→ ${step.automation.note}`}
+            </p>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/** One honest sentence on how much of the workflow the helper takes over. */
+function coverageLine(explanation: WorkflowExplanation): string | null {
+  if (explanation.work_step_count === 0) return null;
+  const scope =
+    explanation.automated_count === explanation.work_step_count
+      ? `Automates all ${explanation.work_step_count} work step${explanation.work_step_count === 1 ? "" : "s"}`
+      : `Automates ${explanation.automated_count} of ${explanation.work_step_count} work steps`;
+  if (explanation.automated_count === 0) return null;
+  const safety = explanation.read_only
+    ? "it would only read"
+    : "every change is shown first and each write needs your approval";
+  return `${scope} — ${safety}.`;
+}
+
 function FormingCard({
   item,
   expanded,
@@ -222,6 +286,7 @@ function FormingCard({
   // Same "what this actually is" line as a suggestion card: a workflow being
   // watched is just as opaque as one being offered if all you see is a name.
   const steps = stepPhrase(item.candidate.canonical_sequence);
+  const explanation = explainWorkflowSteps(item.candidate.canonical_sequence);
   return (
     <Card>
       <div className="flex items-start justify-between gap-2">
@@ -267,14 +332,12 @@ function FormingCard({
               ))}
             </ul>
           </div>
-          {item.steps.length > 0 && (
+          {explanation.steps.length > 0 && (
             <div>
-              <p className="text-xs font-medium text-ink">What I've seen (redacted)</p>
-              <ol className="mt-1 space-y-0.5 text-xs text-muted list-decimal pl-4">
-                {item.steps.slice(0, 6).map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ol>
+              <p className="text-xs font-medium text-ink">
+                Exactly what I've seen, and what a helper would do (redacted)
+              </p>
+              <StepByStepExplanation explanation={explanation} />
             </div>
           )}
         </div>
@@ -321,6 +384,8 @@ function SuggestionCard({
   // The observed step chain, in prose. Null when the tokens carry nothing worth
   // stating — better to omit the line than to pad the card.
   const steps = stepPhrase(item.candidate.canonical_sequence);
+  const explanation = explainWorkflowSteps(item.candidate.canonical_sequence);
+  const coverage = coverageLine(explanation);
   const divergences = v.results.filter((r) => r.verdict !== "match");
 
   return (
@@ -415,6 +480,7 @@ function SuggestionCard({
       {proposed.summary && (
         <>
           <p className="mt-1.5 text-sm text-ink">{proposed.summary}</p>
+          {coverage && <p className="mt-1 text-xs text-muted">{coverage}</p>}
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             {proposed.reads.length > 0 && (
               <StatusPill tone="muted">reads {proposed.reads.join(", ")}</StatusPill>
@@ -455,14 +521,10 @@ function SuggestionCard({
             </Muted>
           )}
           <div>
-            <p className="text-xs font-medium text-ink">What I noticed (typed events only)</p>
-            <ol className="mt-1 space-y-0.5 text-xs text-muted list-decimal pl-4">
-              {rec.evidence.redacted_steps.map((s) => (
-                <li key={s.order}>
-                  {s.action} {s.app}
-                </li>
-              ))}
-            </ol>
+            <p className="text-xs font-medium text-ink">
+              Exactly what happens, and what the helper would do (typed events only)
+            </p>
+            <StepByStepExplanation explanation={explanation} />
           </div>
         </div>
       )}

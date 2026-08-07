@@ -45,6 +45,13 @@ export {
   type WatchingPattern,
 } from "./engine.js";
 export { deterministicName, describeObserved, stepPhrase, type NamingResult } from "./naming.js";
+export {
+  explainWorkflowSteps,
+  type WorkflowExplanation,
+  type ObservedStepExplanation,
+  type StepAutomation,
+  type AutomationStep,
+} from "./explain.js";
 export { toPatternFeature, categorizeApp } from "./projection.js";
 export {
   replayCandidate,
