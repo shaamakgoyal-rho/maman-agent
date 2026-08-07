@@ -72,3 +72,4 @@ export {
   type RuntimeReadiness,
 } from "./runtime-capabilities.js";
 export type { MissingConfiguration } from "./compiler.js";
+export * from "./browser-adapters.js";

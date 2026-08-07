@@ -20,4 +20,7 @@ export {
   type CsvAccountRow,
   type SfAccount,
   type ProposedFieldChange,
+  isSfWritableField,
+  SF_WRITABLE_FIELDS,
+  type SfWritableField,
 } from "./salesforce.js";

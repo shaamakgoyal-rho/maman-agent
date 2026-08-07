@@ -3,6 +3,7 @@ import {
   DEMO_CSV_ROWS,
   DEMO_SF_ACCOUNTS,
   type CsvAccountRow,
+  isSfWritableField,
   type ProposedFieldChange,
   type SfAccount,
 } from "@maman/demo-fixtures";
@@ -292,6 +293,12 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
       for (const change of approvedDiff.changes) {
         const account = world.accounts.find((a) => a.id === change.account_id);
         if (!account) continue;
+        // EXPLICIT: only fields this adapter owns may be written. Previously the
+        // union type was the only thing stopping an arbitrary key being set on
+        // the account object; now a diff naming a field Salesforce does not have
+        // (e.g. a browser control's accessible name) is skipped rather than
+        // silently creating a property.
+        if (!isSfWritableField(change.field)) continue;
         if (change.field === "employee_count") {
           account.employee_count = Number(change.new_value);
         } else {
@@ -310,6 +317,7 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
       const changes = proposal?.changes ?? [];
       let confirmed = 0;
       for (const change of changes) {
+        if (!isSfWritableField(change.field)) continue;
         const account = world.accounts.find((a) => a.id === change.account_id);
         if (account && String(account[change.field]) === change.new_value) confirmed++;
       }

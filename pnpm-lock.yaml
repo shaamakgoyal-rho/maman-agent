@@ -410,6 +410,9 @@ importers:
 
   packages/agent-runtime:
     dependencies:
+      '@maman/browser-actuator':
+        specifier: workspace:*
+        version: link:../browser-actuator
       '@maman/capability-catalog':
         specifier: workspace:*
         version: link:../capability-catalog
