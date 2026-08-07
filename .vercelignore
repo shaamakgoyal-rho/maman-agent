@@ -1,0 +1,54 @@
+# What Vercel needs to serve the download page: vercel.json (which points the
+# build at apps/site) and apps/site itself. Nothing else.
+#
+# Without this, a deploy uploads the whole monorepo — 11.5 MB tracked, ~5.6 MB of
+# it the pet spritesheets — and `vercel deploy` fails outright with "Request body
+# too large. Limit: 10mb". It also keeps a git-connected deploy from shipping the
+# desktop app's assets to a CDN that has no use for them.
+#
+# `installCommand` and `buildCommand` in vercel.json are no-ops, so none of the
+# JS toolchain is needed either.
+#
+# CAREFUL: this file REPLACES Vercel's default ignores rather than adding to them.
+# Omitting node_modules here made a deploy attempt try to upload 663 MB and burn
+# the free upload quota ("more than 5000 requests, try again in 24 hours"). Every
+# build/dependency directory has to be listed explicitly.
+
+# Dependencies and build output — must be listed; nothing is ignored by default
+node_modules
+.git
+target
+dist
+.turbo
+.next
+coverage
+.build
+.build-x86
+playwright-report
+test-results
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
+native/browser-host/target
+
+# Workspaces that are not the site
+apps/api
+apps/desktop
+apps/e2e
+apps/web
+apps/worker
+packages
+extensions
+native
+deploy
+
+# Repo content with no bearing on a static page
+docs
+domain
+scripts
+*.md
+docker-compose.yml
+eslint.config.mjs
+tsconfig.base.json
+turbo.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
