@@ -4,3 +4,5 @@ export * from "./authorize.js";
 export * from "./verify.js";
 export * from "./plan.js";
 export * from "./execute.js";
+export * from "./inpage.js";
+export * from "./own-window.js";
