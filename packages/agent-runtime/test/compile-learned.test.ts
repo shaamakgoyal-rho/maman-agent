@@ -278,41 +278,47 @@ describe("secrets are references, never values", () => {
 });
 
 describe("a write must be checkable", () => {
-  it("rejects a write whose success condition is 'none'", () => {
-    expect(() =>
-      workflow({
-        steps: [
-          {
-            step_id: "fill",
-            order: 1,
-            description: "Type something",
-            capability_id: "browser.supervised_form_fill",
-            mode: "write",
-            target: { role: "textbox", name: "Phone" },
-            value: { kind: "constant", value: "x" },
-            success: { kind: "none" },
-          },
-        ],
-      } as never),
-    ).toThrow();
+  it("refuses to compile a write whose success condition is 'none'", () => {
+    const result = compileLearnedWorkflow(
+      request(
+        workflow({
+          steps: [
+            {
+              step_id: "fill",
+              order: 1,
+              description: "Type something",
+              capability_id: "browser.supervised_form_fill",
+              mode: "write",
+              target: { role: "textbox", name: "Phone" },
+              value: { kind: "constant", value: "x" },
+              success: { kind: "none" },
+            },
+          ],
+        } as never),
+      ),
+    );
+    expect(result.status).toBe("needs_configuration");
   });
 
-  it("rejects a write with no value source", () => {
-    expect(() =>
-      workflow({
-        steps: [
-          {
-            step_id: "fill",
-            order: 1,
-            description: "Type nothing",
-            capability_id: "browser.supervised_form_fill",
-            mode: "write",
-            target: { role: "textbox", name: "Phone" },
-            success: { kind: "readback_equals" },
-          },
-        ],
-      } as never),
-    ).toThrow();
+  it("refuses to compile a write with no value source", () => {
+    const result = compileLearnedWorkflow(
+      request(
+        workflow({
+          steps: [
+            {
+              step_id: "fill",
+              order: 1,
+              description: "Type nothing",
+              capability_id: "browser.supervised_form_fill",
+              mode: "write",
+              target: { role: "textbox", name: "Phone" },
+              success: { kind: "readback_equals" },
+            },
+          ],
+        } as never),
+      ),
+    );
+    expect(result.status).toBe("needs_configuration");
   });
 });
 

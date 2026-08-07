@@ -118,13 +118,17 @@ export const learnedStepSchema = z
     value: valueSourceSchema.optional(),
     success: successConditionSchema.default({ kind: "readback_equals" }),
   })
-  .strict()
-  .refine((s) => s.mode === "read" || s.value !== undefined, {
-    message: "a write step must say where its value comes from",
-  })
-  .refine((s) => s.mode === "read" || s.success.kind !== "none", {
-    message: "a write step must be checkable; 'none' is only valid for reads",
-  });
+  .strict();
+// NOTE: completeness is NOT enforced here.
+//
+// A workflow mid-teach is a real, representable state: its write steps have no
+// value yet, because supplying one is precisely what the user is being asked to
+// do. Refining that away made an unconfigured draft unserialisable, so the
+// user's partial work could not be saved.
+//
+// Completeness therefore lives in ONE place — `workflowReadiness` — which the
+// compiler calls before anything else. Two enforcement points would eventually
+// disagree, and the one that mattered would be whichever ran last.
 export type LearnedStep = z.infer<typeof learnedStepSchema>;
 
 /** What is still missing before this workflow can be compiled. */
@@ -237,6 +241,16 @@ export function workflowReadiness(workflow: LearnedWorkflow): {
         kind: "value",
         step_id: step.step_id,
         detail: `Step ${step.order} does not say where its value comes from.`,
+      });
+    }
+    // A write that cannot be checked cannot be reported as verified, so it may
+    // not compile at all. (Previously a schema refinement; moved here so the
+    // rule applies to complete workflows without making drafts unsaveable.)
+    if (step.mode !== "read" && step.success.kind === "none") {
+      missing.push({
+        kind: "success_condition",
+        step_id: step.step_id,
+        detail: `Step ${step.order} writes but has no way to check it worked.`,
       });
     }
     // A step_output reference must point at a step that actually precedes it —
