@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { describeProposedHelper } from "@maman/agent-runtime";
 import {
+  evaluateVerification,
   explainWorkflowSteps,
   stepPhrase,
   type WorkflowExplanation,
@@ -379,10 +380,16 @@ function SuggestionCard({
   const proposed = describeProposedHelper(rec.required_capabilities);
   const settings = useSettings((s) => s.settings);
   /** Replay numbers are only shown once enough runs exist for them to mean something. */
-  const replayProven =
-    v.runs_tested >= settings.verify_min_runs &&
-    v.runs_tested > 0 &&
-    v.runs_matched / v.runs_tested >= settings.verify_min_match_pct;
+  // ONE gate, shared with the engine and the store — never a second local
+  // re-derivation that could disagree (a local ratio check is exactly how a
+  // zero-step vacuous match previously earned a "verified" badge).
+  const verification = evaluateVerification(v, {
+    min_runs: settings.verify_min_runs,
+    min_match_pct: settings.verify_min_match_pct,
+  });
+  const replayProven = verification.verified;
+  /** Usable runs = tested minus those with nothing meaningful to compare. */
+  const usableRuns = v.runs_tested - v.runs_insufficient;
   const title = item.entry.custom_title ?? rec.title;
   // The observed step chain, in prose. Null when the tokens carry nothing worth
   // stating — better to omit the line than to pad the card.
@@ -433,13 +440,17 @@ function SuggestionCard({
           </button>
         )}
         {/* A template match is its own honest claim: recognized, counted — not
-            "verified". The verified pill needs a replay score with enough runs
-            behind it to mean something; at small N the verifier is
-            self-referential and 2/2 would be noise dressed as proof. */}
-        {rec.template && !replayProven ? (
+            "verified". The verified pill requires the FULL engine gate: real
+            executable steps, independent (held-out) runs, a nonzero alignment,
+            and no unresolved capability or input. Anything less says
+            "not checked yet" — the pill is never the default branch, because
+            when it was, a vacuous zero-step match wore it. */}
+        {replayProven ? (
+          <StatusPill tone="success">verified</StatusPill>
+        ) : rec.template ? (
           <StatusPill tone="primary">known workflow</StatusPill>
         ) : (
-          <StatusPill tone="success">verified</StatusPill>
+          <StatusPill tone="muted">not checked yet</StatusPill>
         )}
       </div>
 
@@ -465,18 +476,30 @@ function SuggestionCard({
           </p>
           {replayProven && (
             <p className="mt-1 text-sm text-ink">
-              I also tested it against your last{" "}
-              <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+              I also checked it against{" "}
+              <span className="font-semibold tabular-nums">{usableRuns}</span> of your runs it had
+              not learned from, and matched{" "}
               <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
             </p>
           )}
         </>
-      ) : (
-        /* The proof — every number here is a real replayed run. */
+      ) : replayProven ? (
+        /* The proof. "Runs it had not learned from" is the load-bearing part:
+           every run here was held out, and each comparison had real executable
+           steps on both sides. */
         <p className="mt-1 text-sm text-ink">
-          I can do this for you — I tested it against your last{" "}
-          <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+          I can do this for you — I checked it against{" "}
+          <span className="font-semibold tabular-nums">{usableRuns}</span> of your runs it had not
+          learned from, and matched{" "}
           <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
+        </p>
+      ) : (
+        /* NOT verified. Say so, and say why, rather than showing a score that
+           looks like proof. */
+        <p className="mt-1 text-sm text-ink">
+          I think I could do this for you, but{" "}
+          <span className="font-semibold">I have not been able to check it yet</span>
+          {verification.reason ? ` — ${verification.reason}` : ""}.
         </p>
       )}
       <Muted>
@@ -509,6 +532,32 @@ function SuggestionCard({
 
       {expanded && (
         <div className="mt-2 space-y-2">
+          {/* HOW the check was done, not just its score. A reader cannot judge
+              "matched 21 of 21" without knowing whether those runs were held
+              out and whether anything executable was compared at all. */}
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted">How I checked</dt>
+            <dd className="text-right text-ink">
+              {v.validation_method === "leave_one_out"
+                ? "each run checked against the others"
+                : v.validation_method === "holdout"
+                  ? "checked against runs held back"
+                  : "checked against the runs it learned from (proves nothing)"}
+            </dd>
+            <dt className="text-muted">Steps it can actually check</dt>
+            <dd className="text-right tabular-nums text-ink">{v.meaningful_expected_steps}</dd>
+            <dt className="text-muted">Runs usable for checking</dt>
+            <dd className="text-right tabular-nums text-ink">
+              {usableRuns} of {v.runs_tested}
+            </dd>
+            <dt className="text-muted">Best step alignment</dt>
+            <dd className="text-right tabular-nums text-ink">
+              {Math.max(0, ...v.results.map((r) => r.aligned_steps))}
+            </dd>
+          </dl>
+          {!replayProven && verification.reason && (
+            <Muted>Not verified: {verification.reason}.</Muted>
+          )}
           {/* The most recent runs, plus EVERY divergence — the imperfections are
               the honest part of the score and never hide behind "show more". */}
           <ul className="space-y-0.5 text-xs">
@@ -523,7 +572,9 @@ function SuggestionCard({
                   <span className="text-right text-muted">
                     {r.verdict === "match"
                       ? "matched"
-                      : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
+                      : r.verdict === "insufficient_evidence"
+                        ? (r.insufficiency_reason ?? "nothing checkable in this run")
+                        : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
                   </span>
                 </li>
               );

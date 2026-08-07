@@ -70,8 +70,15 @@ export function distinctDayCount(episodes: SegmentedEpisode[]): number {
   return new Set(episodes.map((e) => e.started_at.slice(0, 10))).size;
 }
 
-/** Representative canonical sequence: the episode closest to the cluster median length. */
-export function representativeSequence(episodes: SegmentedEpisode[]): string[] {
+/**
+ * Representative canonical sequence: the episode closest to the cluster median
+ * length. Takes only the token lists it actually reads, so leave-one-out
+ * validation can derive a training sequence from bare traces without
+ * fabricating the rest of a SegmentedEpisode.
+ */
+export function representativeSequence(
+  episodes: readonly Pick<SegmentedEpisode, "canonical_tokens">[],
+): string[] {
   const target = median(episodes.map((e) => e.canonical_tokens.length));
   let best = episodes[0]!;
   for (const e of episodes) {

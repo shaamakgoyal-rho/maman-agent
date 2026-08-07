@@ -2,8 +2,10 @@ import type { PatternCandidate, PatternFeatureEvent, Recommendation } from "@mam
 import { SHIPPED_PACKS } from "@maman/domain-packs";
 import {
   effectiveEligibility,
+  evaluateVerification,
   patternSignature,
-  replayCandidate,
+  replayCandidateLeaveOneOut,
+  representativeSequence,
   runPatternEngine,
   toPatternFeature,
   type ReplayReport,
@@ -220,7 +222,19 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
     const episodeById = new Map<string, SegmentedEpisode>(
       result.episodes.map((e) => [e.episode_id, e]),
     );
-    /** Replays the candidate agent against its own recorded runs. */
+    /**
+     * Replays the candidate against its recorded runs using INDEPENDENT
+     * validation: each run is held out and checked against a sequence derived
+     * from the others.
+     *
+     * The previous call replayed `candidate.canonical_sequence` — the medoid of
+     * these very episodes — against those same episodes, so a perfect score was
+     * close to a tautology. Worse, when the tokens carried no semantic_type or
+     * object_type (every token the live AX observer produces), the comparison
+     * had zero executable steps on both sides and the old replay returned
+     * "match" anyway: a real device reported "matched 21 of 21" and displayed a
+     * verified badge on 21 comparisons of nothing.
+     */
     const verify = (candidate: PatternCandidate): ReplayReport => {
       const traces = candidate.episode_ids
         .map((id) => episodeById.get(id))
@@ -230,12 +244,19 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
           started_at: e.started_at,
           tokens: e.canonical_tokens,
         }));
-      return replayCandidate(candidate.canonical_sequence, traces, settings.verify_window);
+      return replayCandidateLeaveOneOut(
+        traces,
+        (training) => representativeSequence(training.map((t) => ({ canonical_tokens: t.tokens }))),
+        settings.verify_window,
+      );
     };
-    const passesGate = (r: ReplayReport): boolean =>
-      r.runs_tested >= replayThresholds.min_runs &&
-      r.runs_tested > 0 &&
-      r.runs_matched / r.runs_tested >= replayThresholds.min_match_pct;
+    /**
+     * The badge gate now lives in the engine (`evaluateVerification`) so the
+     * zero-step, self-referential, and unresolved-requirement refusals cannot
+     * be re-implemented differently here. `reason` is carried to the card.
+     */
+    const gateOutcome = (r: ReplayReport) => evaluateVerification(r, replayThresholds);
+    const passesGate = (r: ReplayReport): boolean => gateOutcome(r).verified;
 
     /** Best-effort persistence: candidates + traces + verification land in the
      * device store so every card number traces to a real pattern_candidates

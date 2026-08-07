@@ -55,10 +55,15 @@ export {
 export { toPatternFeature, categorizeApp } from "./projection.js";
 export {
   replayCandidate,
+  replayCandidateLeaveOneOut,
   replayAgainstTrace,
+  evaluateVerification,
   humanizeToken,
   type ReplayReport,
   type ReplayRunResult,
   type ReplayVerdict,
+  type ValidationMethod,
+  type VerificationGate,
+  type VerificationOutcome,
   type EpisodeTrace,
 } from "./replay.js";
