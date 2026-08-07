@@ -24,6 +24,9 @@ import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui
  * suggest this, This is wrong.
  */
 
+/** Runs shown in the run-by-run list before "Show more" (divergences always show). */
+const RUNS_SHOWN = 5;
+
 const FILTERS = ["New", "Snoozed", "Accepted", "Dismissed"] as const;
 type Filter = (typeof FILTERS)[number];
 
@@ -387,6 +390,13 @@ function SuggestionCard({
   const explanation = explainWorkflowSteps(item.candidate.canonical_sequence);
   const coverage = coverageLine(explanation);
   const divergences = v.results.filter((r) => r.verdict !== "match");
+  // Run-by-run list: recent runs only by default. Divergent runs are always
+  // shown regardless of age, so collapsing can never make a score look
+  // cleaner than it is.
+  const [showAllRuns, setShowAllRuns] = useState(false);
+  const hiddenRunCount = showAllRuns
+    ? 0
+    : v.results.filter((r, i) => i >= RUNS_SHOWN && r.verdict === "match").length;
 
   return (
     <Card>
@@ -499,21 +509,36 @@ function SuggestionCard({
 
       {expanded && (
         <div className="mt-2 space-y-2">
+          {/* The most recent runs, plus EVERY divergence — the imperfections are
+              the honest part of the score and never hide behind "show more". */}
           <ul className="space-y-0.5 text-xs">
-            {v.results.map((r, i) => (
-              <li key={r.episode_id} className="flex items-start justify-between gap-2">
-                <span className={r.verdict === "match" ? "text-ink" : "text-muted"}>
-                  {r.verdict === "match" ? "✓" : "○"} Run {v.results.length - i} ·{" "}
-                  {new Date(r.started_at).toLocaleDateString()}
-                </span>
-                <span className="text-right text-muted">
-                  {r.verdict === "match"
-                    ? "matched"
-                    : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
-                </span>
-              </li>
-            ))}
+            {v.results.map((r, i) => {
+              if (!showAllRuns && i >= RUNS_SHOWN && r.verdict === "match") return null;
+              return (
+                <li key={r.episode_id} className="flex items-start justify-between gap-2">
+                  <span className={r.verdict === "match" ? "text-ink" : "text-muted"}>
+                    {r.verdict === "match" ? "✓" : "○"} Run {v.results.length - i} ·{" "}
+                    {new Date(r.started_at).toLocaleDateString()}
+                  </span>
+                  <span className="text-right text-muted">
+                    {r.verdict === "match"
+                      ? "matched"
+                      : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
+          {hiddenRunCount > 0 && (
+            <button className="text-xs text-primary" onClick={() => setShowAllRuns(true)}>
+              Show {hiddenRunCount} more run{hiddenRunCount === 1 ? "" : "s"}
+            </button>
+          )}
+          {showAllRuns && v.results.length > RUNS_SHOWN && (
+            <button className="text-xs text-primary" onClick={() => setShowAllRuns(false)}>
+              Show fewer runs
+            </button>
+          )}
           {divergences.length > 0 && (
             <Muted>
               The {divergences.length === 1 ? "divergence is" : "divergences are"} left in on

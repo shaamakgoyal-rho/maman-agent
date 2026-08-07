@@ -181,12 +181,83 @@ export function capabilityExists(id: string): boolean {
 }
 
 /**
+ * Roles that CANNOT hold a user-entered value. A `value_committed` on one of
+ * these is the page updating itself while the user works — the AX observer
+ * reports the value change either way, but no form was filled and no helper
+ * should claim it would fill one. Covers both role vocabularies: AX-prefixed
+ * (macOS observer) and lowercase ARIA-style (Chrome relay).
+ */
+export const NON_VALUE_HOLDING_ROLES: ReadonlySet<string> = new Set([
+  // macOS AX observer
+  "AXStaticText",
+  "AXImage",
+  "AXGroup",
+  "AXLink",
+  "AXButton",
+  "AXMenuItem",
+  "AXList",
+  "AXTable",
+  "AXRow",
+  "AXColumn",
+  "AXWebArea",
+  "AXWindow",
+  "AXHeading",
+  // Chrome relay (ARIA-style)
+  "row",
+  "grid",
+  "table",
+  "button",
+  "link",
+]);
+
+/**
+ * Roles a user genuinely edits. Exported so UI copy (pattern-engine explain)
+ * phrases agency from the same source of truth this mapping scores with.
+ */
+export const EDITABLE_VALUE_ROLES: ReadonlySet<string> = new Set([
+  // macOS AX observer
+  "AXTextField",
+  "AXTextArea",
+  "AXComboBox",
+  "AXCheckBox",
+  "AXRadioButton",
+  "AXPopUpButton",
+  "AXCell",
+  // Chrome relay (ARIA-style)
+  "textbox",
+  "textarea",
+  "input",
+  "field",
+  "searchbox",
+  "combobox",
+  "checkbox",
+  "cell",
+]);
+
+/**
  * Maps a canonical pattern token to candidate capability ids (used by
  * feasibility scoring and the deterministic compiler recipe).
  * Token shape: source:app_category:event_type:role:semantic:object
  */
 export function capabilitiesForToken(token: string): string[] {
-  const [, appCategory, eventType] = token.split(":");
+  const [, appCategory, eventType, targetRole] = token.split(":");
+  // ROLE-AWARE EXCEPTION: a browser value change on a role that cannot hold
+  // user input is the page updating itself, not the user filling a form. The
+  // honest automation for that step is reading the updated content — claiming
+  // a form fill would score (and later compile) a write the workflow never
+  // contained. Seen live: an AXStaticText step in the first real device
+  // pattern rendered as "a block of text updates → Helper: propose a form
+  // fill". Unknown/absent roles keep the write mapping (conservative: we
+  // cannot rule out an edit, and the write chain is propose-first and
+  // approval-gated either way).
+  if (
+    appCategory === "browser" &&
+    eventType === "value_committed" &&
+    targetRole !== undefined &&
+    NON_VALUE_HOLDING_ROLES.has(targetRole)
+  ) {
+    return ["browser.extract_structured_fields"];
+  }
   const key = `${appCategory}/${eventType}`;
   const table: Record<string, string[]> = {
     "crm/record_opened": ["salesforce.get_record"],
