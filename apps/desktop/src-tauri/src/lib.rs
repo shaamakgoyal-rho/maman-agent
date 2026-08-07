@@ -1100,7 +1100,7 @@ async fn events_pattern_features<R: Runtime>(
     guard
         .as_ref()
         .expect("initialized")
-        .pattern_features(limit.clamp(1, 10_000))
+        .pattern_features(limit.clamp(1, 50_000))
         .await
         .map_err(|e| e.to_string())
 }

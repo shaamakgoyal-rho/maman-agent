@@ -82,7 +82,11 @@ async function saveStateRaw(json: string): Promise<void> {
 
 export async function fetchPatternFeatures(): Promise<PatternFeatureEvent[]> {
   if (isTauri()) {
-    return invokeCommand<PatternFeatureEvent[]>("events_pattern_features", { limit: 10_000 });
+    // 50k ≈ weeks of dense observation. If the store holds more, the Rust side
+    // keeps the NEWEST 50k (ascending), so current behaviour is never the part
+    // that falls off — the first live store to cross 10k proved the old
+    // oldest-first cut silently hid the user's most recent work from the engine.
+    return invokeCommand<PatternFeatureEvent[]>("events_pattern_features", { limit: 50_000 });
   }
   return getMemoryRawEvents().map((e) => toPatternFeature(e));
 }
