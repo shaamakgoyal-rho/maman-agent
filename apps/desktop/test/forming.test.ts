@@ -128,3 +128,44 @@ describe("effective bars (live demo tuning)", () => {
     expect(Object.fromEntries(prod.gates.map((g) => [g.key, g]))["days"]!.met).toBe(false);
   });
 });
+
+describe("the feasibility gate distinguishes 'never' from 'not yet'", () => {
+  /**
+   * The bug this pins: a pattern with feasibility 0 can NEVER qualify (no step
+   * maps to a capability), while one at 0.5 might qualify with a small change.
+   * Both used to read "not yet", so a permanently-stuck pattern was
+   * indistinguishable from one about to arrive. A real machine sat at 0 for
+   * 10,439 events and the UI never said so.
+   */
+  const gate = (feasibility: number) =>
+    patternGates(candidate({ feasibility_score: feasibility })).gates.find(
+      (g) => g.key === "feasibility",
+    )!;
+
+  it("says plainly when nothing maps, rather than 'not yet'", () => {
+    const g = gate(0);
+    expect(g.met).toBe(false);
+    expect(g.detail).toBe("none of these steps map to something a helper can do");
+    expect(g.detail).not.toContain("not yet");
+  });
+
+  it("reports the shortfall as a number when it is partial", () => {
+    const g = gate(0.4);
+    expect(g.met).toBe(false);
+    expect(g.detail).toMatch(/40% of steps automatable \(need \d+%\)/);
+  });
+
+  it("reports the score when the gate is met", () => {
+    const g = gate(1);
+    expect(g.met).toBe(true);
+    expect(g.detail).toBe("100% of steps automatable");
+  });
+
+  it("shows the risk number instead of a bare verdict", () => {
+    const risky = patternGates(candidate({ risk_score: 0.95 })).gates.find(
+      (g) => g.key === "risk",
+    )!;
+    expect(risky.met).toBe(false);
+    expect(risky.detail).toMatch(/risk 95% \(limit \d+%\)/);
+  });
+});

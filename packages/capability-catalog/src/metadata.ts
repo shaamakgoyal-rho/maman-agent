@@ -204,11 +204,50 @@ export function capabilitiesForToken(token: string): string[] {
     "spreadsheet/paste_semantic": ["google_sheets.propose_write_range"],
     "spreadsheet/table_exported": ["local.generate_csv"],
     "spreadsheet/navigation": ["google_sheets.read_range"],
+    // Same omission as the `browser/` pair below, found by the vocabulary test
+    // rather than by looking: focusing a cell is reading a range, and without
+    // this a spreadsheet workflow observed live scored feasibility 0 too.
+    "spreadsheet/element_focused": ["google_sheets.read_range"],
     "email/navigation": ["gmail.search_metadata"],
     "email/record_opened": ["gmail.get_thread_metadata"],
     "calendar/navigation": ["google_calendar.list_events"],
     "browser/table_read": ["browser.extract_table"],
     "browser/record_opened": ["browser.extract_structured_fields"],
+    // THE EVENT TYPES THE LIVE macOS OBSERVER ACTUALLY EMITS.
+    //
+    // Without these, nothing observed on a real machine was ever automatable.
+    // The AX observer classifies a browser as `browser` (only the Chrome relay
+    // can narrow it to `crm`), and emits `element_focused` and `value_committed`
+    // — neither of which had a `browser/` entry. So every real token resolved to
+    // zero capabilities, `feasibilityScore` returned 0 for every candidate, and
+    // `min_feasibility` (0.6, a SAFETY bar the user cannot tune) rejected all of
+    // them. 10k observed events produced 438 episodes, 58 candidates and ZERO
+    // eligible ones, with no surface anywhere saying why.
+    //
+    // These two are honest rather than convenient: reading a field on a page and
+    // filling one in are exactly what `packages/browser-actuator` now does, so
+    // the feasibility claim is backed by a real execution lane. Propose-first
+    // ordering matches `crm/value_committed` above, and matters — feasibility
+    // inspects candidates[0], so the reversible propose step is what it sees.
+    "browser/element_focused": ["browser.extract_structured_fields"],
+    "browser/value_committed": ["browser.propose_form_fill", "browser.supervised_form_fill"],
   };
   return table[key] ?? [];
 }
+
+/**
+ * Event types that are CONTEXT, not work: switching app, focusing a window.
+ *
+ * Deliberately absent from the table above. There is no capability for "the user
+ * changed app", and inventing one to raise a feasibility score would be scoring
+ * a claim we cannot honour. They stay unmapped and dilute feasibility slightly,
+ * which is the correct signal: an episode that is mostly app-switching is mostly
+ * not automatable.
+ */
+export const CONTEXT_EVENT_TYPES: readonly string[] = [
+  "app_activated",
+  "window_focused",
+  "idle_started",
+  "idle_ended",
+  "boundary_redacted",
+];
