@@ -2,7 +2,7 @@ import {
   capabilitiesForToken,
   getCapability,
   CONTEXT_EVENT_TYPES,
-  EDITABLE_VALUE_ROLES,
+  NON_VALUE_HOLDING_ROLES,
 } from "@maman/capability-catalog";
 
 /**
@@ -115,14 +115,9 @@ const ROLE_NOUNS: Record<string, string> = {
   link: "a link",
 };
 
-/** Roles whose value a USER edits; value_committed on anything else is the
- * page updating itself while the user works, and must not be described as
- * the user typing. Shared with the capability catalog so the phrase and the
- * automation verdict can never drift apart — the catalog maps a value change
- * on a non-value-holding role to a READ, and this phrases it as an update. */
-const EDITABLE_ROLES = EDITABLE_VALUE_ROLES;
-
-function roleNoun(role: string): string | null {
+/** "a text field" for AXTextField — exported so naming (titles, summaries)
+ * describes targets with the same words the step-by-step explanation uses. */
+export function roleNoun(role: string): string | null {
   if (!role || role === "-") return null;
   if (ROLE_NOUNS[role]) return ROLE_NOUNS[role];
   // Unknown AX role: strip the prefix and humanize rather than showing "AXFoo".
@@ -130,8 +125,16 @@ function roleNoun(role: string): string | null {
   return `a ${stripped.toLowerCase()}`;
 }
 
+/** The same noun without its article ("text field") — for titles, which
+ * pluralize: "Update text fields in the browser". */
+export function bareRoleNoun(role: string): string | null {
+  const noun = roleNoun(role);
+  if (!noun) return null;
+  return noun.replace(/^an? /, "");
+}
+
 /** Observed phrase for one token, role-aware and honest about agency. */
-function observedPhrase(eventType: string, role: string, semantic: string): string {
+function observedPhrase(app: string, eventType: string, role: string, semantic: string): string {
   const noun = roleNoun(role);
   const withSemantic = (base: string): string =>
     semantic && semantic !== "-" ? `${base} (${semantic.replace(/_/g, " ")})` : base;
@@ -140,11 +143,15 @@ function observedPhrase(eventType: string, role: string, semantic: string): stri
     case "element_focused":
       return withSemantic(noun ? `you focus ${noun}` : "you focus part of the screen");
     case "value_committed":
-      if (noun && EDITABLE_ROLES.has(role)) {
-        return withSemantic(`you change the value of ${noun}`);
+      // "…updates" (the page changed itself) is said EXACTLY when the catalog
+      // maps the step to a read — same app scope, same role set — so the
+      // phrase can never say "the page did it" while the verdict claims the
+      // helper would write, or vice versa. Unknown roles read as the user's
+      // change, matching their conservative write mapping.
+      if (app === "browser" && NON_VALUE_HOLDING_ROLES.has(role)) {
+        return withSemantic(noun ? `${noun} updates` : "something on the screen updates");
       }
-      // Not something a user edits: the page changed while they worked.
-      return withSemantic(noun ? `${noun} updates` : "something on the screen updates");
+      return withSemantic(noun ? `you change the value of ${noun}` : "you change a value");
     case "element_activated":
       return withSemantic(noun ? `you activate ${noun}` : "you run a search");
     case "app_activated":
@@ -228,7 +235,7 @@ export function explainWorkflowSteps(sequence: string[]): WorkflowExplanation {
     const semantic = parts[4] ?? "-";
     steps.push({
       order: steps.length + 1,
-      observed: observedPhrase(eventType, role, semantic),
+      observed: observedPhrase(app, eventType, role, semantic),
       app: APP_LABELS[app] ?? app,
       repeats: 1,
       automation: automationFor(token, eventType),

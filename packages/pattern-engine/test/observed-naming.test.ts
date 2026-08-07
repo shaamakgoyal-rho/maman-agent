@@ -65,7 +65,10 @@ describe("titles name the work, not the fact that it repeats", () => {
     expect(describeObserved([t("erp", "table_read", "-", "tax")], [])).toContain("taxes");
   });
 
-  it("ADMITS IT when no object was ever observed, instead of saying 'record'", () => {
+  it("falls back to the target ROLE before admitting defeat", () => {
+    // No semantic or object noun — but the role is observed evidence, and
+    // "Review table rows" tells the reader which habit this is where
+    // "Repeated 3-step workflow" told them nothing.
     const title = describeObserved(
       [
         t("browser", "element_focused"),
@@ -74,10 +77,41 @@ describe("titles name the work, not the fact that it repeats", () => {
       ],
       [],
     );
-    expect(title).toBe("Repeated 3-step workflow in the browser");
-    // The specific failure this replaces.
+    expect(title).toBe("Review table rows in the browser");
+    // The original failure stays fixed: no invented noun, no "Automate your".
     expect(title).not.toContain("record");
     expect(title).not.toMatch(/^Automate your/);
+  });
+
+  it("names the LIVE device pattern by its real write target", () => {
+    // The first real device's eligible pattern (019fc4d0, replay 21/21). Its
+    // card was headlined "Repeated 3-step workflow in the browser"; the write
+    // target's role names it. The AXStaticText step is the page updating
+    // itself and must not become the headline act.
+    const title = describeObserved(
+      [
+        "macos_ax:browser:element_focused:AXGroup:-:-",
+        "macos_ax:browser:value_committed:AXStaticText:-:-",
+        "macos_ax:browser:value_committed:AXTextField:-:-",
+      ],
+      [],
+    );
+    expect(title).toBe("Update text fields in the browser");
+  });
+
+  it("pluralizes a role phrase's head noun, not its tail", () => {
+    const title = describeObserved(["macos_ax:browser:element_focused:AXGroup:-:-"], []);
+    expect(title).toBe("Review sections of the page in the browser");
+    expect(title).not.toContain("pages");
+  });
+
+  it("ADMITS IT when there is not even a role", () => {
+    const title = describeObserved(
+      ["chrome:browser:element_focused:-:-:-", "chrome:browser:window_focused:-:-:-"],
+      [],
+    );
+    expect(title).toBe("Repeated 2-step workflow in the browser");
+    expect(title).not.toContain("record");
   });
 
   it("never claims an app or object that was not in the evidence", () => {
@@ -131,5 +165,18 @@ describe("the summary says what the workflow consists of", () => {
 
   it("returns null rather than an empty phrase when there is nothing to say", () => {
     expect(stepPhrase([])).toBeNull();
+  });
+
+  it("describes the LIVE device pattern role-aware, agency-honest", () => {
+    const phrase = stepPhrase([
+      "macos_ax:browser:element_focused:AXGroup:-:-",
+      "macos_ax:browser:value_committed:AXStaticText:-:-",
+      "macos_ax:browser:value_committed:AXTextField:-:-",
+    ]);
+    // "a block of text updates" — the page did that, not the user. The two
+    // value_committed steps have different roles and must NOT dedupe into one.
+    expect(phrase).toBe(
+      "focus a section of the page in the browser, a block of text updates, then change a text field",
+    );
   });
 });

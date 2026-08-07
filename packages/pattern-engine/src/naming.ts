@@ -1,5 +1,6 @@
-import { capabilitiesForToken } from "@maman/capability-catalog";
+import { capabilitiesForToken, NON_VALUE_HOLDING_ROLES } from "@maman/capability-catalog";
 import type { PatternCandidate } from "@maman/contracts";
+import { bareRoleNoun, roleNoun } from "./explain.js";
 import type { SegmentedEpisode } from "./segmentation.js";
 
 /**
@@ -137,9 +138,29 @@ function mostCommonObject(sequence: string[]): string | null {
 type ParsedStep = {
   app: string;
   event: string;
+  role: string;
   semantic: string;
   object: string;
 };
+
+/**
+ * Whether a step only READS, role-aware: a `value_committed` on a role that
+ * cannot hold user input is the page updating itself, not the user writing —
+ * the SAME set the capability mapping and risk scoring key on, so the title's
+ * verb can never contradict what the helper would be allowed to do. Unknown
+ * roles stay write-like, matching the catalog's conservative choice.
+ */
+function isReadLike(step: ParsedStep): boolean {
+  if (READ_EVENTS.has(step.event)) return true;
+  // Browser only — the exact scope of the catalog's role exception. A relay
+  // app (crm/spreadsheet/erp) reporting value_committed on a container role
+  // still keeps its write mapping there, so naming must agree.
+  return (
+    step.app === "browser" &&
+    step.event === "value_committed" &&
+    NON_VALUE_HOLDING_ROLES.has(step.role)
+  );
+}
 
 /** Events that only READ. A workflow of these is a review, not a change. */
 const READ_EVENTS = new Set([
@@ -195,6 +216,7 @@ function parseStep(token: string): ParsedStep {
   return {
     app: parts[1] ?? "other",
     event: parts[2] ?? "",
+    role: parts[3] ?? "-",
     semantic: parts[4] ?? "-",
     object: parts[5] ?? "-",
   };
@@ -207,6 +229,14 @@ function humanizePlural(raw: string): string {
   if (/(s|x|z|ch|sh)$/.test(words)) return `${words}es`;
   if (/[^aeiou]y$/.test(words)) return `${words.slice(0, -1)}ies`;
   return `${words}s`;
+}
+
+/** Pluralizes a role phrase's HEAD noun: "section of the page" → "sections of
+ * the page", never "section of the pages". */
+function pluralizeRolePhrase(noun: string): string {
+  const ofIndex = noun.indexOf(" of ");
+  if (ofIndex !== -1) return humanizePlural(noun.slice(0, ofIndex)) + noun.slice(ofIndex);
+  return humanizePlural(noun);
 }
 
 function mostCommon(values: string[]): string | null {
@@ -242,8 +272,11 @@ export function describeObserved(sequence: string[], domainActions: string[]): s
   if (steps.length === 0) return "Repeated workflow";
 
   const appLabel = (app: string): string => APP_LABELS[app] ?? app;
-  const lastWrite = [...steps].reverse().find((s) => !READ_EVENTS.has(s.event));
-  const firstRead = steps.find((s) => READ_EVENTS.has(s.event));
+  // Role-aware: a value change the user could not have typed does not make a
+  // step the workflow's "write" — otherwise a page updating itself becomes
+  // the title's headline act.
+  const lastWrite = [...steps].reverse().find((s) => !isReadLike(s));
+  const firstRead = steps.find((s) => isReadLike(s));
   const head = lastWrite ?? steps[0]!;
   const apps = [...new Set(steps.map((s) => s.app))];
   const readOnlyAcrossApps = !lastWrite && apps.length > 1;
@@ -265,7 +298,18 @@ export function describeObserved(sequence: string[], domainActions: string[]): s
   const source = firstRead && firstRead.app !== head.app ? appLabel(firstRead.app) : null;
 
   if (!subject) {
-    // No object anywhere: name the shape instead of pretending to know the noun.
+    // No semantic or object noun anywhere — but the target ROLE is still real
+    // observed evidence, and "Update text fields in the browser" tells the
+    // reader which habit this is where "Repeated 3-step workflow" told them
+    // nothing. The AX role is the most specific thing the observer records
+    // about a step it cannot name.
+    const headRoleNoun = bareRoleNoun(head.role);
+    if (headRoleNoun) {
+      const verb = TITLE_VERBS[head.event] ?? "Work through";
+      const where = source ? `${target} from ${source}` : target;
+      return `${verb} ${pluralizeRolePhrase(headRoleNoun)} in ${where}`;
+    }
+    // Not even a role: name the shape instead of pretending to know the noun.
     const where = source ? `${source} and ${target}` : target;
     return `Repeated ${steps.length}-step workflow in ${where}`;
   }
@@ -316,16 +360,30 @@ export function stepPhrase(sequence: string[]): string | null {
   let lastApp: string | null = null;
   for (const token of sequence) {
     const step = parseStep(token);
-    const key = `${step.app}:${step.event}`;
+    // Role in the key: "a block of text updates" and "change a text field"
+    // are different steps even though both are browser value_committed.
+    const key = `${step.app}:${step.event}:${step.role}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    // With a real noun, name it. Without one, use the phrase for the UI action
-    // itself — "read a table" is what table_read means, so it is still evidence,
-    // whereas a bare verb ("You open in your spreadsheet") is just broken English.
+    // With a real noun, name it. Without one, fall back to the ROLE — "focus a
+    // section of the page" says which habit this is where "work in a field"
+    // said nothing — and only then to the event's own generic phrase.
     const noun = nonEmpty(step.semantic) ?? nonEmpty(step.object);
-    const verb = noun
-      ? `${(TITLE_VERBS[step.event] ?? step.event.replace(/_/g, " ")).toLowerCase()} ${humanizePlural(noun)}`
-      : (STEP_PHRASES[step.event] ?? step.event.replace(/_/g, " "));
+    const stepRoleNoun = roleNoun(step.role);
+    let verb: string;
+    if (noun) {
+      verb = `${(TITLE_VERBS[step.event] ?? step.event.replace(/_/g, " ")).toLowerCase()} ${humanizePlural(noun)}`;
+    } else if (stepRoleNoun && step.event === "element_focused") {
+      verb = `focus ${stepRoleNoun}`;
+    } else if (stepRoleNoun && step.event === "value_committed") {
+      // Same agency distinction as the capability mapping: the page updating
+      // itself must not read as the user typing.
+      verb = NON_VALUE_HOLDING_ROLES.has(step.role)
+        ? `${stepRoleNoun} updates`
+        : `change ${stepRoleNoun}`;
+    } else {
+      verb = STEP_PHRASES[step.event] ?? step.event.replace(/_/g, " ");
+    }
     const nounText = "";
     const appText = step.app !== lastApp ? ` in ${APP_LABELS[step.app] ?? step.app}` : "";
     lastApp = step.app;
