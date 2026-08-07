@@ -84,13 +84,29 @@ export function patternGates(
       key: "feasibility",
       label: "Safe steps a helper can do",
       met: c.feasibility_score >= b.min_feasibility,
-      detail: c.feasibility_score >= b.min_feasibility ? "yes" : "not yet",
+      // SHOWS THE NUMBER, and says so when the answer is "none of them".
+      //
+      // This gate used to read "not yet", which is what every other unmet gate
+      // reads — so a pattern that could NEVER qualify looked exactly like one that
+      // just needed another repetition. A real machine sat at 0% here for 10,439
+      // observed events because the capability catalog had no mapping for what the
+      // observer emits, and the UI said "not yet" the whole time. Zero is a
+      // different fact from "nearly there" and now reads differently.
+      detail:
+        c.feasibility_score >= b.min_feasibility
+          ? `${pct(c.feasibility_score)} of steps automatable`
+          : c.feasibility_score === 0
+            ? "none of these steps map to something a helper can do"
+            : `${pct(c.feasibility_score)} of steps automatable (need ${pct(b.min_feasibility)})`,
     },
     {
       key: "risk",
       label: "Low enough risk",
       met: c.risk_score <= b.max_risk,
-      detail: c.risk_score <= b.max_risk ? "yes" : "too risky",
+      detail:
+        c.risk_score <= b.max_risk
+          ? `risk ${pct(c.risk_score)}`
+          : `risk ${pct(c.risk_score)} (limit ${pct(b.max_risk)})`,
     },
     {
       key: "opportunity",
