@@ -245,23 +245,22 @@ export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
 export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, CapabilityAdapter> {
   const registry = pureReconciliationAdapters();
 
-  // Read-only browser capabilities: compiled specs for patterns observed on
-  // generic (non-CRM) surfaces resolve to these. Deterministic canned reads so
-  // a read-only agent can complete a run instead of dying on a missing adapter.
-  registry.set("browser.extract_table", {
-    id: "browser.extract_table",
-    read: async () => {
-      await world.guard("browser.extract_table");
-      return DEMO_CSV_ROWS;
-    },
-  });
-  registry.set("browser.extract_structured_fields", {
-    id: "browser.extract_structured_fields",
-    read: async () => {
-      await world.guard("browser.extract_structured_fields");
-      return DEMO_CSV_ROWS.slice(0, 1);
-    },
-  });
+  // NO BROWSER ADAPTERS HERE, deliberately.
+  //
+  // This registry used to serve `browser.extract_table` and
+  // `browser.extract_structured_fields` with DEMO_CSV_ROWS — Salesforce CSV
+  // fixtures returned as "the fields I read off the page". A browser workflow's
+  // read step was therefore answered with invented data that the user would see
+  // as a real observation of their own page.
+  //
+  // The stated reason was "so a read-only agent can complete a run instead of
+  // dying on a missing adapter". That is obsolete: `validateRuntimeCapabilities`
+  // and `requireAdapter` now refuse a spec whose capabilities are unavailable,
+  // with a message naming what is missing. An honest refusal beats a completed
+  // run built on fixtures.
+  //
+  // Real browser capabilities come from `browserAdapters()`, which needs a
+  // transport and the user's origin allowlist.
 
   registry.set("salesforce.query_records", {
     id: "salesforce.query_records",

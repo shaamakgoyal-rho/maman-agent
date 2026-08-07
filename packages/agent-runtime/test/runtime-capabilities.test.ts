@@ -74,14 +74,21 @@ const localRuntime = () =>
   runtimeFromRegistry("local-demo", demoAdapterRegistry(new DemoSalesforceWorld()));
 
 describe("the local runtime is missing the browser write adapters", () => {
-  it("does not register browser.propose_form_fill or supervised_form_fill", () => {
-    // Documents the actual gap this gate protects against. If these are ever
-    // implemented, this test fails and the assertions below should be revisited.
+  it("registers NO browser capability at all", () => {
+    // The demo registry is the Salesforce world. It used to answer
+    // `browser.extract_structured_fields` with DEMO_CSV_ROWS — CSV fixtures
+    // presented as fields read from a page — so a browser workflow silently ran
+    // on invented data. Real browser capabilities now come only from
+    // `browserAdapters()`, which needs a transport and an origin allowlist.
     const runtime = localRuntime();
-    expect(runtime.available.has("browser.propose_form_fill")).toBe(false);
-    expect(runtime.available.has("browser.supervised_form_fill")).toBe(false);
-    // The read side IS implemented, so the refusals below are specific.
-    expect(runtime.available.has("browser.extract_structured_fields")).toBe(true);
+    for (const id of [
+      "browser.extract_structured_fields",
+      "browser.extract_table",
+      "browser.propose_form_fill",
+      "browser.supervised_form_fill",
+    ]) {
+      expect(runtime.available.has(id), id).toBe(false);
+    }
   });
 });
 
@@ -224,16 +231,18 @@ describe("the compiler will not emit steps the runtime cannot execute", () => {
     expect(result.message).toBeTruthy();
   });
 
-  it("still compiles the read-only browser workflow, whose adapter DOES exist", async () => {
+  it("refuses even a READ-ONLY browser workflow on a runtime with no browser adapter", async () => {
+    // Previously this compiled, because the demo registry answered the read with
+    // fixtures. Refusing is the honest answer: this runtime cannot read a page.
     const result = await compileAgentSpec(
       request({
         candidate: candidate(["macos_ax:browser:element_focused:AXGroup:-:-"]),
         runtime: localRuntime(),
       }),
     );
-    expect(result.status).toBe("valid");
-    if (result.status !== "valid") return;
-    expect(result.spec.steps.every((s) => s.mode === "read")).toBe(true);
+    expect(result.status).toBe("needs_runtime");
+    if (result.status !== "needs_runtime") return;
+    expect(result.missing[0]!.capability_id).toBe("browser.extract_structured_fields");
   });
 
   it("every compiled step has an adapter on the runtime it compiled for", async () => {

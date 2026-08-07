@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  browserAdapters,
   compileAgentSpec,
   demoAdapterRegistry,
   DemoSalesforceWorld,
@@ -29,7 +30,9 @@ import {
 } from "@maman/contracts";
 import { emitAppEvent } from "./bridge.js";
 import type { StatusBeat } from "./status.js";
+import { tauriAgentBrowserHost } from "./agentBrowser.js";
 import {
+  mintAuthorization,
   previewBrowserPlan,
   runBrowserPlan,
   revertBrowserRun,
@@ -182,10 +185,14 @@ async function compile(
     policy_version_id: uuidv7(),
     now: () => new Date(),
     model: new DemoModelProvider(),
-    // Compile FOR this runtime: a recipe may not emit a step the local
-    // executor has no adapter for. Without this the browser recipe happily
-    // produced supervised_form_fill steps that nothing can execute.
-    runtime: runtimeFromRegistry(LOCAL_RUNTIME_ID, demoAdapterRegistry(demoWorld())),
+    // Compile FOR the runtime that will actually execute — the SAME registry,
+    // built the same way. Probing a demo-only registry here while running a
+    // wider one would refuse browser steps the runtime can now perform; probing
+    // a wider one than runs would do the reverse and crash mid-run.
+    runtime: runtimeFromRegistry(
+      LOCAL_RUNTIME_ID,
+      registryFor(demoWorld(), useRuns.getState().browserOrigins),
+    ),
   });
   if (result.status !== "valid") throw new Error(result.message);
   return result.spec;
@@ -195,6 +202,58 @@ async function compile(
 // backend): an approved write stays visible to the next run's reads, so the
 // demo arc shows real state change instead of a world reset per run.
 let activeWorld: DemoSalesforceWorld | null = null;
+
+/**
+ * Is the user actually at the machine, watching?
+ *
+ * A consequential browser write requires presence, and the pure actuator
+ * refuses the write when this is false — so a hardcoded `true` would REMOVE the
+ * check rather than satisfy it. Panel visibility is the strongest signal this
+ * process genuinely has: the panel is where approvals happen, and a hidden or
+ * backgrounded panel means the person is not looking at what the agent is doing.
+ *
+ * It is not proof of a human (a screen can be left on). It is honest evidence,
+ * and it fails CLOSED — in a non-browser context with no document, it is false.
+ */
+export function userIsPresent(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.visibilityState === "visible";
+}
+
+/**
+ * The adapters for one run: the demo Salesforce world PLUS the real browser
+ * adapters, once the user has named at least one origin.
+ *
+ * These are different capability ids, so nothing falls back between them — a
+ * browser step cannot be served by a demo adapter, and a Salesforce step cannot
+ * be served by the browser. With no origins configured the browser adapters are
+ * absent entirely, which makes `validateRuntimeCapabilities` refuse a browser
+ * plan up front instead of failing part-way through a run.
+ */
+export function registryFor(world: DemoSalesforceWorld, origins: readonly string[]) {
+  const registry = demoAdapterRegistry(world);
+  if (origins.length === 0) return registry;
+  for (const [id, adapter] of browserAdapters({
+    host: tauriAgentBrowserHost(origins),
+    allowedOrigins: origins,
+    userPresent: userIsPresent,
+    // Org policy for supervised browser writes. The local runtime has no org
+    // policy service, so this mirrors the same default the compiler applies;
+    // the actuator still requires approval and presence on top of it.
+    allowSupervisedBrowserWrites: true,
+    newRequestId: () => uuidv7(),
+    mintAuthorization: mintAuthorization,
+  })) {
+    registry.set(id, adapter);
+  }
+  return registry;
+}
+
+/** Test seam: the exact registry a run would use for these origins. */
+export function __testRegistryFor(origins: readonly string[]) {
+  return registryFor(new DemoSalesforceWorld(), origins);
+}
+
 const demoWorld = (): DemoSalesforceWorld => (activeWorld ??= new DemoSalesforceWorld());
 // A run's spec + state persist between shadow/approve calls.
 let activeSpec: AgentSpec | null = null;
@@ -376,7 +435,7 @@ export const useRuns = create<RunsStore>((set) => ({
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
-      const registry = demoAdapterRegistry(activeWorld);
+      const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       // BLOCK BEFORE EXECUTING ANYTHING. Checking here rather than per-step
       // means a spec that is missing an adapter for a LATER step never performs
       // its earlier steps — a half-run that stops at a TypeError is worse than
@@ -464,7 +523,7 @@ export const useRuns = create<RunsStore>((set) => ({
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
-      const registry = demoAdapterRegistry(activeWorld);
+      const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       let pending: PendingApproval | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") break; // pause at the approval gate
@@ -695,7 +754,7 @@ export const useRuns = create<RunsStore>((set) => ({
     }
 
     try {
-      const registry = demoAdapterRegistry(activeWorld);
+      const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       const writeStep = activeSpec.steps.find((s) => s.mode === "write")!;
       const result = await executeStep({
         spec: activeSpec,
