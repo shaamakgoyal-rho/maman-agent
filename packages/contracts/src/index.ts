@@ -13,3 +13,4 @@ export * from "./sync.js";
 export * from "./suggestion-outcome.js";
 export * from "./browser-action.js";
 export * from "./teach-mode.js";
+export * from "./learned-workflow.js";

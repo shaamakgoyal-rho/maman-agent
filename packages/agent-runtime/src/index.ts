@@ -73,3 +73,4 @@ export {
 } from "./runtime-capabilities.js";
 export type { MissingConfiguration } from "./compiler.js";
 export * from "./browser-adapters.js";
+export * from "./compile-learned.js";
