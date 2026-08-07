@@ -471,6 +471,47 @@
           </div>
         </div>
 
+        <h2>Teach Mode: the one thing that sends pictures of your screen</h2>
+        <p>
+          Everything above is about the <em>shape</em> of your work. Teach Mode is the single
+          exception, and it works differently enough to deserve its own section.
+        </p>
+        <p>
+          When you want Maman to learn a workflow you can start a Teach Mode session. While it runs,
+          Maman takes pictures of the apps <em>you picked</em> and
+          <b>sends those pictures to Anthropic</b> to work out what you were doing. Nothing else
+          Maman does sends images of your screen anywhere.
+        </p>
+        <ul>
+          <li>
+            It is <b>off until you turn it on</b>, and turning it on does not start anything — it
+            only makes starting a session possible.
+          </li>
+          <li>
+            A session lasts <b>at most 15 minutes and stops itself</b>. There is no always-on mode.
+          </li>
+          <li>
+            Only the apps you pick for that session. Anything else on your screen is not captured —
+            not blanked out afterwards, never captured.
+          </li>
+          <li>
+            Before a picture is sent, anything that looks like a password, card number, API key,
+            one-time code or password-manager popup is <b>blacked out</b>. If a password field has
+            focus, or too much of the screen would need blacking out, the
+            <b>whole picture is thrown away</b> instead of sent.
+          </li>
+          <li>
+            Pictures are never saved to disk and never synced. They are read once and dropped.
+          </li>
+          <li>
+            Keystrokes are still never read. That one has no exception, in Teach Mode or anywhere.
+          </li>
+          <li>
+            What Maman thinks it saw can be <em>wrong</em>, unlike the rest of its observation, so
+            it shows you every reading and remembers only the ones you confirm.
+          </li>
+        </ul>
+
         <h2>What it does record</h2>
         <p>
           The <em>shape</em> of your work: which category of app, what kind of element you touched,
@@ -499,9 +540,10 @@
         <h2>Where it lives</h2>
         <p>
           In an encrypted database on your Mac, with the key in your login keychain. There is no
-          account, no server, and nothing is uploaded — the sync path is off unless you deliberately
-          connect one. <b>Privacy → Delete data</b> removes any app's history, or all of it, and
-          writes a tombstone so it cannot come back.
+          account and no server — the sync path is off unless you deliberately connect one, and the
+          only thing that ever leaves your Mac on its own is a Teach Mode picture, described above.
+          <b>Privacy → Delete data</b> removes any app's history, or all of it, and writes a
+          tombstone so it cannot come back.
         </p>
 
         <h2>Nothing changes without you</h2>
