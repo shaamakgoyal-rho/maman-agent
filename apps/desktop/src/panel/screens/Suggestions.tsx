@@ -9,6 +9,8 @@ import {
 } from "@maman/pattern-engine";
 import { emitAppEvent } from "../../lib/bridge.js";
 import { useAgents } from "../../lib/agents.js";
+import { useLearnedWorkflows } from "../../lib/learnedWorkflows.js";
+import { useNavigation } from "../../state/navigation.js";
 import {
   useRecommendations,
   type FormingItem,
@@ -631,9 +633,21 @@ function SuggestionCard({
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
               if (created.ok) {
                 await act(item.signature, { type: "accepted" });
-              } else {
-                setDraftError(created.message);
+                return;
               }
+              // NEEDS TEACHING, NOT A DEAD END. When the compiler refuses
+              // because observation never captured the specifics — which field,
+              // which value — the useful next step is to ask, not to print an
+              // error the user can do nothing about. Anything else (a policy
+              // block, an unavailable runtime) is a real refusal and is shown.
+              if (created.missing_configuration && created.missing_configuration.length > 0) {
+                const workflow = await useLearnedWorkflows
+                  .getState()
+                  .startFor(item.candidate, item.candidate.owner_user_id);
+                useNavigation.getState().openConfigure(workflow.workflow_id);
+                return;
+              }
+              setDraftError(created.message);
             }}
           >
             Try it

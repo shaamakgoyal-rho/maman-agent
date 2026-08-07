@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { learnedWorkflowSchema, workflowReadiness, type PatternCandidate } from "@maman/contracts";
 
+/** Stands in for the Rust persistence commands, so the DESKTOP path is what
+ * gets tested rather than the web-preview localStorage fallback. */
+let storedJson: string | null = null;
 vi.mock("../src/lib/bridge.js", () => ({
-  isTauri: () => false,
-  invokeCommand: async () => undefined,
+  isTauri: () => true,
+  invokeCommand: async (cmd: string, args?: { json?: string }) => {
+    if (cmd === "learned_workflows_load") return storedJson;
+    if (cmd === "learned_workflows_save") {
+      storedJson = args?.json ?? null;
+      return undefined;
+    }
+    return undefined;
+  },
   emitAppEvent: async () => undefined,
 }));
 
@@ -151,6 +161,30 @@ describe("editing re-derives what is still missing", () => {
   it("records that the user configured it once they have edited", () => {
     const draft = draftFromCandidate(candidate(), OWNER, at);
     expect(applyEdit(draft, { name: "Mine" }, at).provenance).toBe("user_configured");
+  });
+});
+
+describe("the store loads what was persisted", () => {
+  it("hydrate() surfaces workflows written by an earlier session", async () => {
+    // The panel must call this on start. Without it the store begins empty and
+    // a workflow the user taught yesterday reads as "not found" — their
+    // configuration silently invisible until a save overwrote it.
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    const draft = draftFromCandidate(candidate(), OWNER, at);
+    storedJson = JSON.stringify({ schema_version: 1, workflows: [draft] });
+    await useLearnedWorkflows.getState().hydrate();
+    expect(useLearnedWorkflows.getState().workflows.map((w) => w.workflow_id)).toEqual([
+      draft.workflow_id,
+    ]);
+    expect(useLearnedWorkflows.getState().hydrated).toBe(true);
+  });
+
+  it("an absent file hydrates to an empty list, not an error state", async () => {
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    storedJson = null;
+    await useLearnedWorkflows.getState().hydrate();
+    expect(useLearnedWorkflows.getState().workflows).toEqual([]);
+    expect(useLearnedWorkflows.getState().hydrated).toBe(true);
   });
 });
 
