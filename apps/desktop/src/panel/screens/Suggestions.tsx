@@ -610,12 +610,21 @@ function SuggestionCard({
           <Button
             onClick={async () => {
               setDraftError(null);
+              // The pattern's own derived intent selects the compiler recipe.
+              // The old `?? "reconcile_account_list"` fallback here was
+              // rule-11 in miniature: an intent-less record silently became a
+              // generic Salesforce reconciliation agent. An absent intent is
+              // now an honest refusal, never a substitution.
+              if (!rec.generalized_intent) {
+                setDraftError(
+                  "This suggestion has no derived intent, so I can't choose a safe recipe for it.",
+                );
+                return;
+              }
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
-              // The pattern's own derived intent selects the compiler recipe;
-              // the legacy reconciliation intent stays the fallback.
               const created = await useAgents.getState().createDraft(
                 item.candidate,
-                rec.generalized_intent ?? "reconcile_account_list",
+                rec.generalized_intent,
                 rec.summary,
                 title, // the exact workflow name on the card
               );

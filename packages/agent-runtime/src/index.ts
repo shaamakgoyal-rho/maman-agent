@@ -71,3 +71,4 @@ export {
   type MissingCapability,
   type RuntimeReadiness,
 } from "./runtime-capabilities.js";
+export type { MissingConfiguration } from "./compiler.js";

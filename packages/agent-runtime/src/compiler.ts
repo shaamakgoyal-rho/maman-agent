@@ -62,6 +62,13 @@ export type CompileResult =
       policy_decision: PolicyDecision;
       warnings: string[];
       compiled_by: "recipe" | "model";
+      /**
+       * Audit trail: which observed pattern, which derived intent, and which
+       * recipe (or "model") produced this spec. Together with the spec's
+       * `source_pattern_id` this makes every compiled agent traceable back to
+       * the evidence it came from.
+       */
+      compiled_from: { pattern_id: string; generalized_intent: string; recipe: string };
       /** Model usage across naming + drafting for this compile (null if none). */
       model_usage: ModelUsage | null;
       /** Priced compile cost from the usage above ($0 in demo mode). */
@@ -79,7 +86,27 @@ export type CompileResult =
       runtime_id: string;
       missing: MissingCapability[];
       message: string;
+    }
+  /**
+   * The workflow was recognised, but observation alone did not capture enough
+   * to compile it safely — the user must teach the missing pieces. This is the
+   * typed replacement for two dishonest behaviours: silently compiling an
+   * unrelated generic recipe (an observed CRM-edit pattern used to become the
+   * CSV→Salesforce reconciliation agent, inventing an `account_csv` input the
+   * user never mentioned), and a generic "couldn't draft this" for workflows
+   * that are perfectly automatable once configured.
+   */
+  | {
+      status: "needs_configuration";
+      missing: MissingConfiguration[];
+      message: string;
     };
+
+/** One concrete thing observation could not learn and the user must provide. */
+export type MissingConfiguration = {
+  kind: "data_source" | "field_mapping" | "target" | "success_condition" | "workflow_definition";
+  detail: string;
+};
 
 /** Copy the model may set (title/summary only); deterministic values win. */
 type NameCopy = { title: string; summary: string } | null;
@@ -87,6 +114,9 @@ type NameCopy = { title: string; summary: string } | null;
 // ---- deterministic recipes ----
 
 type Recipe = {
+  /** Stable identity, recorded on the compile result for the audit trail
+   * (observed pattern → intent → recipe → spec). */
+  id: string;
   /** Whether this recipe safely covers the given intent AND candidate — some
    * recipes are shaped by what was actually observed, not the intent alone. */
   matches: (intent: string, req: CompileRequest) => boolean;
@@ -164,13 +194,49 @@ const step = (
 };
 
 /**
+ * Evidence that the observed workflow actually HAS a tabular data source and a
+ * CRM destination — the two halves the reconciliation recipe wires together.
+ * The recipe's shape (parse a file → match rows → update Salesforce) is only
+ * honest when both halves were seen.
+ */
+function looksLikeReconciliation(req: CompileRequest): boolean {
+  const parts = req.candidate.canonical_sequence.map((t) => {
+    const [, category = "-", eventType = "-"] = t.split(":");
+    return { category, eventType };
+  });
+  const hasTabularSource = parts.some(
+    (p) => p.category === "spreadsheet" || p.eventType === "table_read",
+  );
+  const hasCrmDestination = parts.some((p) => p.category === "crm");
+  return hasTabularSource && hasCrmDestination;
+}
+
+/**
  * The primary demo recipe: account-list reconciliation (spec §24 exactly).
- * Also covers the derived update_<object>_records intents that live-observed
- * CRM edit patterns produce — same safe shape (read → match → propose →
- * approved write → report), with the queried object taken from the intent.
+ *
+ * MATCHES ON EVIDENCE, NOT INTENT ALONE. It previously accepted any
+ * `update_<object>_records` intent — so a live-observed CRM edit pattern (a
+ * user retyping two fields in Salesforce, no spreadsheet, no file anywhere)
+ * compiled into THIS recipe: a CSV-parsing, row-matching agent demanding an
+ * `account_csv` input the user never mentioned, whose steps 1, 2, 4 and 7 the
+ * user never performed. An ERP invoice workflow did the same. The suggestion
+ * card then described a workflow the compiled agent does not implement.
+ *
+ * The split is explicit-vs-derived:
+ * - `reconcile_account_list` is the recipe's own name — an EXPLICIT selection
+ *   (the naming layer only derives it from crm+spreadsheet evidence, and a
+ *   teach/configure flow sets it deliberately). It always matches.
+ * - `update_<object>_records` is DERIVED from any CRM-edit pattern, so it
+ *   additionally requires the observed sequence to contain a tabular source
+ *   AND a CRM destination. CRM edits without a seen source are a real
+ *   automation opportunity — but the missing half must be TAUGHT, so they
+ *   return `needs_configuration` (below) instead of an unrelated agent.
  */
 const RECONCILIATION_RECIPE: Recipe = {
-  matches: (intent) => intent === "reconcile_account_list" || UPDATE_RECORDS_INTENT.test(intent),
+  id: "reconciliation-v1",
+  matches: (intent, req) =>
+    intent === "reconcile_account_list" ||
+    (UPDATE_RECORDS_INTENT.test(intent) && looksLikeReconciliation(req)),
   build: (req) => ({
     inputs: [
       {
@@ -306,6 +372,7 @@ const BROWSER_WORKFLOW_INTENT = /^automate_([a-z0-9_]+)_workflow$/;
  * blocked (honest) rather than compiling a helper that ignores half the work.
  */
 const BROWSER_WORKFLOW_RECIPE: Recipe = {
+  id: "browser-workflow-v1",
   matches: (intent, req) => {
     if (!BROWSER_WORKFLOW_INTENT.test(intent)) return false;
     const mapped = req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t));
@@ -432,7 +499,7 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
   // 1. Deterministic recipe when the intent maps to a known shape.
   const recipe = RECIPES.find((r) => r.matches(req.generalized_intent, req));
   if (recipe) {
-    const result = finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
+    const result = finalize(req, recipe.build(req), "recipe", recipe.id, [], usages, nameCopy);
     // Final gate: even a matched recipe must not produce a spec this runtime
     // cannot execute. Checked on the BUILT spec, so it covers every step
     // actually emitted rather than what the matcher predicted.
@@ -448,6 +515,29 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
       }
     }
     return result;
+  }
+
+  // A CRM update pattern whose data source was never observed. The old
+  // behaviour compiled the reconciliation recipe anyway; the honest answer is
+  // that the SOURCE of the new values is exactly what observation could not
+  // see, and the user has to teach it.
+  if (UPDATE_RECORDS_INTENT.test(req.generalized_intent) && !looksLikeReconciliation(req)) {
+    return {
+      status: "needs_configuration",
+      missing: [
+        {
+          kind: "data_source",
+          detail:
+            "I watched you update records, but I never saw where the new values come from — a file, a spreadsheet, another system, or your own judgment.",
+        },
+        {
+          kind: "field_mapping",
+          detail: "Which source values map onto which record fields.",
+        },
+      ],
+      message:
+        "I can see this workflow updates records, but not where the new values come from. Teach me the source and the field mapping, and I can draft it.",
+    };
   }
 
   // A browser workflow whose recipe declined ONLY because the runtime lacks an
@@ -492,21 +582,55 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
       if (modelCostUsd(sumUsage([...usages, draft.usage])) > budget) break; // over budget → stop
       const built = planToSpecParts(draft.value);
       if (!built) continue;
-      const result = finalize(req, built, "model", [], [...usages, draft.usage], nameCopy);
-      if (result.status === "valid") return result;
+      const result = finalize(
+        req,
+        built,
+        "model",
+        "model",
+        [
+          // The propose-only rule (model drafts never receive direct write
+          // steps) is a safety property, but it must be VISIBLE — a user whose
+          // workflow writes should know this draft will only propose until a
+          // human elevates it.
+          "Drafted by a model: every step proposes only; nothing is written until you elevate and approve it.",
+        ],
+        [...usages, draft.usage],
+        nameCopy,
+      );
+      if (result.status !== "valid") continue;
+      // The model path must not bypass the runtime gate the recipe path has:
+      // a model plan referencing an adapter-less capability is just as
+      // unexecutable as a recipe doing so.
+      if (req.runtime) {
+        const readiness = validateRuntimeCapabilities(result.spec, req.runtime);
+        if (!readiness.ready) {
+          return {
+            status: "needs_runtime",
+            runtime_id: readiness.runtime_id,
+            missing: readiness.missing,
+            message: describeMissingCapabilities(readiness.missing),
+          };
+        }
+      }
+      return result;
     }
   }
 
+  // Unknown workflow: typed as "needs configuration", because that is what it
+  // is — nothing about the workflow is prohibited, we simply were not taught
+  // enough to compile it. The previous generic `blocked` (C-NO-PLAN) read as a
+  // dead end and gave the user nothing actionable.
   return {
-    status: "blocked",
-    issues: [
+    status: "needs_configuration",
+    missing: [
       {
-        rule: "C-NO-PLAN",
-        message: "no deterministic recipe matches and model generation failed or is unavailable",
+        kind: "workflow_definition",
+        detail:
+          "No safe recipe covers this workflow, and observation alone did not capture its targets, inputs and success conditions.",
       },
     ],
     message:
-      "I couldn't safely draft this helper yet. Tell me more about the outcome you want, or try again after connecting the relevant tools.",
+      "I don't know how to do this workflow safely yet. Walk me through it once — which fields, which values, and what a successful result looks like — and I can draft it.",
   };
 }
 
@@ -545,6 +669,7 @@ function finalize(
   req: CompileRequest,
   parts: { steps: AgentStep[]; inputs: AgentSpec["inputs"]; assertions: AgentSpec["assertions"] },
   compiled_by: "recipe" | "model",
+  recipeId: string,
   warnings: string[],
   usages: ModelUsage[],
   nameCopy: NameCopy,
@@ -614,6 +739,11 @@ function finalize(
     policy_decision: decision,
     warnings,
     compiled_by,
+    compiled_from: {
+      pattern_id: req.candidate.pattern_id,
+      generalized_intent: req.generalized_intent,
+      recipe: recipeId,
+    },
     model_usage,
     model_cost_usd: model_usage ? modelCostUsd(model_usage) : 0,
   };

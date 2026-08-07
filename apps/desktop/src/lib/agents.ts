@@ -16,6 +16,7 @@ import {
   stateAfterMaterialEdit,
   validateAgentSpec,
   type MissingCapability,
+  type MissingConfiguration,
 } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DemoModelProvider } from "@maman/model-provider";
@@ -106,6 +107,11 @@ export type CreateDraftResult =
        * instead of asking them to describe the workflow differently.
        */
       missing_capabilities?: MissingCapability[];
+      /**
+       * Present when the workflow needs to be TAUGHT: the typed list of what
+       * observation could not learn (data source, field mapping, …).
+       */
+      missing_configuration?: MissingConfiguration[];
     };
 
 type AgentsStore = {
@@ -211,6 +217,11 @@ export const useAgents = create<AgentsStore>((set, get) => ({
         ok: false,
         message,
         ...(result.status === "needs_runtime" ? { missing_capabilities: result.missing } : {}),
+        // Typed teach-me list: what observation could not learn. The Teach
+        // flow (Phase 2) consumes this; until then the card shows the details.
+        ...(result.status === "needs_configuration"
+          ? { missing_configuration: result.missing }
+          : {}),
       };
     }
 

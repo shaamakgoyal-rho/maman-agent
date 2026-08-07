@@ -133,7 +133,7 @@ describe("the live browser workflow compiles to a real agent", () => {
         "chrome:spreadsheet:table_read:grid:account_list:account",
       ]),
     );
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("REFUSES when the observed steps map to no capability at all", async () => {
@@ -142,7 +142,7 @@ describe("the live browser workflow compiles to a real agent", () => {
     const result = await compileAgentSpec(
       request(["macos_ax:other:value_committed:AXTextField:-:-"]),
     );
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("leaves CRM reconciliation intents on their own recipe", async () => {

@@ -242,7 +242,12 @@ describe("the compiler will not emit steps the runtime cannot execute", () => {
     const runtime = localRuntime();
     const result = await compileAgentSpec(
       request({
-        candidate: candidate(["chrome:crm:record_updated:field:account_field:account"]),
+        // The derived update-records intent now needs BOTH halves of the
+        // reconciliation evidence: a tabular source and a CRM destination.
+        candidate: candidate([
+          "chrome:spreadsheet:table_read:grid:account_list:account",
+          "chrome:crm:record_updated:field:account_field:account",
+        ]),
         generalized_intent: "update_account_records",
         runtime,
       }),
