@@ -4,6 +4,7 @@
 //! Commands validate their inputs, and window-sensitive commands check the
 //! calling window's label (the pet window may never reach privileged surfaces).
 
+pub mod agent_browser;
 pub mod browser_bridge;
 pub mod browser_relay;
 pub mod domain;
@@ -1112,6 +1113,58 @@ fn browser_relay_paired() -> bool {
     keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
         .and_then(|e| e.get_password())
         .is_ok()
+}
+
+// ---- the agent's own browser window (see agent_browser.rs) ----
+//
+// Three panel-only commands, mirroring the `OwnWindowHost` interface the pure
+// actuator needs. They are deliberately thin: the allowlist comes from the
+// panel's settings on every call rather than being cached here, so revoking a
+// site takes effect on the next action instead of the next restart.
+
+#[tauri::command]
+async fn agent_browser_open<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    url: String,
+    allowed_origins: Vec<String>,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    agent_browser::open_agent_browser(&app, &url, &allowed_origins)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The origin the agent's window is showing, per the HOST's view of the webview.
+/// Never asks the page: `document.location` is page-controlled.
+#[tauri::command]
+fn agent_browser_origin<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<Option<String>, String> {
+    require_panel(&window)?;
+    Ok(agent_browser::current_origin(&app))
+}
+
+/// Evaluates one in-page expression and returns the page's answer verbatim.
+///
+/// The answer is UNTRUSTED: it is re-parsed and re-validated by
+/// `parseAgentEnvelope`, which checks the echoed request id and rejects anything
+/// it cannot attribute to the action that was sent.
+#[tauri::command]
+async fn agent_browser_evaluate<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    expression: String,
+) -> Result<String, String> {
+    require_panel(&window)?;
+    agent_browser::evaluate_in_page(&app, &expression)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn agent_browser_close<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<(), String> {
+    require_panel(&window)?;
+    agent_browser::close_agent_browser(&app);
+    Ok(())
 }
 
 /// Local agent persistence (drafts + immutable versions; demo/local mode).
@@ -2642,6 +2695,10 @@ pub fn run() {
             agents_load,
             agents_save,
             browser_relay_paired,
+            agent_browser_open,
+            agent_browser_origin,
+            agent_browser_evaluate,
+            agent_browser_close,
             events_delete,
             events_delete_all,
             events_delete_app,
