@@ -86,6 +86,25 @@ describe("every event the live observer emits is accounted for", () => {
     expect(first).toBe("browser.propose_form_fill");
   });
 
+  it("maps a value change on a non-editable role to a READ, never a form fill", () => {
+    // AXStaticText cannot hold user input: the page updated itself while the
+    // user worked. Claiming a form fill there scores — and would later
+    // compile — a write the workflow never contained. Both role vocabularies.
+    for (const role of ["AXStaticText", "AXImage", "AXGroup", "row", "button"]) {
+      expect(capabilitiesForToken(`macos_ax:browser:value_committed:${role}:-:-`), role).toEqual([
+        "browser.extract_structured_fields",
+      ]);
+    }
+    // Editable and UNKNOWN roles keep the propose-first write chain — unknown
+    // stays conservative because an edit cannot be ruled out, and the chain is
+    // approval-gated either way.
+    for (const role of ["AXTextField", "textbox", "cell", "AXSomethingNew", "-"]) {
+      expect(capabilitiesForToken(`macos_ax:browser:value_committed:${role}:-:-`)[0], role).toBe(
+        "browser.propose_form_fill",
+      );
+    }
+  });
+
   it("treats app and window switches as context, never as work", () => {
     for (const eventType of ["app_activated", "window_focused"]) {
       expect(CONTEXT_EVENT_TYPES).toContain(eventType);

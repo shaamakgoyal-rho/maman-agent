@@ -2,6 +2,7 @@ import {
   capabilitiesForToken,
   getCapability,
   CONTEXT_EVENT_TYPES,
+  EDITABLE_VALUE_ROLES,
 } from "@maman/capability-catalog";
 
 /**
@@ -116,26 +117,10 @@ const ROLE_NOUNS: Record<string, string> = {
 
 /** Roles whose value a USER edits; value_committed on anything else is the
  * page updating itself while the user works, and must not be described as
- * the user typing. */
-const EDITABLE_ROLES = new Set([
-  // macOS AX observer
-  "AXTextField",
-  "AXTextArea",
-  "AXComboBox",
-  "AXCheckBox",
-  "AXRadioButton",
-  "AXPopUpButton",
-  "AXCell",
-  // Chrome relay (ARIA-style)
-  "textbox",
-  "textarea",
-  "input",
-  "field",
-  "searchbox",
-  "combobox",
-  "checkbox",
-  "cell",
-]);
+ * the user typing. Shared with the capability catalog so the phrase and the
+ * automation verdict can never drift apart — the catalog maps a value change
+ * on a non-value-holding role to a READ, and this phrases it as an update. */
+const EDITABLE_ROLES = EDITABLE_VALUE_ROLES;
 
 function roleNoun(role: string): string | null {
   if (!role || role === "-") return null;

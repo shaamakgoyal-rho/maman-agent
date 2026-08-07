@@ -51,6 +51,38 @@ describe("explainWorkflowSteps", () => {
     expect(explanation.read_only).toBe(false);
   });
 
+  it("never claims a form fill for a step where the page updated itself", () => {
+    // The AXStaticText step: not user-editable, so the honest automation is
+    // reading the updated content — not proposing a form fill there. This is
+    // the role-aware mapping fix, verified against the live pattern.
+    const explanation = explainWorkflowSteps(LIVE_BROWSER_SEQUENCE);
+    const pageUpdate = explanation.steps[1]!;
+    expect(pageUpdate.observed).toBe("a block of text updates");
+    if (pageUpdate.automation.kind !== "automated") throw new Error("expected automated");
+    expect(pageUpdate.automation.steps.map((s) => s.capability_id)).toEqual([
+      "browser.extract_structured_fields",
+    ]);
+    expect(pageUpdate.automation.steps[0]!.mode).toBe("read");
+  });
+
+  it("keeps phrase and automation agency consistent for every step", () => {
+    // A step described as the PAGE updating must never claim a write; a step
+    // described as the USER changing a value may. Drift between the two reads
+    // as the card contradicting itself.
+    const explanation = explainWorkflowSteps([
+      ...LIVE_BROWSER_SEQUENCE,
+      "chrome:browser:value_committed:row:-:-",
+      "chrome:browser:value_committed:textbox:-:-",
+    ]);
+    for (const step of explanation.steps) {
+      if (step.automation.kind !== "automated") continue;
+      const claimsWrite = step.automation.steps.some((s) => s.mode !== "read");
+      if (/updates$/.test(step.observed)) {
+        expect(claimsWrite, `"${step.observed}" must not claim a write`).toBe(false);
+      }
+    }
+  });
+
   it("marks app and window switches as context, not manual work", () => {
     const explanation = explainWorkflowSteps([
       "macos_ax:browser:app_activated:-:-:-",
