@@ -59,8 +59,9 @@ type NameCopy = { title: string; summary: string } | null;
 // ---- deterministic recipes ----
 
 type Recipe = {
-  /** Whether this recipe safely covers the given generalized intent. */
-  matches: (intent: string) => boolean;
+  /** Whether this recipe safely covers the given intent AND candidate — some
+   * recipes are shaped by what was actually observed, not the intent alone. */
+  matches: (intent: string, req: CompileRequest) => boolean;
   build: (req: CompileRequest) => {
     steps: AgentStep[];
     inputs: AgentSpec["inputs"];
@@ -232,7 +233,104 @@ const RECONCILIATION_RECIPE: Recipe = {
   }),
 };
 
-const RECIPES: Recipe[] = [RECONCILIATION_RECIPE];
+/** Intents the deterministic naming derives for live-observed workflows with
+ * no recognisable business shape: automate_<object>_workflow. */
+const BROWSER_WORKFLOW_INTENT = /^automate_([a-z0-9_]+)_workflow$/;
+
+/**
+ * Live-observed browser workflows — the shape the macOS AX observer actually
+ * produces (browser category, element_focused / value_committed, no object
+ * nouns). Before this recipe existed, "Try it" on every live browser card
+ * failed with C-NO-PLAN: the only recipe matched CRM reconciliation intents,
+ * and the constrained model draft has nothing to add for an anonymous page.
+ *
+ * The recipe compiles the canonical supervised-browser shape rather than
+ * echoing the raw event sequence: read the page's fields, propose the fill,
+ * apply it once after explicit approval, then re-read to verify (independent
+ * read — the run engine's verification story). A sequence whose mapped
+ * capabilities are read-only compiles to just the read step: a helper that
+ * extracts and changes nothing.
+ *
+ * Scope guard: every mapped capability must be browser.* — a flow that mixes
+ * in spreadsheet or CRM work is NOT safely covered by this shape and stays
+ * blocked (honest) rather than compiling a helper that ignores half the work.
+ */
+const BROWSER_WORKFLOW_RECIPE: Recipe = {
+  matches: (intent, req) => {
+    if (!BROWSER_WORKFLOW_INTENT.test(intent)) return false;
+    const mapped = req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t));
+    return mapped.length > 0 && mapped.every((id) => id.startsWith("browser."));
+  },
+  build: (req) => {
+    const mapped = new Set(
+      req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t)),
+    );
+    const writes = mapped.has("browser.supervised_form_fill");
+
+    const steps: AgentStep[] = [
+      step(
+        1,
+        "read-page",
+        "Read the fields on the open page",
+        "browser.extract_structured_fields",
+        "read",
+        { page: { source: "literal", value: "current_page" } },
+        "page_fields",
+      ),
+    ];
+    if (mapped.has("browser.extract_table")) {
+      steps.push(
+        step(
+          steps.length + 1,
+          "read-table",
+          "Read the table on the open page",
+          "browser.extract_table",
+          "read",
+          { page: { source: "literal", value: "current_page" } },
+          "page_table",
+        ),
+      );
+    }
+    if (writes) {
+      steps.push(
+        step(
+          steps.length + 1,
+          "propose-fill",
+          "Propose the form fill",
+          "browser.propose_form_fill",
+          "propose_write",
+          { fields: { source: "step_output", ref: "page_fields" } },
+          "proposed_fill",
+        ),
+        step(
+          steps.length + 2,
+          "apply-fill",
+          "Fill the form, once, after your approval",
+          "browser.supervised_form_fill",
+          "write",
+          { proposal: { source: "step_output", ref: "proposed_fill" } },
+          "fill_result",
+          { approval: { required: true, reason: "supervised browser write" } },
+        ),
+        step(
+          steps.length + 3,
+          "verify-read",
+          "Re-read the page to verify the change",
+          "browser.extract_structured_fields",
+          "read",
+          {
+            page: { source: "literal", value: "current_page" },
+            after: { source: "step_output", ref: "fill_result" },
+          },
+          "verification_fields",
+        ),
+      );
+    }
+    return { inputs: [], steps, assertions: [] };
+  },
+};
+
+const RECIPES: Recipe[] = [RECONCILIATION_RECIPE, BROWSER_WORKFLOW_RECIPE];
 
 function allowedCapabilityIds(req: CompileRequest): string[] {
   return req.candidate.canonical_sequence
@@ -276,7 +374,7 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
   }
 
   // 1. Deterministic recipe when the intent maps to a known shape.
-  const recipe = RECIPES.find((r) => r.matches(req.generalized_intent));
+  const recipe = RECIPES.find((r) => r.matches(req.generalized_intent, req));
   if (recipe) {
     return finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
   }
