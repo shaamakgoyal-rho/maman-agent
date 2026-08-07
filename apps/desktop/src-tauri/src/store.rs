@@ -631,12 +631,20 @@ impl LocalStore {
     /// excludes bundle ids, domains, record hashes, field names, labels, and
     /// encrypted payloads. This is the ONLY bulk read the webview may perform.
     pub async fn pattern_features(&self, limit: i64) -> Result<Vec<serde_json::Value>, StoreError> {
+        // When the store holds more events than the limit, keep the NEWEST
+        // window, not the oldest: patterns are detected in what the user does
+        // now, and an oldest-first cut silently freezes the engine's view at
+        // the point the store outgrew the limit (observed live at 10k). The
+        // inner query picks the newest N; the outer restores ascending order,
+        // which segmentation requires.
         let rows = sqlx::query(
-            "SELECT event_id, occurred_at, source, app_category, event_type, sensitivity,
-                    encrypted_payload, excluded_from_learning, quarantined,
-                    pack_domain, domain_object, domain_action, classifier_confidence
-             FROM workflow_events
-             ORDER BY occurred_at ASC LIMIT ?",
+            "SELECT * FROM (
+                SELECT event_id, occurred_at, source, app_category, event_type, sensitivity,
+                       encrypted_payload, excluded_from_learning, quarantined,
+                       pack_domain, domain_object, domain_action, classifier_confidence
+                FROM workflow_events
+                ORDER BY occurred_at DESC LIMIT ?
+             ) ORDER BY occurred_at ASC",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -2107,6 +2115,47 @@ mod domain_ingest_tests {
             .unwrap();
         assert!(unclassified.get("pack_domain").is_none());
         assert!(unclassified.get("domain_object").is_none());
+    }
+
+    /// When the store holds more events than the feature limit, the projection
+    /// must keep the NEWEST window, in ascending order. The first live store to
+    /// cross the limit proved the stakes: an oldest-first cut silently froze
+    /// the engine's view at the moment the store outgrew the limit, so the
+    /// user's most recent work never reached pattern detection.
+    #[tokio::test]
+    async fn pattern_features_keeps_the_newest_events_when_over_limit() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+        )
+        .await
+        .unwrap();
+
+        for i in 1..=5u32 {
+            let mut event = crm_event(i, "opportunity");
+            event["occurred_at"] = json!(format!("2026-08-01T00:00:0{i}.000Z"));
+            store.insert_event(&event, 30).await.unwrap();
+        }
+
+        let features = store.pattern_features(3).await.unwrap();
+        let ids: Vec<&str> = features.iter().map(|f| f["event_id"].as_str().unwrap()).collect();
+        // The newest three (03..05) survive — 01 and 02 fall off, not the tail.
+        assert_eq!(
+            ids,
+            vec![
+                "0191bbbb-0000-7000-8000-000000000003",
+                "0191bbbb-0000-7000-8000-000000000004",
+                "0191bbbb-0000-7000-8000-000000000005",
+            ]
+        );
+        // And segmentation's precondition holds: ascending occurred_at.
+        let times: Vec<&str> =
+            features.iter().map(|f| f["occurred_at"].as_str().unwrap()).collect();
+        let mut sorted = times.clone();
+        sorted.sort_unstable();
+        assert_eq!(times, sorted);
     }
 
     #[tokio::test]
