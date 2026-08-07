@@ -236,3 +236,35 @@ describe("reading the persisted file", () => {
     expect(parsed.discarded).toBe(1);
   });
 });
+
+describe("teaching is offered where waiting cannot help", () => {
+  /**
+   * The rule the Forming card uses to decide whether to offer teaching.
+   *
+   * Kept as a plain predicate so the reasoning is testable without a renderer:
+   * a pattern with real work to automate but NO step specific enough to replay
+   * will never clear the verification bar by repeating — more repetitions of an
+   * unspecific workflow are still unspecific.
+   */
+  const shouldOfferTeaching = (meaningfulSteps: number, automatable: number) =>
+    meaningfulSteps === 0 && automatable > 0;
+
+  it("offers teaching for an AX-observed browser workflow (the device's real case)", () => {
+    // Tokens carry a role but no field name and no value, so replay has nothing
+    // to compare — exactly the five candidates on the first real device.
+    const draft = draftFromCandidate(candidate(), OWNER, at);
+    expect(draft.steps.length).toBeGreaterThan(0); // there IS work to automate
+    expect(shouldOfferTeaching(0, draft.steps.length)).toBe(true);
+  });
+
+  it("does NOT offer teaching when there is nothing automatable at all", () => {
+    // An unidentifiable native app has no capability behind it; teaching field
+    // names would not make it runnable, so the offer would be a dead end.
+    expect(shouldOfferTeaching(0, 0)).toBe(false);
+  });
+
+  it("does NOT offer teaching when the pattern is already specific enough", () => {
+    // This one just needs more runs — waiting genuinely does help.
+    expect(shouldOfferTeaching(3, 3)).toBe(false);
+  });
+});

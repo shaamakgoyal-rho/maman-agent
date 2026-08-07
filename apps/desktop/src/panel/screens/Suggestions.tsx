@@ -293,6 +293,13 @@ function FormingCard({
   // watched is just as opaque as one being offered if all you see is a name.
   const steps = stepPhrase(item.candidate.canonical_sequence);
   const explanation = explainWorkflowSteps(item.candidate.canonical_sequence);
+  /**
+   * True when this pattern can never be verified as observed: it has real work
+   * to automate, but no step carries anything specific enough to replay. That
+   * is a teaching problem, not a patience problem.
+   */
+  const unverifiableWithoutTeaching =
+    item.verification?.meaningful_expected_steps === 0 && explanation.automated_count > 0;
   return (
     <Card>
       <div className="flex items-start justify-between gap-2">
@@ -318,6 +325,34 @@ function FormingCard({
         </div>
         <p className="mt-1.5 text-xs text-ink">{progress.nextStep}</p>
       </div>
+
+      {/* TEACHING IS THE REMEDY FOR THE COMMONEST BLOCK.
+          A pattern that cannot be verified because nothing about it is specific
+          enough — the exact state of every AX-observed browser workflow, whose
+          tokens carry a role but no field name and no value — will NEVER clear
+          the bar by waiting. More repetitions of an unspecific workflow are
+          still unspecific. The only thing that moves it is the user telling
+          Maman what it could not see, so the offer sits here rather than being
+          reachable only from a card this pattern cannot become. */}
+      {unverifiableWithoutTeaching && (
+        <div className="mt-2 rounded border border-line bg-panel p-2">
+          <p className="text-xs text-ink">
+            Waiting longer won&apos;t help this one — I never saw which fields it touches or what
+            values belong in them, so there is nothing for me to check against.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              const workflow = await useLearnedWorkflows
+                .getState()
+                .startFor(item.candidate, item.candidate.owner_user_id);
+              useNavigation.getState().openConfigure(workflow.workflow_id);
+            }}
+          >
+            Teach me this workflow
+          </Button>
+        </div>
+      )}
 
       <button className="mt-2 text-xs text-primary" onClick={onToggleExpand}>
         {expanded ? "Hide details" : "Why isn't this a suggestion yet?"}
