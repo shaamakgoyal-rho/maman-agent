@@ -61,3 +61,13 @@ export {
   type AgentDescription,
   type ProposedHelperDescription,
 } from "./describe.js";
+export {
+  runtimeFromRegistry,
+  validateRuntimeCapabilities,
+  requireAdapter,
+  describeMissingCapabilities,
+  RuntimeCapabilityError,
+  type CapabilityRuntime,
+  type MissingCapability,
+  type RuntimeReadiness,
+} from "./runtime-capabilities.js";

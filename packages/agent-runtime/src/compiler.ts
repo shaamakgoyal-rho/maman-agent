@@ -15,6 +15,12 @@ import {
 } from "@maman/model-provider";
 import { evaluateSpec, type EvaluationContext, type OrgPolicy } from "@maman/policy-engine";
 import { validateAgentSpec, type ValidationIssue } from "./validator.js";
+import {
+  describeMissingCapabilities,
+  validateRuntimeCapabilities,
+  type CapabilityRuntime,
+  type MissingCapability,
+} from "./runtime-capabilities.js";
 
 /**
  * AgentSpec compiler (spec §13). Order of authority:
@@ -36,6 +42,16 @@ export type CompileRequest = {
   policy_version_id: string;
   now: () => Date;
   model?: ModelProvider;
+  /**
+   * The runtime that will execute the result. When supplied, a recipe may only
+   * emit steps this runtime has an adapter for, in the mode the step needs; a
+   * workflow whose required capabilities are unavailable returns
+   * `needs_runtime` instead of a spec that would crash mid-run.
+   *
+   * Optional so existing callers keep compiling (they then get the previous,
+   * runtime-blind behaviour) — but the desktop and worker paths pass it.
+   */
+  runtime?: CapabilityRuntime;
 };
 
 export type CompileResult =
@@ -51,7 +67,19 @@ export type CompileResult =
       /** Priced compile cost from the usage above ($0 in demo mode). */
       model_cost_usd: number;
     }
-  | { status: "blocked"; issues: ValidationIssue[]; message: string };
+  | { status: "blocked"; issues: ValidationIssue[]; message: string }
+  /**
+   * A recipe covers this workflow, but the selected runtime cannot execute it.
+   * Distinct from `blocked` on purpose: `blocked` means "we do not know how to
+   * do this", while this means "we know how, but not here" — the user needs to
+   * connect or install something, not describe their workflow differently.
+   */
+  | {
+      status: "needs_runtime";
+      runtime_id: string;
+      missing: MissingCapability[];
+      message: string;
+    };
 
 /** Copy the model may set (title/summary only); deterministic values win. */
 type NameCopy = { title: string; summary: string } | null;
@@ -68,6 +96,28 @@ type Recipe = {
     assertions: AgentSpec["assertions"];
   };
 };
+
+/**
+ * Whether the compile target can execute `capabilityId`. With no runtime
+ * supplied the answer is "assume yes" — the previous behaviour, kept so
+ * existing callers are unaffected.
+ */
+function runtimeHas(req: CompileRequest, capabilityId: string): boolean {
+  if (!req.runtime) return true;
+  if (!req.runtime.available.has(capabilityId)) return false;
+  return (req.runtime.unmet_prerequisites?.get(capabilityId) ?? undefined) === undefined;
+}
+
+/** Capabilities the browser recipe will emit for this candidate. */
+function requiredForBrowserRecipe(req: CompileRequest): string[] {
+  const mapped = new Set(req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t)));
+  const required = ["browser.extract_structured_fields"];
+  if (mapped.has("browser.extract_table")) required.push("browser.extract_table");
+  if (mapped.has("browser.supervised_form_fill")) {
+    required.push("browser.propose_form_fill", "browser.supervised_form_fill");
+  }
+  return required;
+}
 
 /** Derived intents the deterministic naming emits for CRM update patterns. */
 const UPDATE_RECORDS_INTENT = /^update_([a-z0-9_]+)_records$/;
@@ -259,7 +309,13 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
   matches: (intent, req) => {
     if (!BROWSER_WORKFLOW_INTENT.test(intent)) return false;
     const mapped = req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t));
-    return mapped.length > 0 && mapped.every((id) => id.startsWith("browser."));
+    if (mapped.length === 0 || !mapped.every((id) => id.startsWith("browser."))) return false;
+    // A recipe must not emit steps the target runtime cannot execute. Without
+    // this the write branch below produced browser.propose_form_fill and
+    // browser.supervised_form_fill, which NO adapter registry implements, and
+    // the desktop run path passed the resulting `undefined` adapter into the
+    // run engine — a TypeError mid-run instead of an honest refusal.
+    return requiredForBrowserRecipe(req).every((id) => runtimeHas(req, id));
   },
   build: (req) => {
     const mapped = new Set(
@@ -376,7 +432,45 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
   // 1. Deterministic recipe when the intent maps to a known shape.
   const recipe = RECIPES.find((r) => r.matches(req.generalized_intent, req));
   if (recipe) {
-    return finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
+    const result = finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
+    // Final gate: even a matched recipe must not produce a spec this runtime
+    // cannot execute. Checked on the BUILT spec, so it covers every step
+    // actually emitted rather than what the matcher predicted.
+    if (result.status === "valid" && req.runtime) {
+      const readiness = validateRuntimeCapabilities(result.spec, req.runtime);
+      if (!readiness.ready) {
+        return {
+          status: "needs_runtime",
+          runtime_id: readiness.runtime_id,
+          missing: readiness.missing,
+          message: describeMissingCapabilities(readiness.missing),
+        };
+      }
+    }
+    return result;
+  }
+
+  // A browser workflow whose recipe declined ONLY because the runtime lacks an
+  // adapter must say so, rather than falling through to "I couldn't safely
+  // draft this" (which sends the user to reconfigure a workflow that is fine).
+  if (req.runtime && BROWSER_WORKFLOW_INTENT.test(req.generalized_intent)) {
+    const unavailable = requiredForBrowserRecipe(req).filter((id) => !runtimeHas(req, id));
+    if (unavailable.length > 0) {
+      const missing: MissingCapability[] = unavailable.map((id) => ({
+        capability_id: id,
+        step_id: "-",
+        reason: req.runtime!.available.has(id) ? "prerequisite_unmet" : "no_adapter",
+        detail:
+          req.runtime!.unmet_prerequisites?.get(id) ??
+          `${req.runtime!.runtime_id} has no adapter for ${id}`,
+      }));
+      return {
+        status: "needs_runtime",
+        runtime_id: req.runtime.runtime_id,
+        missing,
+        message: describeMissingCapabilities(missing),
+      };
+    }
   }
 
   // 2. Constrained model draft (twice), fully validated. Budget-capped: a draft

@@ -9,9 +9,13 @@ import {
 } from "@maman/contracts";
 import {
   compileAgentSpec,
+  demoAdapterRegistry,
+  DemoSalesforceWorld,
   renderPlainLanguagePlan,
+  runtimeFromRegistry,
   stateAfterMaterialEdit,
   validateAgentSpec,
+  type MissingCapability,
 } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DemoModelProvider } from "@maman/model-provider";
@@ -92,7 +96,17 @@ async function saveRaw(json: string): Promise<void> {
 }
 
 export type CreateDraftResult =
-  { ok: true; agent: AgentRecord; policy_summary: string } | { ok: false; message: string };
+  | { ok: true; agent: AgentRecord; policy_summary: string }
+  | {
+      ok: false;
+      message: string;
+      /**
+       * Present when the refusal was a runtime gap rather than an unknown
+       * workflow — the UI can then tell the user what to connect or install
+       * instead of asking them to describe the workflow differently.
+       */
+      missing_capabilities?: MissingCapability[];
+    };
 
 type AgentsStore = {
   agents: AgentRecord[];
@@ -170,18 +184,34 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       policy_version_id: uuidv7(),
       now: () => new Date(),
       model: new DemoModelProvider(),
+      // Compile for the runtime that will actually run it, so a helper is never
+      // created from steps this device cannot execute.
+      runtime: runtimeFromRegistry("local-demo", demoAdapterRegistry(new DemoSalesforceWorld())),
     });
 
-    if (result.status === "blocked") {
+    // `needs_runtime` is a DIFFERENT answer from `blocked`: the workflow is
+    // understood, but this runtime has no adapter (or an unmet prerequisite) for
+    // one of its steps. Registering it anyway is what let a spec containing
+    // browser.supervised_form_fill — which no registry implements — reach the
+    // run engine as an `undefined` adapter.
+    if (result.status !== "valid") {
+      const message =
+        result.status === "needs_runtime"
+          ? `${result.message}. I won't create a helper that can't run.`
+          : result.message;
       await emitAppEvent({
         type: "status_beat",
         beat: {
           kind: "agent_failed",
           title: displayName ?? "a new helper",
-          message: result.message,
+          message,
         },
       });
-      return { ok: false, message: result.message };
+      return {
+        ok: false,
+        message,
+        ...(result.status === "needs_runtime" ? { missing_capabilities: result.missing } : {}),
+      };
     }
 
     const agent: AgentRecord = {

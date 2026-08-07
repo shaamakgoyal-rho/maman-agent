@@ -4,6 +4,10 @@ import {
   demoAdapterRegistry,
   DemoSalesforceWorld,
   executeStep,
+  requireAdapter,
+  RuntimeCapabilityError,
+  runtimeFromRegistry,
+  validateRuntimeCapabilities,
   type CapabilityContext,
   type ProposedDiff,
   type RunState,
@@ -146,6 +150,13 @@ type RunsStore = {
 const OWNER = "00000000-0000-7000-8000-000000000001";
 const ORG = "00000000-0000-7000-8000-000000000002";
 
+/**
+ * The in-app executor. Named so a capability-availability refusal can say WHERE
+ * the adapter is missing — "the local demo runtime has no adapter for
+ * browser.supervised_form_fill" is actionable; a bare TypeError is not.
+ */
+const LOCAL_RUNTIME_ID = "local-demo";
+
 const DEFAULT_INTENT = "reconcile_account_list";
 const DEFAULT_OUTCOME = "Reconcile the account list with Salesforce.";
 
@@ -171,6 +182,10 @@ async function compile(
     policy_version_id: uuidv7(),
     now: () => new Date(),
     model: new DemoModelProvider(),
+    // Compile FOR this runtime: a recipe may not emit a step the local
+    // executor has no adapter for. Without this the browser recipe happily
+    // produced supervised_form_fill steps that nothing can execute.
+    runtime: runtimeFromRegistry(LOCAL_RUNTIME_ID, demoAdapterRegistry(demoWorld())),
   });
   if (result.status !== "valid") throw new Error(result.message);
   return result.spec;
@@ -362,6 +377,15 @@ export const useRuns = create<RunsStore>((set) => ({
       activeState = { outputs: {} };
       activeRunId = uuidv7();
       const registry = demoAdapterRegistry(activeWorld);
+      // BLOCK BEFORE EXECUTING ANYTHING. Checking here rather than per-step
+      // means a spec that is missing an adapter for a LATER step never performs
+      // its earlier steps — a half-run that stops at a TypeError is worse than
+      // a refusal, because the user cannot tell what did and did not happen.
+      const readiness = validateRuntimeCapabilities(
+        activeSpec,
+        runtimeFromRegistry(LOCAL_RUNTIME_ID, registry),
+      );
+      if (!readiness.ready) throw new RuntimeCapabilityError(readiness);
       let diff: ProposedDiff | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") continue; // shadow: stop before writes
@@ -372,7 +396,7 @@ export const useRuns = create<RunsStore>((set) => ({
           state: activeState,
           agentInputs: {},
           ctx: ctx("shadow"),
-          adapter: registry.get(step.capability_id)!,
+          adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
         });
         if (result.kind === "proposed") diff = result.diff;
       }
@@ -451,7 +475,7 @@ export const useRuns = create<RunsStore>((set) => ({
           state: activeState,
           agentInputs: {},
           ctx: ctx("supervised"),
-          adapter: registry.get(step.capability_id)!,
+          adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
         });
         if (result.kind === "proposed") {
           pending = {
@@ -679,7 +703,7 @@ export const useRuns = create<RunsStore>((set) => ({
         state: activeState,
         agentInputs: {},
         ctx: ctx("supervised"),
-        adapter: registry.get(writeStep.capability_id)!,
+        adapter: requireAdapter(registry, writeStep, LOCAL_RUNTIME_ID),
         approvedDiff: pending.diff,
         approvedDiffSha: pending.diff_sha256,
       });
