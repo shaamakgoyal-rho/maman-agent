@@ -289,6 +289,7 @@ function FormingCard({
   onToggleExpand: () => void;
 }) {
   const { progress } = item;
+  const [teachError, setTeachError] = useState<string | null>(null);
   // Same "what this actually is" line as a suggestion card: a workflow being
   // watched is just as opaque as one being offered if all you see is a name.
   const steps = stepPhrase(item.candidate.canonical_sequence);
@@ -337,16 +338,28 @@ function FormingCard({
       {unverifiableWithoutTeaching && (
         <div className="mt-2 rounded border border-line bg-panel p-2">
           <p className="text-xs text-ink">
-            Waiting longer won&apos;t help this one — I never saw which fields it touches or what
-            values belong in them, so there is nothing for me to check against.
+            {item.previously_accepted
+              ? "You accepted this one, but the helper I built from it can't actually run — I never saw which fields it touches or what values belong in them. Your existing helper stays exactly as it is; teaching this creates a separate one that works."
+              : "Waiting longer won't help this one — I never saw which fields it touches or what values belong in them, so there is nothing for me to check against."}
           </p>
+          {teachError && <p className="mt-1 text-xs text-danger">{teachError}</p>}
           <Button
             variant="secondary"
             onClick={async () => {
-              const workflow = await useLearnedWorkflows
-                .getState()
-                .startFor(item.candidate, item.candidate.owner_user_id);
-              useNavigation.getState().openConfigure(workflow.workflow_id);
+              setTeachError(null);
+              try {
+                const workflow = await useLearnedWorkflows
+                  .getState()
+                  .startFor(item.candidate, item.candidate.owner_user_id);
+                useNavigation.getState().openConfigure(workflow.workflow_id);
+              } catch (e) {
+                // WITHOUT THIS the rejection vanished and the button looked
+                // inert — indistinguishable from not being there at all, which
+                // is exactly how a real failure went unnoticed on device.
+                setTeachError(
+                  e instanceof Error ? e.message : "I could not start teaching that workflow.",
+                );
+              }
             }}
           >
             Teach me this workflow

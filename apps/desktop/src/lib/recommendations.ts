@@ -112,7 +112,33 @@ export type FormingItem = {
   steps: string[];
   progress: FormingProgress;
   verification: ReplayReport | null;
+  /**
+   * True when the user already accepted this pattern, but the helper made from
+   * it cannot actually run. The card says so rather than pretending it is still
+   * forming — "accepted" was recorded against a promise the system cannot keep.
+   */
+  previously_accepted?: boolean;
 };
+
+/**
+ * Whether a pattern still belongs in front of the user.
+ *
+ * `accepted` used to end the story: an agent existed, so the pattern was done.
+ * That assumption broke when verification got honest. Four patterns on a real
+ * device were accepted — agents were created from them by the inference
+ * compiler — and are ALSO unverifiable, because nothing about them is specific
+ * enough to replay. They then appeared nowhere: not as cards (unverified), not
+ * in Forming (accepted). The one action that would help, teaching them, was
+ * unreachable.
+ *
+ * So an accepted pattern stays visible when its helper cannot be verified as
+ * observed. Teaching it creates a SEPARATE configured workflow; the agent the
+ * user already has is left exactly as it is.
+ */
+function shouldStayVisible(entry: { status: string }, verification: ReplayReport | null): boolean {
+  if (entry.status !== "accepted") return true;
+  return verification !== null && verification.meaningful_expected_steps === 0;
+}
 
 type RecommendationsStore = {
   state: SuggestionState;
@@ -328,7 +354,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
       } else if (passesGate(verification)) {
         // Proven: this becomes the card.
         items.push({ recommendation, candidate, signature, entry, verification });
-      } else if (entry.status !== "dismissed" && entry.status !== "accepted") {
+      } else if (entry.status !== "dismissed" && shouldStayVisible(entry, verification)) {
         // Eligible but not yet proven: stays visibly forming with the score.
         formingSeen.add(signature);
         forming.push({
@@ -343,6 +369,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
             effectiveBars,
           ),
           verification,
+          previously_accepted: entry.status === "accepted",
         });
       }
     }

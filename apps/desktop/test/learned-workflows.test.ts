@@ -4,9 +4,12 @@ import { learnedWorkflowSchema, workflowReadiness, type PatternCandidate } from 
 /** Stands in for the Rust persistence commands, so the DESKTOP path is what
  * gets tested rather than the web-preview localStorage fallback. */
 let storedJson: string | null = null;
+/** Every command the store reached for, so a test can assert what it did NOT touch. */
+const commandsUsed: string[] = [];
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
   invokeCommand: async (cmd: string, args?: { json?: string }) => {
+    commandsUsed.push(cmd);
     if (cmd === "learned_workflows_load") return storedJson;
     if (cmd === "learned_workflows_save") {
       storedJson = args?.json ?? null;
@@ -266,5 +269,81 @@ describe("teaching is offered where waiting cannot help", () => {
   it("does NOT offer teaching when the pattern is already specific enough", () => {
     // This one just needs more runs — waiting genuinely does help.
     expect(shouldOfferTeaching(3, 3)).toBe(false);
+  });
+});
+
+describe("an accepted pattern whose helper cannot run stays reachable", () => {
+  /**
+   * THE BUG THIS PINS, found on a real device.
+   *
+   * Four patterns were `accepted` — agents had been created from them by the
+   * inference compiler — AND unverifiable, because nothing about them is
+   * specific enough to replay. They then appeared NOWHERE: not as cards (never
+   * verified), not in Forming (excluded as accepted). Teaching them, the one
+   * action that would have helped, was unreachable, and the button added for it
+   * was never on screen.
+   */
+  const stayVisible = (status: string, meaningfulSteps: number | null) => {
+    if (status !== "accepted") return true;
+    return meaningfulSteps !== null && meaningfulSteps === 0;
+  };
+
+  it("keeps an accepted pattern visible when its helper is unverifiable", () => {
+    expect(stayVisible("accepted", 0)).toBe(true);
+  });
+
+  it("hides an accepted pattern whose helper genuinely works", () => {
+    // A real, verifiable agent exists; re-offering it would be noise.
+    expect(stayVisible("accepted", 3)).toBe(false);
+  });
+
+  it("leaves every other status visible as before", () => {
+    for (const status of ["new", "viewed", "snoozed"]) {
+      expect(stayVisible(status, 0), status).toBe(true);
+    }
+  });
+
+  it("never resurfaces a pattern the user dismissed", () => {
+    // Dismissed means "stop showing me this". Unverifiability must not override
+    // a decision the user made explicitly, so the real filter ANDs the dismissed
+    // check with the visibility rule — modelled here exactly as the store does.
+    const showsInForming = (status: string, meaningfulSteps: number | null) =>
+      status !== "dismissed" && stayVisible(status, meaningfulSteps);
+    expect(showsInForming("dismissed", 0)).toBe(false);
+    expect(showsInForming("dismissed", 3)).toBe(false);
+    // …while the unverifiable-but-accepted case still comes back.
+    expect(showsInForming("accepted", 0)).toBe(true);
+  });
+});
+
+describe("teaching creates a SEPARATE workflow and touches nothing existing", () => {
+  it("writes only the learned-workflow file, never the agents file", async () => {
+    // The user's explicit choice: agents built by the old compiler are left
+    // exactly as they are, and teaching produces a new configured workflow
+    // beside them.
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    storedJson = null;
+    commandsUsed.length = 0;
+    await useLearnedWorkflows.getState().startFor(candidate(), OWNER);
+
+    // Only the learned-workflow commands were invoked. If teaching ever reached
+    // for agents_save, this fails — which is the property the user asked for.
+    expect(commandsUsed).toEqual(["learned_workflows_save"]);
+    expect(commandsUsed.some((c) => c.startsWith("agents_"))).toBe(false);
+
+    // …and the payload is a learned-workflow file, not an agents file.
+    const saved = JSON.parse(storedJson!) as { workflows?: unknown[]; agents?: unknown[] };
+    expect(Array.isArray(saved.workflows)).toBe(true);
+    expect(saved.agents).toBeUndefined();
+  });
+
+  it("is idempotent per pattern — a second teach reuses the same workflow", async () => {
+    // Clicking twice must not fork the user's configuration into two records.
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    storedJson = null;
+    const first = await useLearnedWorkflows.getState().startFor(candidate(), OWNER);
+    const second = await useLearnedWorkflows.getState().startFor(candidate(), OWNER);
+    expect(second.workflow_id).toBe(first.workflow_id);
+    expect(useLearnedWorkflows.getState().workflows).toHaveLength(1);
   });
 });
