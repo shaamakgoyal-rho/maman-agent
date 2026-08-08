@@ -157,44 +157,76 @@ function isVisible(el: Element): boolean {
 }
 
 /**
- * Accessible name, in the order the accname spec resolves it. This is
- * intentionally the simplified path — aria-labelledby, aria-label, an associated
- * label, placeholder, title, then text content — because a name this code cannot
- * compute yields `no_match`, which asks the user, rather than a wrong element.
+ * Accessible name — the simplified accname path, in the order fixed by
+ * `domain/accessible-name-conformance.json`.
+ *
+ * That fixture, not this function, is the specification. The other actuation
+ * lane (`AGENT_PAGE_SCRIPT` in `@maman/browser-actuator`) computes the same name
+ * from ES5 source evaluated inside the page, and the two cannot share code, so
+ * both suites assert the same table. The rung order and the reasoning behind the
+ * two non-obvious placements — `name` last, `value` above `title` — live next to
+ * `ACCESSIBLE_NAME_SOURCE`; change them there and here together, or the fixture
+ * fails on one side.
+ *
+ * A name this code cannot compute yields `no_match`, which asks the user, rather
+ * than a wrong element.
  */
 export function accessibleName(el: Element): string {
-  const labelledBy = el.getAttribute("aria-labelledby");
+  const attr = (name: string): string => normalizeNameWhitespace(el.getAttribute(name) ?? "");
+
+  const labelledBy = attr("aria-labelledby");
   if (labelledBy) {
-    const text = labelledBy
-      .split(/\s+/)
-      .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? "")
-      .join(" ")
-      .trim();
+    const text = normalizeNameWhitespace(
+      labelledBy
+        .split(" ")
+        .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? "")
+        .join(" "),
+    );
     if (text) return text;
   }
 
-  const ariaLabel = el.getAttribute("aria-label");
-  if (ariaLabel?.trim()) return ariaLabel.trim();
+  const ariaLabel = attr("aria-label");
+  if (ariaLabel) return ariaLabel;
 
   if (el.id) {
     const forLabel = el.ownerDocument.querySelector(`label[for="${cssEscape(el.id)}"]`);
-    if (forLabel?.textContent?.trim()) return forLabel.textContent.trim();
+    const forText = normalizeNameWhitespace(forLabel?.textContent ?? "");
+    if (forText) return forText;
   }
-  const wrapping = el.closest("label");
-  if (wrapping?.textContent?.trim()) return wrapping.textContent.trim();
+  const wrapping = normalizeNameWhitespace(el.closest("label")?.textContent ?? "");
+  if (wrapping) return wrapping;
 
-  const placeholder = el.getAttribute("placeholder");
-  if (placeholder?.trim()) return placeholder.trim();
-
-  const title = el.getAttribute("title");
-  if (title?.trim()) return title.trim();
-
-  const value = (el as HTMLInputElement).value;
-  if (el.tagName.toLowerCase() === "input" && isButtonType(el) && value?.trim()) {
-    return value.trim();
+  if (el.tagName.toLowerCase() === "input" && isButtonType(el)) {
+    const buttonValue = normalizeNameWhitespace((el as HTMLInputElement).value ?? "");
+    if (buttonValue) return buttonValue;
   }
 
-  return el.textContent?.trim() ?? "";
+  const placeholder = attr("placeholder");
+  if (placeholder) return placeholder;
+
+  const title = attr("title");
+  if (title) return title;
+
+  const text = normalizeNameWhitespace(el.textContent ?? "");
+  if (text) return text;
+
+  // Last resort, and never above visible text: a machine token is better than
+  // an unaddressable control, but worse than anything a human could read.
+  return attr("name");
+}
+
+/**
+ * Collapse runs of whitespace, NBSP included, and trim.
+ *
+ * `normalizeName` in the resolver would do this anyway for THIS lane, but the
+ * other lane compares `confirm_name` by exact equality against a live document.
+ * Normalising at the source is what makes one page yield one string in both.
+ */
+function normalizeNameWhitespace(raw: string): string {
+  return raw
+    .replace(/\u00a0/g, " ") // escaped: a literal NBSP here is invisible in review
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isButtonType(el: Element): boolean {
