@@ -111,8 +111,26 @@ export function Agents() {
 
             {isOpen && (
               <div className="mt-2 space-y-2">
+                {latest.intent_plan.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-ink">What this agent does</p>
+                    <ol className="mt-1 space-y-0.5 text-xs text-muted list-none">
+                      {latest.intent_plan.map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
                 <div>
-                  <p className="text-xs font-medium text-ink">What this agent does</p>
+                  {/*
+                   * Kept below the concrete plan, not replaced by it: this one
+                   * is derived from the spec's own steps and budgets, so it is
+                   * the account of what will actually execute. The plan above
+                   * is the readable one; this is the checkable one.
+                   */}
+                  <p className="text-xs font-medium text-ink">
+                    {latest.intent_plan.length > 0 ? "Steps and limits" : "What this agent does"}
+                  </p>
                   <ol className="mt-1 space-y-0.5 text-xs text-muted list-none">
                     {latest.plain_language_plan.map((line, i) => (
                       <li key={i}>{line}</li>

@@ -65,6 +65,32 @@ Evidence must be exact (commands run, test counts). No marketing language.
 | desktop capability panel           | complete | "Maman can currently use" card in plain language (observation, Browser Relay pairing status via boolean-only command, connectors honest about no API execution claims)                                                                                                                                                                                |
 | remaining mesh work                | complete | All landed: broker routes wire connector-auth to the vault (M8); worker executes real + demo adapters with run-time receipts (M7/M11/M14); Browser Relay popup renamed (M8); the reconciliation recipe/bindings drive the run engine (M6/M7); shadow-run against demo adapters (M7/M12); the 12-step end-to-end demo is the Playwright journey (M17). |
 
+## Intent layer (`packages/intent-layer`)
+
+Replaces the bare `generalized_intent` string with a structure that says what an
+automation NEEDS: typed slots, which the agent can discover by reading the live
+surface, and which are genuinely unknowable without being told. This is what
+makes a description concrete, and it is the alternative to teaching every
+detail — the agent finds the field itself and only asks for the value.
+
+| Component            | Status   | Evidence                                                                                                                                                                                                                                                                                                                                           |
+| -------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveIntent`      | complete | 28 tests. Supplied answers outrank discovery; the record locator comes from the allowlisted origin; ambiguity fails closed (two "Phone" textboxes resolve to nothing, not the first); `not_looked_yet` is a distinct verdict from `no_matching_control`; observed semantics narrow candidates and never conjure a control that is not on the page. |
+| descriptions         | complete | `describeIntentTitle` / `describeIntentPlan` / `describeIntentPlanSteps` build every noun from a resolved slot or from the vocabulary discovery will search for. An unresolved intent cannot produce the confident sentence — `describeResolvedIntent` degrades to naming the gap.                                                                 |
+| compiler integration | complete | 5 tests in `compiler-browser-recipe.test.ts`. An intent may name a spec only when every capability it requires is in the emitted steps, so a description can never promise a write the steps do not perform; the reconciliation recipe (no fitting intent) keeps its own name and gets an empty plan.                                              |
+
+Measured on the live device's own eligible pattern (AX gives no semantic type):
+`Helper: automate record workflow` → **"Update a field on this record"** /
+_"Set the field you point me at on the record you have open to a value you give
+me, then read it back to confirm it took."_ With a source that does record
+semantics, the same pattern reads **"Update the phone field on this record"**.
+
+Not yet wired: run-time resolution. `discovered_on_surface` is exercised by
+tests but has no production caller, so descriptions currently sharpen only as
+far as the observed vocabulary allows. Wiring the run engine to resolve against
+the live page before executing is the next step, and is what turns "names the
+field it will look for" into "names the field it found".
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

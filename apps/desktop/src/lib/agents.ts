@@ -34,6 +34,13 @@ const versionSchema = z
     version_number: z.number().int().positive(),
     spec: agentSpecSchema,
     plain_language_plan: z.array(z.string()),
+    /**
+     * The intent-derived plan: what this agent does on the real surface, in
+     * the user's terms. Defaulted rather than required so agents written by an
+     * earlier build still load — an empty plan renders nothing, which is the
+     * correct treatment for an agent whose steps no intent claimed.
+     */
+    intent_plan: z.array(z.string()).default([]),
     created_at: z.string(),
     created_by: z.enum(["user", "compiler"]),
   })
@@ -237,6 +244,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
           version_number: 1,
           spec: result.spec,
           plain_language_plan: result.plain_language_plan,
+          intent_plan: result.intent_plan,
           created_at: result.spec.created_at,
           created_by: "compiler",
         },
@@ -286,6 +294,11 @@ export const useAgents = create<AgentsStore>((set, get) => ({
         version_number: latest.version_number + 1,
         spec: validation.spec,
         plain_language_plan: renderPlainLanguagePlan(validation.spec),
+        // Editing the description does not change a step, so the plan of what
+        // the agent does carries forward untouched. Re-deriving it here would
+        // be wrong in the other direction: it would silently overwrite what
+        // the user was shown when they approved.
+        intent_plan: latest.intent_plan,
         created_at: new Date().toISOString(),
         created_by: "user",
       },

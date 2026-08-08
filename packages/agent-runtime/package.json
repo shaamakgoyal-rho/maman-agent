@@ -19,6 +19,7 @@
     "@maman/capability-catalog": "workspace:*",
     "@maman/contracts": "workspace:*",
     "@maman/demo-fixtures": "workspace:*",
+    "@maman/intent-layer": "workspace:*",
     "@maman/model-provider": "workspace:*",
     "@maman/policy-engine": "workspace:*",
     "@temporalio/workflow": "^1.11.5",

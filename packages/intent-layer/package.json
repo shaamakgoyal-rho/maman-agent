@@ -1,0 +1,25 @@
+{
+  "name": "@maman/intent-layer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@maman/capability-catalog": "workspace:*",
+    "@maman/contracts": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@maman/tsconfig": "workspace:*",
+    "@vitest/coverage-v8": "^3.2.7",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7"
+  }
+}

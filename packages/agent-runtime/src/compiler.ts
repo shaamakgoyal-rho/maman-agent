@@ -13,6 +13,14 @@ import {
   type ModelUsage,
   type NamingInput,
 } from "@maman/model-provider";
+import {
+  candidateIntents,
+  describeIntentPlan,
+  describeIntentPlanSteps,
+  describeIntentTitle,
+  resolveIntent,
+  type ResolvedIntent,
+} from "@maman/intent-layer";
 import { evaluateSpec, type EvaluationContext, type OrgPolicy } from "@maman/policy-engine";
 import { validateAgentSpec, type ValidationIssue } from "./validator.js";
 import {
@@ -59,6 +67,18 @@ export type CompileResult =
       status: "valid";
       spec: AgentSpec;
       plain_language_plan: string[];
+      /**
+       * What the agent does, in terms of the real workflow — the field it will
+       * look for, the surface, and which single step writes.
+       *
+       * Kept separate from `plain_language_plan` rather than replacing it. That
+       * plan is derived from the spec's own steps and budgets, so it is the
+       * authoritative account of what will execute; this is the readable one.
+       * Empty when no catalogued intent fits the compiled steps, because a
+       * concrete-sounding plan the spec does not implement is a lie a user
+       * would act on.
+       */
+      intent_plan: string[];
       policy_decision: PolicyDecision;
       warnings: string[];
       compiled_by: "recipe" | "model";
@@ -665,6 +685,45 @@ function planToSpecParts(
   return { steps: built, inputs: [], assertions: [] };
 }
 
+/**
+ * The semantic types the observer actually recorded for this pattern.
+ *
+ * Position 4 of the canonical token. `-` means the source could not tell, and
+ * an absent semantic must stay absent rather than become a guess.
+ */
+function observedSemantics(tokens: readonly string[]): string[] {
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const semantic = token.split(":")[4];
+    if (semantic && semantic !== "-") seen.add(semantic);
+  }
+  return [...seen];
+}
+
+/**
+ * The automation intent this compiled spec actually carries out, if any.
+ *
+ * The fit test is deliberately strict: an intent may describe this agent only
+ * when every capability it requires is present in the steps that will really
+ * run. Without that check a description is free to promise a write that the
+ * compiled steps never perform — a confident sentence about work that does not
+ * happen is worse than the generic one it replaced, because a user would act on
+ * it. So the intent has to earn the right to speak for the spec.
+ */
+function intentForSpec(req: CompileRequest, steps: readonly AgentStep[]): ResolvedIntent | null {
+  const emitted = new Set(steps.map((s) => s.capability_id));
+  const fit = candidateIntents(req.candidate.canonical_sequence).find((intent) =>
+    intent.requires_capabilities.every((c) => emitted.has(c)),
+  );
+  if (!fit) return null;
+  // Compile time: no page has been opened, so only the observed vocabulary is
+  // available. The description says what the agent will look for; discovery
+  // fills in the real control names when the run actually starts.
+  return resolveIntent(fit, {
+    observed_semantics: observedSemantics(req.candidate.canonical_sequence),
+  });
+}
+
 function finalize(
   req: CompileRequest,
   parts: { steps: AgentStep[]; inputs: AgentSpec["inputs"]; assertions: AgentSpec["assertions"] },
@@ -675,10 +734,13 @@ function finalize(
   nameCopy: NameCopy,
 ): CompileResult {
   const now = req.now();
+  const intent = intentForSpec(req, parts.steps);
   const deterministicName =
     req.generalized_intent === "reconcile_account_list"
       ? "Reconcile account lists with Salesforce"
-      : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`;
+      : intent
+        ? describeIntentTitle(intent)
+        : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`;
   const spec: AgentSpec = {
     schema_version: 1,
     agent_id: uuidv7({ timestampMs: now.getTime(), random: seeded(req.candidate.pattern_id) }),
@@ -690,7 +752,11 @@ function finalize(
     owner_user_id: req.owner_user_id,
     // Model may supply the title as COPY; deterministic name is the fallback.
     name: nameCopy?.title ?? deterministicName,
-    description: nameCopy?.summary ?? req.desired_outcome,
+    // The intent description outranks the model's summary on purpose. It is
+    // derived from the observed workflow and cross-checked against the steps
+    // that will run, so it names the field, the surface and the single write;
+    // the model's is copy, and copy may not assert what an agent does.
+    description: intent ? describeIntentPlan(intent) : (nameCopy?.summary ?? req.desired_outcome),
     generalized_intent: req.generalized_intent,
     source_pattern_id: req.candidate.pattern_id,
     state: "draft",
@@ -736,6 +802,7 @@ function finalize(
     status: "valid",
     spec: validation.spec,
     plain_language_plan: renderPlainLanguagePlan(validation.spec),
+    intent_plan: intent ? describeIntentPlanSteps(intent) : [],
     policy_decision: decision,
     warnings,
     compiled_by,
