@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   browserActionRequestSchema,
+  browserControlSchema,
   type BrowserAction,
   type BrowserActionRequest,
 } from "@maman/contracts";
 import {
+  listControls,
   matchingControls,
   namesMatch,
   normalizeName,
@@ -30,7 +32,7 @@ function request(action: BrowserAction, over: Partial<BrowserActionRequest> = {}
     action,
     authorization: TOKEN,
     allowed_origins: [ORIGIN],
-    consequential: action.kind !== "read_field" && action.kind !== "focus_field",
+    consequential: !["read_field", "focus_field", "list_controls"].includes(action.kind),
     issued_at: "2026-08-05T11:59:30.000Z",
     expires_at: "2026-08-05T12:01:00.000Z",
     ...over,
@@ -367,5 +369,136 @@ describe("resolveRequest — write preconditions", () => {
         validToken,
       ),
     ).toMatchObject({ ok: true });
+  });
+});
+
+/**
+ * The verb that lets an agent find its own target.
+ *
+ * Every other action must already know the accessible name it wants, so before
+ * this the only source of that name was a human typing it in. The safety
+ * question is therefore not "may the agent look" but "what may looking return".
+ */
+describe("list_controls: the page's shape, never its contents", () => {
+  const LIST: BrowserAction = { kind: "list_controls", roles: ["textbox"], limit: 40 };
+
+  it("passes every gate the other verbs pass", () => {
+    // Looking is a read, but it is not ungated: a paused run, a spent token, a
+    // private window and a foreign origin each refuse it.
+    expect(resolveRequest(request(LIST), page({ paused: true }), NOW, validToken)).toMatchObject({
+      ok: false,
+      refusal: "paused_by_user",
+    });
+    expect(resolveRequest(request(LIST), page(), NOW, () => false)).toMatchObject({
+      ok: false,
+      refusal: "not_authorized",
+    });
+    expect(
+      resolveRequest(request(LIST), page({ privateWindow: true }), NOW, validToken),
+    ).toMatchObject({ ok: false, refusal: "private_window" });
+    expect(
+      resolveRequest(request(LIST), page({ origin: "https://elsewhere.test" }), NOW, validToken),
+    ).toMatchObject({ ok: false, refusal: "origin_not_allowed" });
+  });
+
+  it("does not need the user present, because it changes nothing", () => {
+    expect(
+      resolveRequest(request(LIST), page({ userPresent: false }), NOW, validToken),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("RETURNS NO VALUES — the form's shape is not the record's contents", () => {
+    const listed = listControls([control({ value: "555-0100" })], ["textbox"], 40);
+    expect(listed.controls).toEqual([
+      { role: "textbox", name: "Close date", secure: false, editable: true, duplicate_count: 1 },
+    ]);
+    // Stated against the serialised form too: no key anywhere holds the value.
+    expect(JSON.stringify(listed)).not.toContain("555-0100");
+  });
+
+  it("returns only the roles that were asked for", () => {
+    const listed = listControls(
+      [
+        control({ role: "textbox", accessibleName: "Phone" }),
+        control({ role: "button", accessibleName: "Delete account" }),
+      ],
+      ["textbox"],
+      40,
+    );
+    expect(listed.controls.map((c) => c.name)).toEqual(["Phone"]);
+  });
+
+  it("drops a control whose NAME is secret-shaped", () => {
+    // The page chooses these strings, and this listing is relayed, receipted and
+    // shown to the user. Losing a possible target is the cheaper mistake.
+    const listed = listControls(
+      [control({ accessibleName: `ghp_${"a".repeat(36)}` }), control({ accessibleName: "Phone" })],
+      ["textbox"],
+      40,
+    );
+    expect(listed.controls.map((c) => c.name)).toEqual(["Phone"]);
+  });
+
+  it("lists a password field rather than hiding it", () => {
+    // Omitting it would read as "not on this page", which sends the user off to
+    // configure something that is right in front of them. The agent needs to be
+    // able to see it and route around it.
+    const listed = listControls(
+      [control({ accessibleName: "Password", secure: true })],
+      ["textbox"],
+      40,
+    );
+    expect(listed.controls[0]).toMatchObject({ name: "Password", secure: true });
+  });
+
+  it("skips invisible controls and unnamed ones", () => {
+    const listed = listControls(
+      [
+        control({ accessibleName: "Hidden field", visible: false }),
+        control({ accessibleName: "   " }),
+        control({ accessibleName: "Phone" }),
+      ],
+      ["textbox"],
+      40,
+    );
+    expect(listed.controls.map((c) => c.name)).toEqual(["Phone"]);
+  });
+
+  it("collapses repeats into a count instead of spending the budget on them", () => {
+    const rows = Array.from({ length: 12 }, () => control({ accessibleName: "Amount" }));
+    const listed = listControls([...rows, control({ accessibleName: "Total" })], ["textbox"], 40);
+    expect(listed.controls).toHaveLength(2);
+    expect(listed.controls[0]).toMatchObject({ name: "Amount", duplicate_count: 12 });
+    expect(listed.truncated).toBe(false);
+  });
+
+  it("reports a repeat conservatively when one of them is not editable", () => {
+    // A caller addressing "Amount" without an `nth` could land on the readonly
+    // one, so the listing must not promise it is writable.
+    const listed = listControls(
+      [
+        control({ accessibleName: "Amount" }),
+        control({ accessibleName: "Amount", editable: false }),
+      ],
+      ["textbox"],
+      40,
+    );
+    expect(listed.controls[0]).toMatchObject({ editable: false, duplicate_count: 2 });
+  });
+
+  it("SAYS when it truncated, so 'not on this page' is never inferred from a partial list", () => {
+    const many = Array.from({ length: 9 }, (_, i) => control({ accessibleName: `Field ${i}` }));
+    const listed = listControls(many, ["textbox"], 4);
+    expect(listed.controls).toHaveLength(4);
+    expect(listed.truncated).toBe(true);
+  });
+
+  it("stays inside the contract's own bounds on a hostile page", () => {
+    // 400 identical controls must not produce a duplicate_count the schema
+    // rejects — the whole listing would be lost to one pathological page.
+    const many = Array.from({ length: 400 }, () => control({ accessibleName: "Row" }));
+    const listed = listControls(many, ["textbox"], 40);
+    expect(listed.controls[0]!.duplicate_count).toBe(200);
+    expect(browserControlSchema.safeParse(listed.controls[0]).success).toBe(true);
   });
 });

@@ -271,7 +271,15 @@ export function collectControls(doc: Document): ControlBinding[] {
  * not is the failure mode this exists to avoid.
  */
 export function applyAction(
-  action: Extract<BrowserAction, { kind: Exclude<BrowserAction["kind"], "navigate"> }>,
+  // The two verbs that act on no element are excluded by TYPE rather than
+  // handled here: `navigate` belongs to the service worker, and `list_controls`
+  // describes the page rather than touching a control. Excluding them keeps
+  // this switch exhaustive, so a future verb that DOES act on an element cannot
+  // be added without this function being made to handle it.
+  action: Extract<
+    BrowserAction,
+    { kind: Exclude<BrowserAction["kind"], "navigate" | "list_controls"> }
+  >,
   element: Element,
 ): { valueAfter: string | undefined } {
   switch (action.kind) {

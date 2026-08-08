@@ -54,7 +54,11 @@ function happyDispatch(): (r: BrowserActionRequest) => Promise<BrowserActionResu
           ? action.option
           : "340";
     const resolvedName =
-      action.kind === "navigate" ? action.url : (action.target.name satisfies string);
+      action.kind === "navigate"
+        ? action.url
+        : action.kind === "list_controls"
+          ? "" // a surface listing resolves no single control
+          : (action.target.name satisfies string);
     return {
       schema_version: 1,
       type: "browser_action_result",

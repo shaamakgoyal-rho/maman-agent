@@ -5,10 +5,15 @@ import {
   demoAdapterRegistry,
   DemoSalesforceWorld,
   executeStep,
+  intentFittingSteps,
+  observedSemantics,
   requireAdapter,
+  resolveIntentOnSurface,
   RuntimeCapabilityError,
   runtimeFromRegistry,
   validateRuntimeCapabilities,
+  DISCOVERED_FIELDS_INPUT,
+  FIELD_VALUES_INPUT,
   type CapabilityContext,
   type ProposedDiff,
   type RunState,
@@ -258,6 +263,14 @@ const demoWorld = (): DemoSalesforceWorld => (activeWorld ??= new DemoSalesforce
 // A run's spec + state persist between shadow/approve calls.
 let activeSpec: AgentSpec | null = null;
 let activeState: RunState | null = null;
+/**
+ * What discovery resolved for this run, held across the approval gate.
+ *
+ * Not recomputed after approval, for the same reason the browser plan is not:
+ * the user approved a diff against a specific control, and re-resolving could
+ * land on a different one.
+ */
+let activeInputs: Record<string, unknown> = {};
 let activeRunId = "";
 let interventionStart = 0;
 // The running agent's workflow name, for the status bar.
@@ -396,6 +409,89 @@ function ctx(mode: "shadow" | "supervised"): CapabilityContext {
 }
 
 /**
+ * The agent looks at the page and works out what it will act on — BEFORE the
+ * first step runs.
+ *
+ * This is the run-time half of the intent layer. Until it existed, the browser
+ * recipe compiled a spec whose first step asked for `fields` that nobody
+ * supplied, so every browser agent failed on step one with "Teach the workflow
+ * which fields matter first". The answer was never for the user to type field
+ * names in; it was for the agent to go and look.
+ *
+ * Two properties make this safe to run before an approval:
+ *
+ * - It happens ONCE, up front. A run that started and then discovered it did
+ *   not know which field to write would already have read the page and shown a
+ *   proposal it cannot honour.
+ * - It only LOOKS. Discovery lists the page's controls — names and roles, never
+ *   values — and the write gate is untouched: the user still approves a diff,
+ *   and the write still refuses if the field moved.
+ */
+async function discoverInputsFor(
+  spec: AgentSpec,
+  candidate: PatternCandidate,
+  mode: "shadow" | "supervised",
+  /**
+   * What the user has already told this agent, by slot name. Only they can
+   * answer these — a value to write is in a person's head, not on a page — so
+   * an empty object means the run stops at the question rather than proceeding
+   * with something invented.
+   */
+  supplied: Readonly<Record<string, string>> = {},
+): Promise<Record<string, unknown>> {
+  const needed = spec.inputs.filter((i) => i.source === "discovered_on_surface");
+  if (needed.length === 0) return {};
+
+  const intent = intentFittingSteps(candidate.canonical_sequence, spec.steps);
+  if (!intent) {
+    // The spec declares it needs discovery and no catalogued intent covers its
+    // steps, so nothing can say what to look for. Refusing is the only honest
+    // move; running would mean guessing a target.
+    throw new Error(
+      "This helper needs to find a field on the page, but I don't have a recipe that says which one to look for.",
+    );
+  }
+
+  const origins = useRuns.getState().browserOrigins;
+  const resolution = await resolveIntentOnSurface({
+    intent,
+    deps: {
+      host: tauriAgentBrowserHost(origins),
+      allowedOrigins: origins,
+      userPresent: userIsPresent,
+      // Discovery never writes, so the write policy is irrelevant to it and is
+      // stated false rather than inherited — a look must not be the thing that
+      // carries a write permission into the run.
+      allowSupervisedBrowserWrites: false,
+      newRequestId: () => uuidv7(),
+      mintAuthorization,
+    },
+    ctx: ctx(mode),
+    supplied,
+    observedSemantics: observedSemantics(candidate.canonical_sequence),
+  });
+
+  if (resolution.status !== "ready") {
+    // Both remaining cases stop the run and say why in the user's own terms:
+    // "I could not look at the page" and "I looked and here is what I still
+    // need" are different problems with different fixes, and the message the
+    // intent layer produces distinguishes them.
+    throw new Error(resolution.message);
+  }
+
+  // The discovered control and the supplied value, joined only now that both
+  // are known. Neither is guessed from the other: an agent with a field and no
+  // value never reaches this line, because resolution refused above.
+  const value = resolution.resolved.filled.find((f) => f.kind === "value");
+  return {
+    [DISCOVERED_FIELDS_INPUT]: resolution.fields,
+    ...(value
+      ? { [FIELD_VALUES_INPUT]: resolution.fields.map((f) => ({ ...f, value: value.value })) }
+      : {}),
+  };
+}
+
+/**
  * The plan compiled at the approval gate, held until the user approves.
  *
  * Deliberately NOT recomputed in `approve`: the user approves a specific list of
@@ -445,6 +541,11 @@ export const useRuns = create<RunsStore>((set) => ({
         runtimeFromRegistry(LOCAL_RUNTIME_ID, registry),
       );
       if (!readiness.ready) throw new RuntimeCapabilityError(readiness);
+      // Look at the page and resolve the target BEFORE the first step, for the
+      // same reason the capability check is here: a run that gets part-way and
+      // then finds it does not know what to act on is worse than one that never
+      // started.
+      activeInputs = await discoverInputsFor(activeSpec, candidate, "shadow");
       let diff: ProposedDiff | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") continue; // shadow: stop before writes
@@ -453,7 +554,7 @@ export const useRuns = create<RunsStore>((set) => ({
           spec: activeSpec,
           step,
           state: activeState,
-          agentInputs: {},
+          agentInputs: activeInputs,
           ctx: ctx("shadow"),
           adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
         });
@@ -524,6 +625,7 @@ export const useRuns = create<RunsStore>((set) => ({
       activeState = { outputs: {} };
       activeRunId = uuidv7();
       const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
+      activeInputs = await discoverInputsFor(activeSpec, candidate, "supervised");
       let pending: PendingApproval | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") break; // pause at the approval gate
@@ -532,7 +634,7 @@ export const useRuns = create<RunsStore>((set) => ({
           spec: activeSpec,
           step,
           state: activeState,
-          agentInputs: {},
+          agentInputs: activeInputs,
           ctx: ctx("supervised"),
           adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
         });
@@ -760,7 +862,11 @@ export const useRuns = create<RunsStore>((set) => ({
         spec: activeSpec,
         step: writeStep,
         state: activeState,
-        agentInputs: {},
+        // The SAME inputs the read and propose steps ran with. Re-discovering
+        // here could resolve a different control than the one the user was
+        // shown a diff for, which is the one thing an approval gate must not
+        // allow.
+        agentInputs: activeInputs,
         ctx: ctx("supervised"),
         adapter: requireAdapter(registry, writeStep, LOCAL_RUNTIME_ID),
         approvedDiff: pending.diff,

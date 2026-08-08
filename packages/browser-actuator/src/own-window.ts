@@ -155,6 +155,12 @@ export function ownWindowDispatch(host: OwnWindowHost): ExecuteDeps["dispatch"] 
               ...(envelope.observed.value_after !== undefined
                 ? { value_after: envelope.observed.value_after }
                 : {}),
+              ...(envelope.observed.controls !== undefined
+                ? { controls: envelope.observed.controls }
+                : {}),
+              ...(envelope.observed.controls_truncated !== undefined
+                ? { controls_truncated: envelope.observed.controls_truncated }
+                : {}),
               // The origin comes from the HOST, never the page — the page could
               // otherwise attribute its own actions to a site it is not on.
               origin,

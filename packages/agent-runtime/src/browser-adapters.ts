@@ -7,7 +7,7 @@ import {
   type PlanStep,
   type StepOutcome,
 } from "@maman/browser-actuator";
-import type { BrowserAction } from "@maman/contracts";
+import type { BrowserAction, BrowserControl, BrowserTargetRole } from "@maman/contracts";
 import type { CapabilityAdapter, CapabilityContext, ProposedDiff } from "./adapters.js";
 
 /**
@@ -147,6 +147,68 @@ async function readField(
 /** The value a read actually observed, or undefined when it is unknown. */
 function observedValue(outcome: StepOutcome): string | undefined {
   return outcome.status === "observed" ? outcome.observed?.value_after : undefined;
+}
+
+/** What the agent can see of the page it is on, before it acts on any of it. */
+export interface DiscoveredSurface {
+  origin: string;
+  controls: BrowserControl[];
+  /** True when the page had more controls than the listing would carry. */
+  truncated: boolean;
+}
+
+/** Roles a field slot could plausibly be. Buttons and links are not fields. */
+const FIELD_ROLES = ["textbox", "combobox", "cell"] as const;
+
+/** How many controls one listing will carry. The contract's own ceiling is 60. */
+const SURFACE_LIMIT = 40;
+
+/**
+ * Looks at the page and reports what controls it offers.
+ *
+ * This is the step that removes teaching from the loop. Every other browser
+ * action must already know the accessible name it wants; until an agent could
+ * ask "what is on this page", the only source of that name was a person typing
+ * it in, which is why a compiled browser agent could not run at all — its first
+ * step asked for `fields` that nothing had supplied.
+ *
+ * It returns SHAPE, not contents: names and roles, never values. Values are
+ * still read one field at a time through `readField`, which refuses secure
+ * fields and is recorded per field on the receipt.
+ */
+export async function discoverSurface(
+  d: BrowserAdapterDeps,
+  ctx: CapabilityContext,
+  roles: readonly BrowserTargetRole[] = FIELD_ROLES,
+): Promise<DiscoveredSurface> {
+  const origin = await requireOrigin(d);
+  const step: PlanStep = {
+    step_id: "list-controls",
+    action: { kind: "list_controls", roles: [...roles], limit: SURFACE_LIMIT },
+    preview: "Look at the open page to see which fields it has",
+    change_index: null,
+    write: false,
+  };
+  const outcome = await executeBrowserPlan(
+    [step],
+    executeContext(d, ctx, { allowed: false, approved: false }),
+    deps(d),
+  );
+  const first = outcome.steps[0];
+  if (!first || first.status !== "observed") {
+    // A refusal or failure is NOT an empty page. Reporting it as one would let
+    // the caller conclude "this field does not exist here" from an answer that
+    // never looked, which is the exact confusion the intent layer's
+    // `not_looked_yet` verdict exists to prevent.
+    throw new Error(
+      `I could not look at the page to find the fields (${first?.status ?? "not attempted"}).`,
+    );
+  }
+  return {
+    origin,
+    controls: first.observed?.controls ?? [],
+    truncated: first.observed?.controls_truncated ?? false,
+  };
 }
 
 /**

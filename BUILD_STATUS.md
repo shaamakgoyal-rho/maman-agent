@@ -85,11 +85,38 @@ _"Set the field you point me at on the record you have open to a value you give
 me, then read it back to confirm it took."_ With a source that does record
 semantics, the same pattern reads **"Update the phone field on this record"**.
 
-Not yet wired: run-time resolution. `discovered_on_surface` is exercised by
-tests but has no production caller, so descriptions currently sharpen only as
-far as the observed vocabulary allows. Wiring the run engine to resolve against
-the live page before executing is the next step, and is what turns "names the
-field it will look for" into "names the field it found".
+### Run-time resolution — the agent looks at the page
+
+Two defects made every compiled browser agent unrunnable, and each hid the
+other. The read step asked for `fields` that nothing supplied, so step one threw
+_"No fields were configured to read. Teach the workflow which fields matter
+first."_ Behind it, the propose step bound `fields` to the read step's OUTPUT
+(`{origin, values, unread}`), which is not the `{name, value}` pairs a proposal
+needs — and nothing anywhere supplied the value to write. A browser agent could
+be detected, compiled, validated and approved, and could not take one action.
+
+| Component                | Status   | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list_controls` verb     | complete | Seventh verb in the closed action set, and the only one with no target — it is how the agent learns what targets exist. Returns the page's SHAPE: role, name, secure, editable, duplicate count. No `value` member exists on `browserControlSchema`, asserted against the serialised result in three suites. Roles and a limit are required; there is no "everything" or unbounded form, and a partial listing reports `controls_truncated`.                                                                       |
+| both actuation lanes     | complete | Pure `listControls` projection (11 tests) drives the extension lane; the in-page script answers it for Maman's own window, and `parseControls` re-derives every entry on the trusted side. Secret-shaped control NAMES are dropped rather than reported — the contract would reject them, and rejecting the whole listing would let one hostile label deny the agent every other control. Password fields ARE listed, marked secure, so the agent can see and avoid them rather than reporting "not on this page". |
+| `resolveIntentOnSurface` | complete | Looks once, before any step, and returns `ready` / `needs_you` / `could_not_look`. Collapsed repeats are re-expanded so `duplicate_count: 12` becomes the ambiguity it represents and resolves to nothing. Secure controls are never passed on as candidates. A truncated listing changes the gap wording, because "I looked and it isn't there" is only true if the looking was complete.                                                                                                                         |
+| desktop run wiring       | complete | `discoverInputsFor` runs before the step loop in both shadow and supervised paths, and its result is held across the approval gate rather than re-derived — re-resolving after approval could land on a different control than the diff the user approved.                                                                                                                                                                                                                                                         |
+| honest input sources     | complete | `agentInputSchema.source` gained `discovered_on_surface`. The field comes from looking; the VALUE is a separate `user` input, because no page reveals what a person intends to type. `renderPlainLanguagePlan` lists only `user` inputs under "You provide:" — asking someone for the field the agent finds itself would send them looking for a form that does not exist.                                                                                                                                         |
+
+End-to-end proof (`discovery-end-to-end.test.ts`, 9 tests): a spec compiled from
+an observed pattern reads the right field off a page it was never taught, writes
+it after approval, and the independent readback confirms it — while the
+neighbouring "Internal notes" field is untouched. The same suite pins the
+refusals: a credential box is never offered as a target, two controls sharing a
+name resolve to nothing, an unopened window reports "I could not look" rather
+than "nothing found", and a missing value stops the run at a question instead of
+writing something invented.
+
+Not yet built: the UI that asks for that value. A read-only browser agent runs
+end to end today; a write agent stops at _"What the field should say — I can't
+find this by looking; you'll need to tell me."_ That is the correct refusal, but
+there is no form to answer it in, so supervised browser writes are reachable
+from tests and not yet from the app.
 
 ## Known limitations
 

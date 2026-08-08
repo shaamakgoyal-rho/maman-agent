@@ -1,4 +1,10 @@
-import type { BrowserAction, BrowserActionRequest } from "@maman/contracts";
+import {
+  browserTargetRole,
+  looksLikeSecret,
+  type BrowserAction,
+  type BrowserActionRequest,
+  type BrowserControl,
+} from "@maman/contracts";
 
 /**
  * THE SELF-HOSTED PAGE PROTOCOL.
@@ -46,15 +52,21 @@ export interface AgentPageEnvelope {
     value_after?: string;
     accessible_name?: string;
     match_count?: number;
+    /** `list_controls` only: the page's shape. Never carries values. */
+    controls?: BrowserControl[];
+    controls_truncated?: boolean;
   };
   /** Present on `failed`: a short, non-sensitive description. */
   detail?: string;
 }
 
 /**
- * The in-page script, as source. Rust embeds this verbatim (see
- * `scripts/generate-agent-page-script.ts`, which writes the committed artifact
- * a Rust `include_str!` reads, asserted byte-identical by a test).
+ * The in-page script, as source.
+ *
+ * It reaches the page from HERE: `buildEvalExpression` composes it with the
+ * request, the desktop passes that string to the `agent_browser_evaluate`
+ * command, and Rust evaluates it in the agent window. Rust holds no copy of
+ * this source, so there is no second version of it to drift.
  *
  * Constraints this source obeys, because it runs inside a hostile document:
  * - No page globals are trusted: `JSON.stringify` and friends are captured from
@@ -340,6 +352,64 @@ export const AGENT_PAGE_SCRIPT = String.raw`(function (requestJson) {
         });
       }
 
+      case "list_controls": {
+        // The page's SHAPE, so the agent can find its own target instead of
+        // being told one. No value is read here — not even for a field that
+        // would be readable — because a listing is not a bulk read of the
+        // record. Values still come one at a time through read_field.
+        var roles = action.roles || [];
+        var limit = typeof action.limit === "number" ? action.limit : 40;
+        var seen = {};
+        var order = [];
+        for (var ri = 0; ri < roles.length; ri++) {
+          var rsel = ROLE_SELECTORS[roles[ri]];
+          if (!rsel) continue;
+          var rnodes = [];
+          try {
+            rnodes = Array.prototype.slice.call(document.querySelectorAll(rsel));
+          } catch (e) {
+            rnodes = [];
+          }
+          for (var ni = 0; ni < rnodes.length; ni++) {
+            var cel = rnodes[ni];
+            if (!isVisible(cel)) continue;
+            var cname = nameOf(cel);
+            if (!cname || cname.length > 120) continue;
+            var ckey = roles[ri] + " " + cname.toLowerCase();
+            if (Object.prototype.hasOwnProperty.call(seen, ckey)) {
+              var prev = seen[ckey];
+              // Repeats collapse into a count. A caller needs to know a name is
+              // ambiguous; it does not need the same line twelve times.
+              prev.duplicate_count = Math.min(200, prev.duplicate_count + 1);
+              prev.editable = prev.editable && editable(cel);
+              prev.secure = prev.secure || isSecure(cel);
+              continue;
+            }
+            var entry = {
+              role: roles[ri],
+              name: cname,
+              secure: isSecure(cel),
+              editable: editable(cel),
+              duplicate_count: 1,
+            };
+            seen[ckey] = entry;
+            order.push(entry);
+          }
+        }
+        return reply({
+          request_id: id,
+          outcome: "observed",
+          observed: {
+            accessible_name: "",
+            match_count: order.length,
+            controls: order.slice(0, limit),
+            // A caller that concluded "not on this page" from a truncated
+            // listing would be wrong, so a partial answer says it is partial.
+            controls_truncated: order.length > limit,
+          },
+        });
+      }
+
       case "click_control": {
         var rc = resolveOne(action.target);
         if (rc.error) return refuse(rc.error);
@@ -382,6 +452,48 @@ export function buildEvalExpression(request: BrowserActionRequest): string {
 /** Actions the host performs itself; the page is never asked to do these. */
 export function isHostAction(action: BrowserAction): boolean {
   return action.kind === "navigate";
+}
+
+/**
+ * A page's control listing, re-derived rather than trusted.
+ *
+ * Every entry is rebuilt field by field from what the page said, so an answer
+ * carrying extra members, a value, or a role that does not exist contributes
+ * nothing. Two rules matter beyond shape:
+ *
+ * - A SECRET-SHAPED NAME IS DROPPED. The page chooses these strings, and this
+ *   wire is relayed, receipted, and shown to the user. Dropping the entry costs
+ *   a possible target; keeping it would put the string in all three places.
+ *   (The contract would reject it too — but that rejects the WHOLE listing, so
+ *   one hostile label would deny the agent every other control on the page.)
+ * - NOTHING IS INVENTED. A malformed entry is skipped, never defaulted into
+ *   something plausible — a fabricated control name is a target the agent might
+ *   then try to write to.
+ */
+function parseControls(raw: readonly unknown[]): BrowserControl[] {
+  const out: BrowserControl[] = [];
+  for (const item of raw.slice(0, 60)) {
+    if (typeof item !== "object" || item === null) continue;
+    const c = item as Record<string, unknown>;
+    const role = browserTargetRole.safeParse(c.role);
+    if (!role.success) continue;
+    if (typeof c.name !== "string") continue;
+    const name = c.name.trim().slice(0, 120);
+    if (name === "" || looksLikeSecret(name)) continue;
+    if (typeof c.secure !== "boolean" || typeof c.editable !== "boolean") continue;
+    const duplicates =
+      typeof c.duplicate_count === "number" && Number.isFinite(c.duplicate_count)
+        ? Math.max(1, Math.min(200, Math.trunc(c.duplicate_count)))
+        : 1;
+    out.push({
+      role: role.data,
+      name,
+      secure: c.secure,
+      editable: c.editable,
+      duplicate_count: duplicates,
+    });
+  }
+  return out;
 }
 
 /**
@@ -436,6 +548,10 @@ export function parseAgentEnvelope(raw: unknown, expectedRequestId: string): Age
         : {}),
       ...(typeof o.match_count === "number" && Number.isFinite(o.match_count)
         ? { match_count: Math.max(0, Math.min(1000, Math.trunc(o.match_count))) }
+        : {}),
+      ...(Array.isArray(o.controls) ? { controls: parseControls(o.controls) } : {}),
+      ...(typeof o.controls_truncated === "boolean"
+        ? { controls_truncated: o.controls_truncated }
         : {}),
     };
   }

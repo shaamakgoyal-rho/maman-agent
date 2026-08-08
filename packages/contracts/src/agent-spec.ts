@@ -51,7 +51,19 @@ export const agentInputSchema = z
     type: z.enum(["string", "number", "boolean", "date", "record_reference", "file_reference"]),
     required: z.boolean(),
     sensitivity: z.enum(["public", "internal", "confidential"]),
-    source: z.enum(["user", "trigger", "previous_step"]),
+    /**
+     * Where the value comes from.
+     *
+     * `discovered_on_surface` means the agent resolves it by LOOKING at the
+     * page it is on, before any step executes — the field it will act on, found
+     * by matching what the user was observed doing against the controls that
+     * are really there. It is not `user`: nobody types it in, and labelling it
+     * so would put "you provide: the field to change" in front of someone who
+     * provides no such thing. It is not `previous_step` either: discovery
+     * happens before the first step, and its failure stops the run rather than
+     * producing an output some later step consumes.
+     */
+    source: z.enum(["user", "trigger", "previous_step", "discovered_on_surface"]),
     source_ref: z.string().optional(),
   })
   .strict();

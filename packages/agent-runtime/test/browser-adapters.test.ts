@@ -38,12 +38,18 @@ function fakePage(options: {
   lieOnWrite?: string[];
   /** Fields that cannot be read at all. */
   unreadable?: string[];
+  /** Fields the page reports as password/secure controls. */
+  secure?: string[];
+  /** Names that are on the page but are buttons, not fields. */
+  buttons?: string[];
   origin?: string | null;
 }) {
   const fields = { ...options.fields };
   const ignore = new Set(options.ignoreWrites ?? []);
   const lie = new Set(options.lieOnWrite ?? []);
   const unreadable = new Set(options.unreadable ?? []);
+  const secure = new Set(options.secure ?? []);
+  const buttons = options.buttons ?? [];
   const seen: Array<{ kind: string; name?: string; value?: string }> = [];
 
   const host: OwnWindowHost = {
@@ -63,11 +69,45 @@ function fakePage(options: {
           target?: { name: string };
           value?: string;
           expect_current?: string;
+          roles?: string[];
+          limit?: number;
         };
       };
       const name = action.target?.name ?? "";
       seen.push({ kind: action.kind, name, ...(action.value ? { value: action.value } : {}) });
 
+      if (action.kind === "list_controls") {
+        // The page answers with its SHAPE. Note what is absent: no values, even
+        // though this fake has them right here — a listing that leaked one
+        // would make the adapter's tests pass while production leaked too.
+        const roles = action.roles ?? [];
+        const listed = [
+          ...Object.keys(fields).map((name) => ({
+            role: "textbox",
+            name,
+            secure: secure.has(name),
+            editable: true,
+            duplicate_count: 1,
+          })),
+          ...buttons.map((name) => ({
+            role: "button",
+            name,
+            secure: false,
+            editable: true,
+            duplicate_count: 1,
+          })),
+        ].filter((c) => roles.includes(c.role));
+        return JSON.stringify({
+          request_id,
+          outcome: "observed",
+          observed: {
+            accessible_name: "",
+            match_count: listed.length,
+            controls: listed,
+            controls_truncated: false,
+          },
+        });
+      }
       if (action.kind === "read_field") {
         if (unreadable.has(name) || !(name in fields)) {
           return JSON.stringify({

@@ -16,7 +16,7 @@ import {
   type BrowserActionRequest,
   type BrowserActionResult,
 } from "@maman/contracts";
-import { resolveRequest, type PageContext } from "@maman/browser-actuator";
+import { listControls, resolveRequest, type PageContext } from "@maman/browser-actuator";
 import { applyAction, collectControls } from "./dom-adapter.js";
 
 export interface ActuationContext {
@@ -86,6 +86,33 @@ export function executeBrowserAction(
   const resolved = resolveRequest(request, page, now, () => ctx.authorizationValid);
   if (!resolved.ok) {
     return { ok: true, result: refused(request, now, resolved.refusal, resolved.matchCount, ctx) };
+  }
+
+  if (request.action.kind === "list_controls") {
+    // A surface listing acts on no single element, so it never reaches the
+    // binding lookup below. `listControls` is the same pure projection the
+    // own-window lane's answer is held to: roles and names only, secret-shaped
+    // names dropped, repeats collapsed to a count, honest about truncation.
+    const listed = listControls(page.controls, request.action.roles, request.action.limit);
+    return {
+      ok: true,
+      result: {
+        schema_version: 1,
+        type: "browser_action_result",
+        request_id: request.request_id,
+        run_id: request.run_id,
+        step_id: request.step_id,
+        outcome: "observed",
+        observed: {
+          resolved_name: "",
+          match_count: listed.controls.length,
+          controls: listed.controls,
+          controls_truncated: listed.truncated,
+          origin: ctx.origin,
+        },
+        completed_at: now.toISOString(),
+      },
+    };
   }
 
   const binding = bindings.find((b) => b.control === resolved.control);

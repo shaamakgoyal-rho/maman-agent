@@ -1,9 +1,12 @@
 import {
   isBrowserWrite,
+  looksLikeSecret,
   type BrowserAction,
   type BrowserActionRefusal,
   type BrowserActionRequest,
+  type BrowserControl,
   type BrowserTarget,
+  type BrowserTargetRole,
 } from "@maman/contracts";
 import type { CandidateControl, PageContext, ResolveOutcome } from "./types.js";
 
@@ -90,6 +93,15 @@ export function resolveRequest(
   // Presence gates writes only; reading a page the user left open is harmless.
   if (write && !page.userPresent) return refuse("user_absent");
 
+  if (request.action.kind === "list_controls") {
+    // The only verb with no target: it is how the agent LEARNS what targets
+    // exist. Every gate above still applied — paused, authorisation, private
+    // window, origin — and what it may return is bounded by the contract
+    // (shape only, never values) and by `listControls` below, which drops
+    // secure-shaped names rather than reporting them.
+    return { ok: true, control: surfacePseudoControl(), matchCount: page.controls.length };
+  }
+
   const target = request.action.target;
   const matches = matchingControls(target, page.controls);
   const count = matches.length;
@@ -161,6 +173,74 @@ export function originOf(url: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * The page's shape, as `list_controls` is allowed to report it.
+ *
+ * Three reductions happen here, and each one is load-bearing:
+ *
+ * - NO VALUES. `CandidateControl` carries `value` because targeting needs it
+ *   (`expect_current` compares against it). None of it survives into the
+ *   listing. That is the difference between reading the form and reading the
+ *   record.
+ * - SECRET-SHAPED NAMES ARE DROPPED, not reported. A control whose accessible
+ *   name is itself credential-shaped would otherwise put that string on a wire
+ *   that is relayed, receipted, and shown to the user. Dropping loses a
+ *   possible target; reporting loses the secret.
+ * - REPEATS COLLAPSE. Twelve rows of "Amount" become one entry with
+ *   `duplicate_count: 12`, which is both what a caller needs in order to refuse
+ *   an ambiguous target and a far better use of a bounded listing than twelve
+ *   identical lines.
+ */
+export function listControls(
+  controls: readonly CandidateControl[],
+  roles: readonly BrowserTargetRole[],
+  limit: number,
+): { controls: BrowserControl[]; truncated: boolean } {
+  const wanted = new Set<string>(roles);
+  const byKey = new Map<string, BrowserControl>();
+
+  for (const control of controls) {
+    if (!control.visible) continue;
+    if (!wanted.has(control.role)) continue;
+    const name = control.accessibleName.trim();
+    if (name === "" || name.length > 120) continue;
+    if (looksLikeSecret(name)) continue;
+
+    const key = `${control.role} ${normalizeName(name)}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      // Bounded by the contract's own max; a pathological page cannot push this
+      // past what the schema will accept.
+      existing.duplicate_count = Math.min(200, existing.duplicate_count + 1);
+      // Editability is reported conservatively: if ANY of the repeats cannot be
+      // edited, a caller addressing "the Amount field" without an `nth` might
+      // land on that one.
+      existing.editable = existing.editable && control.editable;
+      existing.secure = existing.secure || control.secure;
+      continue;
+    }
+    byKey.set(key, {
+      role: control.role,
+      name,
+      secure: control.secure,
+      editable: control.editable,
+      duplicate_count: 1,
+    });
+  }
+
+  const all = [...byKey.values()];
+  return { controls: all.slice(0, limit), truncated: all.length > limit };
+}
+
+/**
+ * A surface listing acts on the page rather than on one control, but the
+ * outcome shape is uniform for every caller. This stands in for "the page
+ * itself"; nothing downstream reads its name or value.
+ */
+function surfacePseudoControl(): CandidateControl {
+  return { role: "heading", accessibleName: "", editable: false, secure: false, visible: true };
 }
 
 /** Navigation has no control; this keeps the success shape uniform for the caller. */

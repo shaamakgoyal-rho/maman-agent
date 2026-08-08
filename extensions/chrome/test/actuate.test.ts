@@ -237,3 +237,68 @@ describe("executeBrowserAction", () => {
     }
   });
 });
+
+/**
+ * The verb that lets an agent find its own target, through the extension lane.
+ *
+ * The own-window lane answers this from the in-page script; this one answers it
+ * from the same `collectControls` walk every other action already does. Both
+ * must return the same shape and keep the same line: the form, not the record.
+ */
+describe("list_controls through the extension lane", () => {
+  const LIST: BrowserAction = { kind: "list_controls", roles: ["textbox"], limit: 40 };
+
+  it("names the page's fields without reporting a single value", () => {
+    const doc = render(`
+      <label for="phone">Phone</label><input id="phone" type="text" value="555-0100" />
+      <label for="email">Email</label><input id="email" type="text" value="a@b.test" />
+    `);
+    const out = executeBrowserAction(request(LIST), ctx(), doc, NOW);
+    if (!out.ok) throw new Error("expected a result");
+    // Real contract parse: a listing the schema would reject is not a listing.
+    const result = browserActionResultSchema.parse(out.result);
+    expect(result.outcome).toBe("observed");
+    expect(result.observed?.controls?.map((c) => c.name).sort()).toEqual(["Email", "Phone"]);
+    expect(JSON.stringify(result)).not.toContain("555-0100");
+    expect(JSON.stringify(result)).not.toContain("a@b.test");
+  });
+
+  it("reports a password field as secure rather than omitting it", () => {
+    const doc = render(`<label for="p">Password</label><input id="p" type="password" />`);
+    const out = executeBrowserAction(request(LIST), ctx(), doc, NOW);
+    if (!out.ok) throw new Error("expected a result");
+    expect(out.result.observed?.controls).toEqual([
+      { role: "textbox", name: "Password", secure: true, editable: true, duplicate_count: 1 },
+    ]);
+  });
+
+  it("refuses on a foreign origin, like every other verb", () => {
+    const doc = render(`<label for="phone">Phone</label><input id="phone" type="text" />`);
+    const out = executeBrowserAction(
+      request(LIST),
+      ctx({ origin: "https://elsewhere.test" }),
+      doc,
+      NOW,
+    );
+    if (!out.ok) throw new Error("expected a result");
+    expect(out.result.outcome).toBe("refused");
+    expect(out.result.refusal_reason).toBe("origin_not_allowed");
+    // A refusal must not leak the listing it would have produced.
+    expect(out.result.observed?.controls).toBeUndefined();
+  });
+
+  it("says when the page had more fields than the caller would accept", () => {
+    const doc = render(
+      Array.from({ length: 6 }, (_, i) => `<input type="text" aria-label="Field ${i}" />`).join(""),
+    );
+    const out = executeBrowserAction(
+      request({ kind: "list_controls", roles: ["textbox"], limit: 2 }),
+      ctx(),
+      doc,
+      NOW,
+    );
+    if (!out.ok) throw new Error("expected a result");
+    expect(out.result.observed?.controls).toHaveLength(2);
+    expect(out.result.observed?.controls_truncated).toBe(true);
+  });
+});

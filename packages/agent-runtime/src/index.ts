@@ -17,7 +17,11 @@ export {
 } from "./lifecycle.js";
 export {
   compileAgentSpec,
+  intentFittingSteps,
+  observedSemantics,
   renderPlainLanguagePlan,
+  DISCOVERED_FIELDS_INPUT,
+  FIELD_VALUES_INPUT,
   type CompileRequest,
   type CompileResult,
 } from "./compiler.js";
@@ -74,3 +78,4 @@ export {
 export type { MissingConfiguration } from "./compiler.js";
 export * from "./browser-adapters.js";
 export * from "./compile-learned.js";
+export * from "./resolve-on-surface.js";

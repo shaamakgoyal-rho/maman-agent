@@ -19,6 +19,7 @@ import {
   describeIntentPlanSteps,
   describeIntentTitle,
   resolveIntent,
+  type AutomationIntent,
   type ResolvedIntent,
 } from "@maman/intent-layer";
 import { evaluateSpec, type EvaluationContext, type OrgPolicy } from "@maman/policy-engine";
@@ -168,6 +169,26 @@ function requiredForBrowserRecipe(req: CompileRequest): string[] {
   }
   return required;
 }
+
+/**
+ * Input key the browser recipe binds its field targets to.
+ *
+ * Exported because the run path must fill exactly this key from discovery, and
+ * a mismatched string here would fail as "no fields configured" — the same
+ * unhelpful error this whole path exists to remove.
+ */
+export const DISCOVERED_FIELDS_INPUT = "discovered_fields";
+
+/**
+ * Input key carrying the values a browser write will set.
+ *
+ * Separate from the discovered fields on purpose: WHICH control to touch is
+ * something the agent can find by looking, and WHAT to put in it is not. Those
+ * two answers have different sources and different failure modes, and merging
+ * them into one input would hide the fact that only one of them can be
+ * discovered.
+ */
+export const FIELD_VALUES_INPUT = "field_values";
 
 /** Derived intents the deterministic naming emits for CRM update patterns. */
 const UPDATE_RECORDS_INTENT = /^update_([a-z0-9_]+)_records$/;
@@ -410,6 +431,30 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
     );
     const writes = mapped.has("browser.supervised_form_fill");
 
+    /**
+     * The fields this agent will act on, resolved by LOOKING at the page.
+     *
+     * Every step below used to bind only `page: "current_page"`, and the read
+     * adapter wants `fields`. Nothing supplied them, so the first step of every
+     * compiled browser agent threw "Teach the workflow which fields matter
+     * first" — the spec compiled, passed validation, and could not run.
+     *
+     * Declaring it as an input with `discovered_on_surface` is what makes the
+     * spec honest about the gap AND closes it: the run path resolves the intent
+     * against the live controls before step one and binds this, or refuses
+     * before anything executes.
+     */
+    const inputs: AgentSpec["inputs"] = [
+      {
+        key: DISCOVERED_FIELDS_INPUT,
+        label: "The fields on the page, which I find by looking",
+        type: "string",
+        required: true,
+        sensitivity: "internal",
+        source: "discovered_on_surface",
+      },
+    ];
+
     const steps: AgentStep[] = [
       step(
         1,
@@ -417,7 +462,10 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
         "Read the fields on the open page",
         "browser.extract_structured_fields",
         "read",
-        { page: { source: "literal", value: "current_page" } },
+        {
+          page: { source: "literal", value: "current_page" },
+          fields: { source: "agent_input", ref: DISCOVERED_FIELDS_INPUT },
+        },
         "page_fields",
       ),
     ];
@@ -435,6 +483,14 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
       );
     }
     if (writes) {
+      inputs.push({
+        key: FIELD_VALUES_INPUT,
+        label: "What the field should say",
+        type: "string",
+        required: true,
+        sensitivity: "internal",
+        source: "user",
+      });
       steps.push(
         step(
           steps.length + 1,
@@ -442,7 +498,17 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
           "Propose the form fill",
           "browser.propose_form_fill",
           "propose_write",
-          { fields: { source: "step_output", ref: "page_fields" } },
+          // The VALUES to write, which come from the user and from nowhere else.
+          //
+          // This used to bind `page_fields` — the read step's output, whose
+          // shape is `{origin, values, unread}` and not the `{name, value}`
+          // pairs a proposal needs. So the write branch could not run either,
+          // and failed with "No field values were configured, so there is
+          // nothing to propose." The deeper problem the old binding hid is that
+          // NOTHING supplied a value: no page reveals what a person intends to
+          // type, so this has to be asked for, and saying so is the honest
+          // shape.
+          { fields: { source: "agent_input", ref: FIELD_VALUES_INPUT } },
           "proposed_fill",
         ),
         step(
@@ -469,7 +535,7 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
         ),
       );
     }
-    return { inputs: [], steps, assertions: [] };
+    return { inputs, steps, assertions: [] };
   },
 };
 
@@ -691,7 +757,7 @@ function planToSpecParts(
  * Position 4 of the canonical token. `-` means the source could not tell, and
  * an absent semantic must stay absent rather than become a guess.
  */
-function observedSemantics(tokens: readonly string[]): string[] {
+export function observedSemantics(tokens: readonly string[]): string[] {
   const seen = new Set<string>();
   for (const token of tokens) {
     const semantic = token.split(":")[4];
@@ -710,15 +776,27 @@ function observedSemantics(tokens: readonly string[]): string[] {
  * happen is worse than the generic one it replaced, because a user would act on
  * it. So the intent has to earn the right to speak for the spec.
  */
-function intentForSpec(req: CompileRequest, steps: readonly AgentStep[]): ResolvedIntent | null {
+export function intentFittingSteps(
+  canonicalSequence: readonly string[],
+  steps: readonly AgentStep[],
+): AutomationIntent | null {
   const emitted = new Set(steps.map((s) => s.capability_id));
-  const fit = candidateIntents(req.candidate.canonical_sequence).find((intent) =>
-    intent.requires_capabilities.every((c) => emitted.has(c)),
+  return (
+    candidateIntents(canonicalSequence).find((intent) =>
+      intent.requires_capabilities.every((c) => emitted.has(c)),
+    ) ?? null
   );
+}
+
+function intentForSpec(req: CompileRequest, steps: readonly AgentStep[]): ResolvedIntent | null {
+  const fit = intentFittingSteps(req.candidate.canonical_sequence, steps);
   if (!fit) return null;
   // Compile time: no page has been opened, so only the observed vocabulary is
   // available. The description says what the agent will look for; discovery
-  // fills in the real control names when the run actually starts.
+  // fills in the real control names when the run actually starts. The RUN path
+  // calls `intentFittingSteps` too, so both reach the same intent — a run that
+  // resolved a different one from the description the user approved would be
+  // executing something they were never shown.
   return resolveIntent(fit, {
     observed_semantics: observedSemantics(req.candidate.canonical_sequence),
   });
@@ -819,9 +897,20 @@ function finalize(
 /** Plain-language plan: inputs, steps, approval points, budgets, rollback. */
 export function renderPlainLanguagePlan(spec: AgentSpec): string[] {
   const lines: string[] = [];
-  if (spec.inputs.length > 0) {
+  // Only inputs the USER actually supplies are listed as theirs. A discovered
+  // input under "You provide:" would ask someone for a thing the agent finds
+  // for itself, and leave them looking for a form that does not exist.
+  const fromUser = spec.inputs.filter((i) => i.source === "user");
+  if (fromUser.length > 0) {
     lines.push(
-      `You provide: ${spec.inputs.map((i) => i.label + (i.required ? "" : " (optional)")).join(", ")}.`,
+      `You provide: ${fromUser.map((i) => i.label + (i.required ? "" : " (optional)")).join(", ")}.`,
+    );
+  }
+  const discovered = spec.inputs.filter((i) => i.source === "discovered_on_surface");
+  if (discovered.length > 0) {
+    lines.push(
+      `I work out for myself, by looking at the page before I touch anything: ` +
+        `${discovered.map((i) => i.label).join(", ")}. If I cannot find it, I stop and ask.`,
     );
   }
   for (const s of [...spec.steps].sort((a, b) => a.order - b.order)) {
