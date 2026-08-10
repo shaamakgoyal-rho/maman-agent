@@ -233,11 +233,19 @@ function parseStep(token: string): ParsedStep {
   };
 }
 
-/** "purchase_order" → "purchase orders". Plural because a pattern recurs. */
+/**
+ * "purchase_order" → "purchase orders". Plural because a pattern recurs.
+ * A noun already ending in a bare plural "s" ("account fields", "company
+ * domains") is left alone — "fieldses" tells the reader we never read our own
+ * cards. Sibilant singulars ("search", "boss", "tax") still take -es; the
+ * cost is that a rare s-final singular like "bus" stays singular, which reads
+ * fine where a double plural never does.
+ */
 function humanizePlural(raw: string): string {
   const words = raw.replace(/_/g, " ").trim();
   if (!words) return words;
-  if (/(s|x|z|ch|sh)$/.test(words)) return `${words}es`;
+  if (/(ss|x|z|ch|sh)$/.test(words)) return `${words}es`;
+  if (/s$/.test(words)) return words;
   if (/[^aeiou]y$/.test(words)) return `${words.slice(0, -1)}ies`;
   return `${words}s`;
 }
