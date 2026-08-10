@@ -144,6 +144,33 @@ Verified in the panel preview: the Agents screen renders with no console errors.
 The form itself was not eyeballed — reaching it needs the Tauri host, which the
 web preview does not have — so its behaviour rests on the tests above.
 
+## Required inputs must actually arrive (Phase 5)
+
+A declared requirement that nothing enforced. The reconciliation spec declares
+`account_csv` **required**; the desktop passed `agentInputs: {}`;
+`resolveStepInputs` bound `undefined` without complaint (the spec parameter was
+literally `void spec`); and `local.parse_csv` was
+`read: async () => structuredClone(DEMO_CSV_ROWS)` — it took no parameters at
+all. So the run reconciled **fixture rows** end to end, produced a diff, and
+published a receipt with ROI for an account list nobody had ever provided.
+
+Ten tests in `agent-runtime` and one in `worker` passed against that path, which
+is how it survived. Both the desktop and the durable Temporal path were affected.
+
+| Component             | Status   | Evidence                                                                                                                                                                                                                     |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `validateAgentInputs` | complete | Pre-execution gate in the same shape as `validateRuntimeCapabilities`. `null`, `""` and `[]` count as MISSING, not as answers — an empty array is exactly what the browser read adapter received when discovery had not run. |
+| resolution backstop   | complete | `resolveStepInputs` now throws for an unbound REQUIRED input instead of binding `undefined`; optional inputs still resolve to `undefined`, which is correct.                                                                 |
+| demo adapter          | complete | `local.parse_csv` reads its input and serves the bundled sample ONLY for the `DEMO_ACCOUNT_LIST` sentinel. A real file path is refused (it cannot read files) rather than answered with fixtures.                            |
+| desktop + worker      | complete | `requireInputs` before the step loop in both desktop paths; `validateAgentInputs` beside the policy gate in `agentRunWorkflow`, so the durable path refuses before step one too.                                             |
+| sample data is said   | complete | The local runtime cannot read a user's file, so a reconciliation run binds the sample **explicitly** and the panel shows "…used Maman's bundled sample list — the numbers below describe that sample, not your data."        |
+
+13 new tests in `agent-inputs.test.ts`. Reported as `failed` rather than a
+dedicated `inputs_missing` status: the run status is a persisted enum with a
+CHECK constraint in `0003_agents_runs_approvals.up.sql`, so adding one is a
+migration whose integration tests need Docker — worth doing, not worth
+smuggling into this change.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

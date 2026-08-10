@@ -49,6 +49,7 @@ export {
   matchAccounts,
   normalizeDomain,
   DemoSalesforceWorld,
+  DEMO_ACCOUNT_LIST,
   diffSha256,
   TransientAdapterError,
   PermanentAdapterError,
@@ -79,3 +80,10 @@ export type { MissingConfiguration } from "./compiler.js";
 export * from "./browser-adapters.js";
 export * from "./compile-learned.js";
 export * from "./resolve-on-surface.js";
+export {
+  validateAgentInputs,
+  describeMissingInputs,
+  AgentInputError,
+  type MissingInput,
+  type InputReadiness,
+} from "./agent-inputs.js";

@@ -6,6 +6,7 @@ import {
   setHandler,
 } from "@temporalio/workflow";
 import type { AgentRunInput, AgentSpec, RunStepSummary } from "@maman/contracts";
+import { validateAgentInputs } from "./agent-inputs.js";
 
 /**
  * agentRunWorkflow — durable execution (spec §16).
@@ -227,6 +228,22 @@ export async function agentRunWorkflow(
     policy_version_id: run.policy_version_id,
   });
   if (policy.decision === "deny") return finish("policy_blocked");
+
+  // 2b. The run must be able to satisfy its own spec BEFORE step one.
+  //
+  // Deterministic and local, so it belongs in the workflow rather than an
+  // activity. Without it the durable path had the same hole as the desktop:
+  // the reconciliation spec declares `account_csv` required, `agent_inputs`
+  // arrived empty, and `local.parse_csv` returned bundled fixture rows anyway —
+  // a completed run and a receipt describing sample data.
+  //
+  // Reported as `failed` rather than a status of its own. A dedicated
+  // `inputs_missing` would read better, but the run status is a persisted enum
+  // with a CHECK constraint in `0003_agents_runs_approvals.up.sql`, so adding
+  // one is a migration — worth doing, not worth smuggling into this change.
+  // `failed` is accurate in the meantime: the run did not happen.
+  const inputs = validateAgentInputs(spec, run.agent_inputs);
+  if (!inputs.ready) return finish("failed");
 
   // 3–15. Execute steps in order.
   const orderedSteps = [...spec.steps].sort((a, b) => a.order - b.order);

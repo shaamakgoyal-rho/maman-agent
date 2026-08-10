@@ -5,7 +5,7 @@ import {
   type AgentRunInput,
   type AgentSpec,
 } from "@maman/contracts";
-import { compileAgentSpec, DemoSalesforceWorld } from "@maman/agent-runtime";
+import { compileAgentSpec, DemoSalesforceWorld, DEMO_ACCOUNT_LIST } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { createActivities, type PersistenceSink } from "../src/activities.js";
 
@@ -58,7 +58,11 @@ function run(s: AgentSpec, mode: AgentRunInput["mode"]): AgentRunInput {
     owner_user_id: s.owner_user_id,
     mode,
     trigger: { type: "manual", idempotency_key: uuidv7() },
-    agent_inputs: {},
+    // The reconciliation spec declares `account_csv` required. This was `{}`,
+    // and the run succeeded anyway because `local.parse_csv` ignored its inputs
+    // and returned the bundled fixture — so the durable path was reconciling
+    // sample rows too. Naming the sample makes the choice explicit.
+    agent_inputs: { account_csv: DEMO_ACCOUNT_LIST },
     policy_version_id: uuidv7(),
     requested_at: "2026-07-17T18:00:00.000Z",
   };

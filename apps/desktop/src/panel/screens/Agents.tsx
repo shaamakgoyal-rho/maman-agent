@@ -401,6 +401,17 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
         </Muted>
       )}
 
+      {/* SAMPLE DATA, SAID OUT LOUD. The local runtime cannot read a file the
+          user picked, so a reconciliation run here works off the bundled list.
+          That used to happen silently — the adapter ignored its input and
+          returned fixtures — and the resulting diff and ROI read as statements
+          about the user's own records. */}
+      {"sampleDataNotice" in runs && runs.sampleDataNotice && (
+        <p className="mt-2 rounded-lg border border-warning/40 bg-warning/5 p-2 text-[11px] text-ink">
+          {runs.sampleDataNotice}
+        </p>
+      )}
+
       {diff &&
         (runs.phase === "waiting_approval" ||
           runs.phase === "completed" ||

@@ -12,6 +12,9 @@ import {
   RuntimeCapabilityError,
   runtimeFromRegistry,
   validateRuntimeCapabilities,
+  validateAgentInputs,
+  AgentInputError,
+  DEMO_ACCOUNT_LIST,
   DISCOVERED_FIELDS_INPUT,
   FIELD_VALUES_INPUT,
   type CapabilityContext,
@@ -161,6 +164,12 @@ type RunsStore = {
    */
   questions: RunQuestion[];
   questionPlan: string[];
+  /**
+   * Set when a run used bundled sample data because the real input could not
+   * be supplied here. Shown next to the result, because a diff computed from a
+   * sample is not a statement about the user's own records.
+   */
+  sampleDataNotice: string | null;
   receipt: ExecutionReceipt | null;
   receiptSummary: string | null;
   error: string | null;
@@ -510,6 +519,43 @@ export function checkAnswer(value: string): { ok: true } | { ok: false; reason: 
   return { ok: true };
 }
 
+/**
+ * Binds the bundled sample list, when that is genuinely all this runtime has.
+ *
+ * The local runtime cannot read a file the user chose — there is no file
+ * picker and no reader. Before, that gap was filled by `local.parse_csv`
+ * ignoring its input and returning fixture rows whatever happened, so the run
+ * silently reconciled sample data and reported ROI for it.
+ *
+ * Binding the sentinel HERE makes the same outcome an explicit choice: it lands
+ * in the run's inputs, the adapter accepts it because it was asked for by name,
+ * and `sampleDataNotice` tells the user which list they are looking at. A real
+ * file path would be refused by the adapter rather than quietly answered.
+ */
+function bundledSampleFor(spec: AgentSpec): Record<string, unknown> {
+  const wantsList = spec.inputs.some((i) => i.key === "account_csv" && i.required);
+  if (!wantsList) return {};
+  useRuns.setState({
+    sampleDataNotice:
+      "No account list was provided, so this run used Maman's bundled sample list — the numbers below describe that sample, not your data.",
+  });
+  return { account_csv: DEMO_ACCOUNT_LIST };
+}
+
+/**
+ * Refuses a run whose spec declares inputs nothing supplied.
+ *
+ * The sibling of the capability check, and here for the same reason: a spec
+ * that cannot be satisfied should never perform its first step. Before this,
+ * `account_csv` was declared REQUIRED, the desktop passed nothing, and the
+ * reconciliation run completed on bundled fixture rows and published a receipt
+ * with ROI for an account list the user never provided.
+ */
+function requireInputs(spec: AgentSpec, inputs: Record<string, unknown>): void {
+  const readiness = validateAgentInputs(spec, inputs);
+  if (!readiness.ready) throw new AgentInputError(readiness);
+}
+
 type DiscoveryOutcome =
   | { ok: true; inputs: Record<string, unknown> }
   | { ok: false; questions: RunQuestion[]; plan: string[] };
@@ -527,7 +573,7 @@ async function discoverInputsFor(
   supplied: Readonly<Record<string, string>> = {},
 ): Promise<DiscoveryOutcome> {
   const needed = spec.inputs.filter((i) => i.source === "discovered_on_surface");
-  if (needed.length === 0) return { ok: true, inputs: {} };
+  if (needed.length === 0) return { ok: true, inputs: bundledSampleFor(spec) };
 
   const intent = intentFittingSteps(candidate.canonical_sequence, spec.steps);
   if (!intent) {
@@ -623,6 +669,7 @@ export const useRuns = create<RunsStore>((set) => ({
   policyHold: null,
   questions: [],
   questionPlan: [],
+  sampleDataNotice: null,
   receipt: null,
   receiptSummary: null,
   error: null,
@@ -642,6 +689,7 @@ export const useRuns = create<RunsStore>((set) => ({
       // would sit above a run that has moved past it.
       questions: [],
       questionPlan: [],
+      sampleDataNotice: null,
       receipt: null,
       error: null,
     });
@@ -679,6 +727,7 @@ export const useRuns = create<RunsStore>((set) => ({
         return;
       }
       activeInputs = discovery.inputs;
+      requireInputs(activeSpec, activeInputs);
       let diff: ProposedDiff | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") continue; // shadow: stop before writes
@@ -749,6 +798,7 @@ export const useRuns = create<RunsStore>((set) => ({
       policyHold: null,
       questions: [],
       questionPlan: [],
+      sampleDataNotice: null,
       receipt: null,
       error: null,
     });
@@ -778,6 +828,7 @@ export const useRuns = create<RunsStore>((set) => ({
         return;
       }
       activeInputs = discovery.inputs;
+      requireInputs(activeSpec, activeInputs);
       let pending: PendingApproval | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") break; // pause at the approval gate
@@ -1102,6 +1153,7 @@ export const useRuns = create<RunsStore>((set) => ({
       policyHold: null,
       questions: [],
       questionPlan: [],
+      sampleDataNotice: null,
       receipt: null,
       receiptSummary: null,
       error: null,

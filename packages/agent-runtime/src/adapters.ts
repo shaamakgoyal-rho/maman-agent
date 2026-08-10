@@ -198,12 +198,46 @@ export function matchAccounts(rows: CsvAccountRow[], accounts: SfAccount[]): Mat
  * demo registry and the real connector registry compose these; only
  * query_records / update_fields differ by provider.
  */
+/**
+ * The value `account_csv` must hold for the bundled sample list to be used.
+ *
+ * A sentinel rather than a default, so choosing demo data is something a caller
+ * DID, recorded in the run's inputs and visible on the receipt — not something
+ * that happened because nobody supplied anything.
+ */
+export const DEMO_ACCOUNT_LIST = "demo:bundled-account-list";
+
 export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
   const registry = new Map<string, CapabilityAdapter>();
 
   registry.set("local.parse_csv", {
     id: "local.parse_csv",
-    read: async () => structuredClone(DEMO_CSV_ROWS),
+    /**
+     * Serves the bundled sample list, and ONLY when it was explicitly asked for.
+     *
+     * This used to be `read: async () => structuredClone(DEMO_CSV_ROWS)` — no
+     * parameters at all. Whatever the spec bound to `account_csv` was ignored,
+     * including nothing: the reconciliation spec declares that input required,
+     * the desktop supplied none, and the run reconciled FIXTURE ROWS end to
+     * end, produced a diff, and published a receipt with ROI for an account
+     * list the user never gave it.
+     *
+     * Reading the value fixes both halves. An unbound input can no longer reach
+     * demo data, and a REAL file path is refused rather than silently answered
+     * with fixtures — this adapter cannot read a file, and pretending otherwise
+     * is how demo output gets mistaken for a result.
+     */
+    read: async (inputs) => {
+      const file = inputs["file"];
+      if (file !== DEMO_ACCOUNT_LIST) {
+        throw new PermanentAdapterError(
+          typeof file === "string" && file.length > 0
+            ? `This demo runtime cannot read "${file}". It only has the bundled sample list.`
+            : "No account list was provided, and this demo runtime will not invent one.",
+        );
+      }
+      return structuredClone(DEMO_CSV_ROWS);
+    },
   });
 
   registry.set("local.transform_columns", {
