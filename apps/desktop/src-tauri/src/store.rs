@@ -1497,6 +1497,9 @@ const DOMAIN_CATEGORIES: &[(&str, &str)] = &[
     ("docs.google.com", "spreadsheet"),
     ("mail.google.com", "email"),
     ("calendar.google.com", "calendar"),
+    ("linkedin.com", "research"),
+    ("slack.com", "messaging"),
+    ("teams.microsoft.com", "messaging"),
 ];
 
 /// Maps app identity to the coarse category exposed to the pattern engine.
@@ -1524,6 +1527,8 @@ pub fn categorize_app(display_name: &str, domain: Option<&str>) -> String {
         "calendar"
     } else if name.contains("linkedin") || name.contains("apollo") || name.contains("zoominfo") {
         "research"
+    } else if name.contains("slack") || name.contains("teams") || name.contains("discord") {
+        "messaging"
     } else if name.contains("chrome") || domain.is_some() {
         "browser"
     } else {
@@ -1977,6 +1982,8 @@ mod tests {
         assert_eq!(categorize_app("Google Sheets", Some("docs.google.com")), "spreadsheet");
         assert_eq!(categorize_app("Gmail", Some("mail.google.com")), "email");
         assert_eq!(categorize_app("LinkedIn", Some("linkedin.com")), "research");
+        assert_eq!(categorize_app("LinkedIn", Some("www.linkedin.com")), "research");
+        assert_eq!(categorize_app("Slack", Some("app.slack.com")), "messaging");
         assert_eq!(categorize_app("Some Site", Some("example.com")), "browser");
         assert_eq!(categorize_app("TextEdit", None), "other");
     }
@@ -2024,6 +2031,7 @@ mod tests {
         assert_eq!(categorize_app("Microsoft Excel", None), "spreadsheet");
         assert_eq!(categorize_app("Microsoft Outlook", None), "email");
         assert_eq!(categorize_app("Calendar", None), "calendar");
+        assert_eq!(categorize_app("Slack", None), "messaging");
     }
 }
 

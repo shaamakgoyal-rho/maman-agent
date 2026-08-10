@@ -15,6 +15,7 @@ const APP_LABELS: Record<string, string> = {
   email: "Gmail",
   calendar: "Calendar",
   research: "research tools",
+  messaging: "Slack",
   browser: "the browser",
   other: "your apps",
 };
@@ -73,6 +74,16 @@ export function deterministicName(
     // never have seen (objectType silently falls back to "record").
     title = describeObserved(candidate.canonical_sequence, candidate.domain_actions ?? []);
     intent = `automate_${objectType}_workflow`;
+  }
+
+  // A workflow that HOPS between apps is best named as the chain of hops —
+  // "Salesforce update → Slack message" says which habit this is where a
+  // single-app sentence hides half the work. The reconcile recipe keeps its
+  // named title (its intent is a recognised shape, not a generic chain); the
+  // intent chosen above is kept in every case, only the title improves.
+  if (intent !== "reconcile_account_list") {
+    const chain = chainTitle(candidate.canonical_sequence);
+    if (chain) title = chain;
   }
 
   const medianMinutes = Math.round(candidate.median_duration_ms / 60_000);
@@ -335,6 +346,89 @@ export function describeObserved(sequence: string[], domainActions: string[]): s
   }
   if (source) return `${verb} ${subject} in ${target} from ${source}`;
   return `${verb} ${subject} in ${target}`;
+}
+
+/* ------------------------------------------------------------- chain titles */
+
+/**
+ * Short app names for chain titles. Same flagship-product convention as
+ * APP_LABELS (crm reads "Salesforce" even though HubSpot maps there too) —
+ * a chain hop needs a name, and the category's flagship is the honest best
+ * guess the coarse category allows.
+ */
+const CHAIN_APP_LABELS: Record<string, string> = {
+  crm: "Salesforce",
+  spreadsheet: "spreadsheet",
+  email: "Gmail",
+  calendar: "Calendar",
+  research: "LinkedIn",
+  messaging: "Slack",
+  browser: "browser",
+  other: "app",
+};
+
+/** What a WRITE amounts to in each app: a CRM write is an update, a
+ * messaging write is a message, a spreadsheet write is an entry. */
+const CHAIN_WRITE_NOUNS: Record<string, string> = {
+  crm: "update",
+  spreadsheet: "entry",
+  email: "email",
+  calendar: "event",
+  research: "message",
+  messaging: "message",
+  browser: "update",
+  other: "update",
+};
+
+/** What a read-only hop was for, by its most telling event. */
+const CHAIN_READ_NOUNS: Record<string, string> = {
+  navigation: "lookup",
+  record_opened: "lookup",
+  table_read: "review",
+  element_focused: "review",
+  element_activated: "search",
+  copy_semantic: "copy",
+};
+
+/**
+ * A workflow that hops between apps is NAMED as that chain of hops:
+ * "Salesforce update → LinkedIn message → spreadsheet entry → Slack message".
+ * Each hop is one app segment (consecutive steps in the same app), labelled by
+ * the segment's most consequential act — its last write, else its first read.
+ * Returns null for single-app workflows, which keep their sentence titles;
+ * a chain of one is not a chain.
+ */
+export function chainTitle(sequence: string[]): string | null {
+  // Pure app/window switches carry no act of their own — the arrow between
+  // segments already says the user switched.
+  const steps = sequence
+    .map(parseStep)
+    .filter((s) => s.event !== "app_activated" && s.event !== "window_focused");
+
+  const segments: Array<{ app: string; steps: ParsedStep[] }> = [];
+  for (const step of steps) {
+    const last = segments[segments.length - 1];
+    if (last && last.app === step.app) last.steps.push(step);
+    else segments.push({ app: step.app, steps: [step] });
+  }
+  if (new Set(segments.map((s) => s.app)).size < 2) return null;
+
+  const labels: string[] = [];
+  for (const segment of segments) {
+    const write = [...segment.steps].reverse().find((s) => !isReadLike(s));
+    const head = write ?? segment.steps[0]!;
+    const app = CHAIN_APP_LABELS[segment.app] ?? segment.app;
+    const noun = write
+      ? (CHAIN_WRITE_NOUNS[segment.app] ?? "update")
+      : (CHAIN_READ_NOUNS[head.event] ?? "review");
+    const label = `${app} ${noun}`;
+    // A hop back that repeats the previous label adds nothing but length.
+    if (labels[labels.length - 1] !== label) labels.push(label);
+  }
+  if (labels.length < 2) return null;
+  // A long copy-paste loop names its shape, not every lap of it.
+  const shown = labels.length > 4 ? [...labels.slice(0, 3), labels[labels.length - 1]!] : labels;
+  return shown.join(" → ");
 }
 
 /** A canonical-token field that carries real information ("-" means absent). */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeObserved, stepPhrase } from "../src/naming.js";
+import { chainTitle, describeObserved, stepPhrase } from "../src/naming.js";
 
 /**
  * Suggestion titles must say what the workflow IS.
@@ -178,5 +178,56 @@ describe("the summary says what the workflow consists of", () => {
     expect(phrase).toBe(
       "focus a section of the page in the browser, a block of text updates, then change a text field",
     );
+  });
+});
+
+describe("multi-app workflows are named as the chain of hops", () => {
+  it("names each hop by its app and its most consequential act", () => {
+    const title = chainTitle([
+      t("crm", "record_opened", "-", "contact"),
+      t("crm", "value_committed", "phone", "contact"),
+      t("research", "navigation"),
+      t("research", "value_committed", "message"),
+      t("spreadsheet", "paste_semantic", "-", "row"),
+      t("messaging", "value_committed", "message"),
+    ]);
+    expect(title).toBe("Salesforce update → LinkedIn message → spreadsheet entry → Slack message");
+  });
+
+  it("labels a read-only hop by what the reading was for", () => {
+    const title = chainTitle([
+      t("email", "record_opened", "-", "thread"),
+      t("crm", "value_committed", "-", "opportunity"),
+    ]);
+    expect(title).toBe("Gmail lookup → Salesforce update");
+  });
+
+  it("is null for a single-app workflow — a chain of one is not a chain", () => {
+    expect(chainTitle([t("crm", "record_opened"), t("crm", "value_committed")])).toBeNull();
+  });
+
+  it("drops pure app switches and collapses consecutive same-app steps", () => {
+    const title = chainTitle([
+      t("crm", "record_opened"),
+      t("crm", "app_activated"),
+      t("spreadsheet", "window_focused"),
+      t("spreadsheet", "value_committed"),
+      t("spreadsheet", "value_committed"),
+    ]);
+    expect(title).toBe("Salesforce lookup → spreadsheet entry");
+  });
+
+  it("caps a long copy-paste loop instead of naming every lap", () => {
+    const laps = [
+      t("crm", "copy_semantic"),
+      t("spreadsheet", "paste_semantic"),
+      t("crm", "record_opened"),
+      t("email", "value_committed"),
+      t("messaging", "value_committed"),
+      t("calendar", "value_committed"),
+    ];
+    const title = chainTitle(laps)!;
+    expect(title.split(" → ")).toHaveLength(4);
+    expect(title.endsWith("Calendar event")).toBe(true);
   });
 });
