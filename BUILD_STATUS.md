@@ -277,6 +277,37 @@ Not done: `learnedWorkflows.ts` has the same shape — `parseWorkflowsFile`
 returns `{workflows: [], discarded: 0}` for unparseable JSON, conflating it with
 an empty file, and its saves are unguarded. Same fix, not yet applied.
 
+## Nothing secret-shaped reaches a model prompt (Phase 9)
+
+"Secret material never enters logs, analytics, prompts, or AgentSpec" is a
+standing invariant, and three of those four were enforced structurally:
+`browserActionSchema` bounds every field with `boundedNonSecret`, the Teach Mode
+redaction gate masks credential regions before egress, and the logger redacts.
+**Prompts — named explicitly in that sentence — had nothing.**
+
+`namingInputSchema` carried the comment "Redacted structured summary — NEVER raw
+events" over fields that were bare `z.string()`, and `AnthropicModelProvider`
+builds its prompt as `JSON.stringify(input)` **without parsing the input at
+all**. TypeScript types are erased before the wire, so that comment was the
+entire enforcement between a captured value and Anthropic.
+
+| Component         | Status   | Evidence                                                                                                                                                                                  |
+| ----------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| input schemas     | complete | Every free-text field is `promptSafeText(max)` — bounded AND secret-refusing, mirroring `boundedNonSecret` on the browser wire. An unbounded field is an exfiltration channel of its own. |
+| parse before send | complete | Both provider methods `safeParse` the input and return `policy_violation` without calling the SDK. Asserted with a stubbed SDK: the create spy is never invoked.                          |
+| the error is safe | complete | The refusal names the offending FIELD, never the value — a rejected secret repeated in an error string lands in the logs this check protects.                                             |
+| the normal path   | complete | An ordinary request still sends, so naming does not silently stop working and leave every agent on its deterministic title.                                                               |
+
+9 tests in `prompt-boundary.test.ts`. The load-bearing one is that the SDK is
+never called for a secret-carrying input — a schema that rejects while the
+caller sends anyway would be no protection at all.
+
+Note on `canonical_steps`: tokens are category-level by construction
+(`source:app_category:event_type:target_role:semantic_type:object_type`), so
+this is defence in depth rather than a live leak. The guard is on the field
+rather than on the convention, because a future source that puts a captured
+value in a segment would otherwise send it verbatim.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

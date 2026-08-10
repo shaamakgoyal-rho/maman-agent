@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  compileInputSchema,
   enforceCapabilityAllowlist,
+  namingInputSchema,
   namingOutputSchema,
   type CompileInput,
   type ModelProvider,
@@ -31,6 +33,22 @@ export class AnthropicModelProvider implements ModelProvider {
   }
 
   async nameRecommendation(input: NamingInput): Promise<ModelResult<NamingOutput>> {
+    // PARSE BEFORE SENDING. The prompt below is `JSON.stringify(input)`, and
+    // TypeScript types do not exist at run time — whatever the caller actually
+    // hands over is what reaches Anthropic. The schema's secret refusal is only
+    // real if something applies it here.
+    const safe = namingInputSchema.safeParse(input);
+    if (!safe.success) {
+      return {
+        ok: false,
+        error: "policy_violation",
+        // The offending value is NOT included. Reporting a rejected secret in
+        // an error string would put it in the logs this check exists to keep
+        // it out of.
+        detail: `refused to send: ${safe.error.issues.map((i) => i.path.join(".")).join(", ")}`,
+      };
+    }
+
     try {
       const response = await this.client.messages.create({
         model: this.config.classifier_model,
@@ -83,6 +101,15 @@ export class AnthropicModelProvider implements ModelProvider {
   }
 
   async draftAgentPlan(input: CompileInput): Promise<ModelResult<unknown>> {
+    const safe = compileInputSchema.safeParse(input);
+    if (!safe.success) {
+      return {
+        ok: false,
+        error: "policy_violation",
+        detail: `refused to send: ${safe.error.issues.map((i) => i.path.join(".")).join(", ")}`,
+      };
+    }
+
     try {
       const response = await this.client.messages.create({
         model: this.config.compiler_model,
