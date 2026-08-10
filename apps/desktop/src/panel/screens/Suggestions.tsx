@@ -343,27 +343,37 @@ function FormingCard({
               : "Waiting longer won't help this one — I never saw which fields it touches or what values belong in them, so there is nothing for me to check against."}
           </p>
           {teachError && <p className="mt-1 text-xs text-danger">{teachError}</p>}
-          <Button
-            variant="secondary"
-            onClick={async () => {
-              setTeachError(null);
-              try {
-                const workflow = await useLearnedWorkflows
-                  .getState()
-                  .startFor(item.candidate, item.candidate.owner_user_id);
-                useNavigation.getState().openConfigure(workflow.workflow_id);
-              } catch (e) {
-                // WITHOUT THIS the rejection vanished and the button looked
-                // inert — indistinguishable from not being there at all, which
-                // is exactly how a real failure went unnoticed on device.
-                setTeachError(
-                  e instanceof Error ? e.message : "I could not start teaching that workflow.",
-                );
-              }
-            }}
-          >
-            Teach me this workflow
-          </Button>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                setTeachError(null);
+                try {
+                  const workflow = await useLearnedWorkflows
+                    .getState()
+                    .startFor(item.candidate, item.candidate.owner_user_id);
+                  useNavigation.getState().openConfigure(workflow.workflow_id);
+                } catch (e) {
+                  // WITHOUT THIS the rejection vanished and the button looked
+                  // inert — indistinguishable from not being there at all, which
+                  // is exactly how a real failure went unnoticed on device.
+                  setTeachError(
+                    e instanceof Error ? e.message : "I could not start teaching that workflow.",
+                  );
+                }
+              }}
+            >
+              Type it in
+            </Button>
+            {/* THE OTHER WAY TO TEACH IT, offered where the gap is admitted.
+              Demonstrating used to be a tab, which meant the user had to know it
+              existed, go there, and re-establish which workflow they meant. Both
+              routes close the same gap, so both belong on the card that names
+              it: type the fields in, or do the work once and let Maman watch. */}
+            <Button variant="secondary" onClick={() => useNavigation.getState().openTeach()}>
+              Or show me — I&apos;ll watch once
+            </Button>
+          </div>
         </div>
       )}
 

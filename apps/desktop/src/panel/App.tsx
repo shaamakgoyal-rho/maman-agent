@@ -15,13 +15,16 @@ import { Configure } from "./screens/Configure.js";
 import { useNavigation } from "../state/navigation.js";
 import { useLearnedWorkflows } from "../lib/learnedWorkflows.js";
 
-const TABS = ["Home", "Suggestions", "Agents", "Teach", "Activity", "Privacy", "Settings"] as const;
+// Teach is deliberately NOT here. Demonstrating is something the user does at
+// the moment Maman says it could not see enough, so it opens from that card
+// rather than being a place to browse — see `useNavigation.openTeach`.
+const TABS = ["Home", "Suggestions", "Agents", "Activity", "Privacy", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App() {
   const { settings, hydrated, hydrate } = useSettings();
   const [tab, setTab] = useState<Tab>("Home");
-  const { configureWorkflowId, closeConfigure } = useNavigation();
+  const { configureWorkflowId, closeConfigure, teachOpen, closeTeach } = useNavigation();
   const [reportedPetState, setReportedPetState] = useState<PetStateName | null>(null);
   // Until the pet window reports, derive the display state from settings.
   const petState: PetStateName =
@@ -148,12 +151,13 @@ export function App() {
             half-finished teach session must not require finishing it. */}
         {configureWorkflowId ? (
           <Configure workflowId={configureWorkflowId} onDone={closeConfigure} />
+        ) : teachOpen ? (
+          <Teach onDone={closeTeach} />
         ) : (
           <>
             {tab === "Home" && <Home petState={petState} />}
             {tab === "Suggestions" && <Suggestions />}
             {tab === "Agents" && <Agents />}
-            {tab === "Teach" && <Teach />}
             {tab === "Activity" && <Activity />}
             {tab === "Privacy" && <Privacy />}
             {tab === "Settings" && <Settings />}
