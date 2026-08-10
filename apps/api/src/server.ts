@@ -331,9 +331,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       model: createModelProvider(env),
     });
     if (result.status !== "valid") {
-      return reply
-        .status(422)
-        .send({ status: 422, title: "Not compilable", issues: result.issues });
+      // The compiler distinguishes three ways a compile can fail, and they need
+      // different things from the caller: `blocked` means we do not know how to
+      // do this safely, `needs_runtime` means we do but not on this device, and
+      // `needs_configuration` means observation did not capture enough. This
+      // used to read `result.issues` for all of them — which only exists on
+      // `blocked`, so the other two would have sent `issues: undefined` and
+      // told the caller nothing about what to fix.
+      return reply.status(422).send({
+        status: 422,
+        title: "Not compilable",
+        reason: result.status,
+        detail: result.message,
+        ...(result.status === "blocked" ? { issues: result.issues } : { missing: result.missing }),
+      });
     }
     return {
       spec: result.spec,
