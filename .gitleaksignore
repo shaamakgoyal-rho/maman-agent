@@ -1,0 +1,16 @@
+# Known-synthetic findings, pinned by exact fingerprint (commit:file:rule:line).
+# Every entry below is a deliberately FAKE credential-shaped fixture that exists
+# to prove the refusal machinery rejects secret-shaped values — or, for the
+# .env.example entry, an EMPTY key name the generic rule pattern-matched.
+# Triage each new finding before adding it here; never allowlist by path or rule.
+
+# "A real-looking credential must not be storable as a constant" — fabricated sk_live_.
+7e882664fd921c363e1ab58e7a5f4af4038cbff2:packages/agent-runtime/test/compile-learned.test.ts:stripe-access-token:248
+# Validator refusal fixture — fabricated sk_live_ in a literal input.
+34cd258054e167d61bc9fb50dd6618675295de30:packages/agent-runtime/test/validator.test.ts:stripe-access-token:178
+# looksLikeSecret() positive case — the jwt.io example payload with a garbage signature.
+971dc1af518788b1ae967a9cc04609f6306fd9f3:packages/contracts/test/common.test.ts:jwt:44
+# AgentSpec secret-rejection fixture — fabricated sk_live_.
+971dc1af518788b1ae967a9cc04609f6306fd9f3:packages/contracts/test/agent-spec.test.ts:stripe-access-token:95
+# WORKOS_COOKIE_PASSWORD= with an empty value; the rule matched the key name only.
+0ff2ea001a158849a9670389edb09ed55de075d6:.env.example:generic-api-key:44
