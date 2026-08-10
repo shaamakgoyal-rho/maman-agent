@@ -171,6 +171,34 @@ CHECK constraint in `0003_agents_runs_approvals.up.sql`, so adding one is a
 migration whose integration tests need Docker — worth doing, not worth
 smuggling into this change.
 
+## A write is never served by demo data (Phase 6)
+
+`realAdapterRegistry` wraps each Salesforce capability with a per-org fallback:
+when the org has no connector linked, the demo adapter answers. Every method
+resolved the same way —
+
+    const use = (await linked(ctx)) ? real : (demo ?? real);
+
+— including `write`. So an unlinked org's supervised write ran against the
+in-memory `DemoSalesforceWorld`, which genuinely mutates
+(`account[change.field] = change.new_value`) and returns `{applied: n}`. The
+write succeeded, just somewhere else, and the run reported records updated in a
+Salesforce it had never contacted. Nothing downstream could detect it.
+
+| Component                | Status   | Evidence                                                                                                                                                                                                                          |
+| ------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| write refuses            | complete | `ConnectorNotLinkedError` names the provider and what to connect, and says what it will NOT do ("I will not write to demo data and call it done"). Asserted: no HTTP call, and the demo world is unmutated.                       |
+| reads still fall back    | complete | Deliberately kept — an org that has connected nothing can still see the shape of a run. The existing fallback tests are unchanged.                                                                                                |
+| the fallback is reported | complete | `onDemoFallback` fires for reads and proposals served by fixtures, with capability, provider and org. The worker logs it structurally. A proposal built from demo records is what the user is asked to approve, so it counts too. |
+
+6 new tests in `registry.test.ts`. The asymmetry is the design: a read served
+from fixtures produces a number that is wrong; a write served from fixtures
+produces a claim that cannot be retracted.
+
+Gap left open: the demo-fallback signal reaches the worker's logs but not the
+`ExecutionReceipt`, so a receipt still cannot say "these numbers came from demo
+data". That needs a receipt field and is a contract change.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

@@ -57,6 +57,20 @@ function buildRegistry(): Map<string, CapabilityAdapter> {
     credentials,
     demoFallback: demo,
     idempotency: new MemoryIdempotencyStore(),
+    // A read served from fixtures is not an error, but it IS a fact about what
+    // the run's numbers describe. Logged structurally so it is attributable to
+    // a capability and an org rather than disappearing into the result.
+    onDemoFallback: ({ capability_id, provider, organization_id }) => {
+      console.warn(
+        JSON.stringify({
+          evt: "demo_fallback_read",
+          capability_id,
+          provider,
+          organization_id,
+          detail: `no ${provider} connector linked — this read returned demo data, not the org's records`,
+        }),
+      );
+    },
   });
 }
 
