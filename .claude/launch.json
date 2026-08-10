@@ -4,26 +4,13 @@
     {
       "name": "desktop-panel-preview",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": [
-        "--filter",
-        "@maman/desktop",
-        "preview",
-        "--port",
-        "4318",
-        "--strictPort"
-      ],
+      "runtimeArgs": ["--filter", "@maman/desktop", "preview", "--port", "4318", "--strictPort"],
       "port": 4318
     },
     {
       "name": "site-preview",
       "runtimeExecutable": "python3",
-      "runtimeArgs": [
-        "-m",
-        "http.server",
-        "4319",
-        "--directory",
-        "apps/site"
-      ],
+      "runtimeArgs": ["-m", "http.server", "4319", "--directory", "apps/site"],
       "port": 4319
     }
   ]
