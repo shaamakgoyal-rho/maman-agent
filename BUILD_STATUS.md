@@ -199,6 +199,46 @@ Gap left open: the demo-fallback signal reaches the worker's logs but not the
 `ExecutionReceipt`, so a receipt still cannot say "these numbers came from demo
 data". That needs a receipt field and is a contract change.
 
+## Receipts report measured values (Phase 7)
+
+The receipt is the audit record, and every number in it was a literal:
+
+    started_at: new Date(Date.now() - 2000)          // always "2 seconds ago"
+    duration_ms: 100                                  // every step, always
+    totals.duration_ms: 2000
+    totals.records_read: 10                           // over per-step zeroes
+    provider_cost_usd: mode === "shadow" ? 0 : 0.08
+    computeReceiptRoi({ manual_baseline_ms: 11 * 60_000,
+                        baseline_observation_count: 6, ... })
+
+The ROI line is the one that mattered. `MEASURED_BASELINE_MIN_OBSERVATIONS` is
+3, so a hardcoded count of 6 made the provenance system stamp the savings
+**"measured"**, and `petReceiptSummary` reported "Saved approximately 11
+minutes" for every supervised run. The machinery was correct throughout — it was
+being fed invented inputs. The worker's comment even claimed "measured baseline
+from the source pattern's manual observations", which it never was.
+
+| Component       | Status   | Evidence                                                                                                                                                                                                      |
+| --------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| desktop timings | complete | `beginMeasuring` per run, `measured()` around every `executeStep`. `performance.now()` because demo adapters finish under a millisecond and wall-clock would round them all to 0.                             |
+| records read    | complete | Counted from real step outputs; `countRecords` returns undefined (not 0) for shapes carrying no count, so "none" and "unknown" stay distinct. Totals are the sum of the steps.                                |
+| ROI baseline    | complete | Taken from the source pattern's `median_duration_ms` and `occurrence_count` — genuinely observed. A pattern seen twice now yields `baseline_provenance: "estimated"`, which the old literal made unreachable. |
+| cost            | complete | 0 on the local runtime, which bills nothing. A fabricated cost is worse than a zero because ROI subtracts it as real.                                                                                         |
+| worker          | partial  | Invented values removed (baseline, per-step duration, records, `cost_usd: 0.08`). It reports 0 where it cannot measure and lets provenance fall to "estimated".                                               |
+
+10 tests in `receipt-honesty.test.ts` drive the real store: the elapsed window
+must sit inside the wall-clock window of the call, totals must equal the sum of
+their steps, and provenance must degrade for a thinly-observed pattern.
+
+Two gaps left open, both needing contract changes rather than code:
+
+- `RunStepSummary` has no `records_read` field, so the worker measures the count
+  in `executeReadStep` and discards it at the workflow boundary. Its optional
+  `started_at`/`completed_at` are likewise never populated.
+- `AgentRunInput` does not carry the source pattern's observations, so the
+  worker has no baseline at all and reports 0 with "estimated" provenance. The
+  device has the numbers; the run input is the missing hop.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

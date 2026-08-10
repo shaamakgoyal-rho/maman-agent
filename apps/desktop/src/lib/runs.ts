@@ -319,6 +319,77 @@ let activeState: RunState | null = null;
  */
 let activeInputs: Record<string, unknown> = {};
 let activeRunId = "";
+
+/**
+ * MEASUREMENTS TAKEN FROM THE RUN, not decided in advance.
+ *
+ * The receipt used to state `started_at: Date.now() - 2000`, `duration_ms: 100`
+ * per step, `duration_ms: 2000` in totals, `records_read: 10`, and
+ * `provider_cost_usd: 0.08` — every one a literal, none of them observed. The
+ * receipt is the audit record; a number in it that nothing measured is an
+ * assertion about a run that did not happen that way.
+ */
+let runStartedAtMs = 0;
+/** step_id → wall-clock ms that step actually took. */
+let stepDurations = new Map<string, number>();
+/** step_id → records the step actually read, where the output could be counted. */
+let stepRecordsRead = new Map<string, number>();
+/**
+ * The observed pattern this run came from.
+ *
+ * Its `median_duration_ms` and `occurrence_count` are REAL — derived from the
+ * episodes the pattern engine clustered. The receipt's ROI baseline used to be
+ * `11 * 60_000` with `baseline_observation_count: 6`, both invented, and since
+ * 6 clears `MEASURED_BASELINE_MIN_OBSERVATIONS` the provenance system stamped
+ * the resulting savings "measured". The mechanism was working; it was being
+ * lied to.
+ */
+let activeCandidate: PatternCandidate | null = null;
+
+/** Resets every measurement so a new run cannot inherit the last one's numbers. */
+function beginMeasuring(candidate: PatternCandidate): void {
+  runStartedAtMs = Date.now();
+  stepDurations = new Map();
+  stepRecordsRead = new Map();
+  activeCandidate = candidate;
+}
+
+/**
+ * How many records a read step returned, when that is answerable.
+ *
+ * Returns undefined rather than 0 for an output whose shape carries no count.
+ * Zero is a measurement; "I could not tell" is not, and reporting the second as
+ * the first is how `records_read: 10` felt reasonable in the first place.
+ */
+function countRecords(output: unknown): number | undefined {
+  if (Array.isArray(output)) return output.length;
+  if (typeof output === "object" && output !== null) {
+    const values = (output as { values?: unknown }).values;
+    if (values && typeof values === "object") return Object.keys(values).length;
+    const matches = (output as { matches?: unknown }).matches;
+    if (Array.isArray(matches)) return matches.length;
+  }
+  return undefined;
+}
+
+/**
+ * Times one step.
+ *
+ * `performance.now()` rather than `Date.now()`: the demo adapters finish in
+ * well under a millisecond, and a wall-clock difference would round every one
+ * of them to 0 — indistinguishable from a step that never ran. The rounded
+ * value can still be 0 for a genuinely instant step, which is why
+ * `stepDurations.has()` is what tells the receipt whether a step executed at
+ * all, rather than the value being non-zero.
+ */
+async function measured<T>(stepId: string, run: () => Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await run();
+  } finally {
+    stepDurations.set(stepId, Math.round(performance.now() - startedAt));
+  }
+}
 let interventionStart = 0;
 // The running agent's workflow name, for the status bar.
 let activeAgentName = "your helper";
@@ -393,7 +464,35 @@ function buildReceipt(
    */
   lane: RunLane = "api",
 ): ExecutionReceipt {
-  const writeSource = lane === "browser" ? "browser_extension" : "api";
+  const writeSource: ExecutionReceipt["steps"][number]["source"] =
+    lane === "browser" ? "browser_extension" : "api";
+  const completedAtMs = Date.now();
+  // A run that somehow reached here without `beginMeasuring` gets an honest
+  // zero rather than a plausible-looking elapsed time.
+  const startedAtMs = runStartedAtMs > 0 ? runStartedAtMs : completedAtMs;
+
+  const steps = spec.steps.map((s) => ({
+    step_id: s.step_id,
+    capability_id: s.capability_id,
+    // Reads still come from the API/demo adapters in both lanes; only the write
+    // step changes hands.
+    source: s.mode === "write" ? writeSource : ("api" as const),
+    // Only what was counted. A step whose output had no countable shape, or
+    // that never ran, contributes 0 — and `totals.records_read` below is the
+    // sum of these rather than a separate literal that could disagree.
+    records_read: stepRecordsRead.get(s.step_id) ?? 0,
+    writes_proposed: s.mode === "propose_write" ? diff.summary.change_count : 0,
+    writes_completed: s.mode === "write" && writes ? writes.completed : 0,
+    verification:
+      s.mode === "write" && writes
+        ? writes.verified
+          ? ("independent_read_passed" as const)
+          : ("independent_read_failed" as const)
+        : ("none" as const),
+    duration_ms: stepDurations.get(s.step_id) ?? 0,
+    retries: 0,
+  }));
+
   return {
     schema_version: 1,
     receipt_id: uuidv7(),
@@ -403,41 +502,33 @@ function buildReceipt(
     recipe_version: 1,
     trigger: "manual",
     mode,
-    started_at: new Date(Date.now() - 2000).toISOString(),
-    completed_at: new Date().toISOString(),
-    steps: spec.steps.map((s) => ({
-      step_id: s.step_id,
-      capability_id: s.capability_id,
-      // Reads still come from the API/demo adapters in both lanes; only the write
-      // step changes hands.
-      source: s.mode === "write" ? writeSource : "api",
-      records_read: 0,
-      writes_proposed: s.mode === "propose_write" ? diff.summary.change_count : 0,
-      writes_completed: s.mode === "write" && writes ? writes.completed : 0,
-      verification:
-        s.mode === "write" && writes
-          ? writes.verified
-            ? "independent_read_passed"
-            : "independent_read_failed"
-          : "none",
-      duration_ms: 100,
-      retries: 0,
-    })),
+    started_at: new Date(startedAtMs).toISOString(),
+    completed_at: new Date(completedAtMs).toISOString(),
+    steps,
     approvals: [],
     totals: {
-      records_read: 10,
+      records_read: steps.reduce((sum, s) => sum + s.records_read, 0),
       writes_proposed: diff.summary.change_count,
       writes_completed: writes?.completed ?? 0,
-      duration_ms: 2000,
+      duration_ms: completedAtMs - startedAtMs,
       model_input_tokens: 0,
       model_output_tokens: 0,
       model_cost_usd: 0,
-      provider_cost_usd: mode === "shadow" ? 0 : 0.08,
-      total_cost_usd: mode === "shadow" ? 0 : 0.08,
+      // The local runtime bills nothing: the demo adapters make no provider
+      // call, and the browser lane drives a page the user is already paying
+      // for. `0.08` was a plausible-looking invention, and a fabricated cost is
+      // worse than a zero because it survives into ROI as a real subtraction.
+      provider_cost_usd: 0,
+      total_cost_usd: 0,
     },
     roi: computeReceiptRoi({
-      manual_baseline_ms: 11 * 60_000,
-      baseline_observation_count: 6,
+      // THE BASELINE IS OBSERVED, not chosen. `median_duration_ms` and
+      // `occurrence_count` come from the episodes the pattern engine actually
+      // clustered. With no candidate in hand the baseline is 0 and the
+      // observation count is 0, which drops provenance to "estimated" — the
+      // honest answer, and the one the ROI engine was built to express.
+      manual_baseline_ms: activeCandidate?.median_duration_ms ?? 0,
+      baseline_observation_count: activeCandidate?.occurrence_count ?? 0,
       automated_human_ms: interventionMs,
       human_review_ms: interventionMs,
       mode,
@@ -700,6 +791,7 @@ export const useRuns = create<RunsStore>((set) => ({
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
+      beginMeasuring(candidate);
       const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       // BLOCK BEFORE EXECUTING ANYTHING. Checking here rather than per-step
       // means a spec that is missing an adapter for a LATER step never performs
@@ -732,14 +824,20 @@ export const useRuns = create<RunsStore>((set) => ({
       for (const step of activeSpec.steps) {
         if (step.mode === "write") continue; // shadow: stop before writes
         set({ phase: step.mode === "propose_write" ? "preparing_diff" : "running_read" });
-        const result = await executeStep({
-          spec: activeSpec,
-          step,
-          state: activeState,
-          agentInputs: activeInputs,
-          ctx: ctx("shadow"),
-          adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
-        });
+        const result = await measured(step.step_id, () =>
+          executeStep({
+            spec: activeSpec!,
+            step,
+            state: activeState!,
+            agentInputs: activeInputs,
+            ctx: ctx("shadow"),
+            adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
+          }),
+        );
+        if (result.kind === "read") {
+          const counted = countRecords(result.output);
+          if (counted !== undefined) stepRecordsRead.set(step.step_id, counted);
+        }
         if (result.kind === "proposed") diff = result.diff;
       }
       await emitAppEvent({ type: "simulate_pet_event", event: "REVIEW_STARTED" });
@@ -809,6 +907,7 @@ export const useRuns = create<RunsStore>((set) => ({
       activeSpec = await compile(candidate, generalizedIntent, desiredOutcome);
       activeState = { outputs: {} };
       activeRunId = uuidv7();
+      beginMeasuring(candidate);
       const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       const discovery = await discoverInputsFor(
         activeSpec,
@@ -833,14 +932,20 @@ export const useRuns = create<RunsStore>((set) => ({
       for (const step of activeSpec.steps) {
         if (step.mode === "write") break; // pause at the approval gate
         set({ phase: step.mode === "propose_write" ? "preparing_diff" : "running_read" });
-        const result = await executeStep({
-          spec: activeSpec,
-          step,
-          state: activeState,
-          agentInputs: activeInputs,
-          ctx: ctx("supervised"),
-          adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
-        });
+        const result = await measured(step.step_id, () =>
+          executeStep({
+            spec: activeSpec!,
+            step,
+            state: activeState!,
+            agentInputs: activeInputs,
+            ctx: ctx("supervised"),
+            adapter: requireAdapter(registry, step, LOCAL_RUNTIME_ID),
+          }),
+        );
+        if (result.kind === "read") {
+          const counted = countRecords(result.output);
+          if (counted !== undefined) stepRecordsRead.set(step.step_id, counted);
+        }
         if (result.kind === "proposed") {
           pending = {
             step_id: "apply-updates",
@@ -1061,20 +1166,22 @@ export const useRuns = create<RunsStore>((set) => ({
     try {
       const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
       const writeStep = activeSpec.steps.find((s) => s.mode === "write")!;
-      const result = await executeStep({
-        spec: activeSpec,
-        step: writeStep,
-        state: activeState,
-        // The SAME inputs the read and propose steps ran with. Re-discovering
-        // here could resolve a different control than the one the user was
-        // shown a diff for, which is the one thing an approval gate must not
-        // allow.
-        agentInputs: activeInputs,
-        ctx: ctx("supervised"),
-        adapter: requireAdapter(registry, writeStep, LOCAL_RUNTIME_ID),
-        approvedDiff: pending.diff,
-        approvedDiffSha: pending.diff_sha256,
-      });
+      const result = await measured(writeStep.step_id, () =>
+        executeStep({
+          spec: activeSpec!,
+          step: writeStep,
+          state: activeState!,
+          // The SAME inputs the read and propose steps ran with. Re-discovering
+          // here could resolve a different control than the one the user was
+          // shown a diff for, which is the one thing an approval gate must not
+          // allow.
+          agentInputs: activeInputs,
+          ctx: ctx("supervised"),
+          adapter: requireAdapter(registry, writeStep, LOCAL_RUNTIME_ID),
+          approvedDiff: pending!.diff,
+          approvedDiffSha: pending!.diff_sha256,
+        }),
+      );
       set({ phase: "verifying" });
       const interventionMs = Date.now() - interventionStart;
       const writes =
