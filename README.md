@@ -6,6 +6,17 @@ Maman observes only the applications and sites you allow, detects workflows you 
 and proposes transparent helper agents. Nothing writes to an external system without your
 explicit, diff-bound approval, and every run reports honest verified time saved and cost.
 
+## Download
+
+**[Download Maman for macOS →](https://github.com/shaamakgoyal-rho/maman-agent/releases/latest/download/Maman.dmg)**
+(universal — Apple Silicon and Intel, macOS 14+; [release notes](https://github.com/shaamakgoyal-rho/maman-agent/releases/latest))
+
+Open the DMG, drag Maman into Applications, then **right-click Maman → Open** the first
+time — this preview is not yet notarized, so macOS will say the developer cannot be
+verified; right-click → Open is the one-time escape hatch. Grant Accessibility when
+asked, click **Always Allow** on the keychain prompt, and choose which apps and sites
+it may watch. See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for how releases are cut.
+
 > **Build status:** under active construction. See [BUILD_STATUS.md](BUILD_STATUS.md) for
 > exactly what works today. This README's demo instructions grow as milestones land.
 

@@ -8,14 +8,17 @@ thing that would remove most of that cost.
 ```bash
 bash scripts/build-release-dmg.sh          # → dist/Maman.dmg
 gh release create vX.Y.Z-preview.N dist/Maman.dmg#"Maman.dmg (universal, macOS 14+)" \
-  --repo shaamakgoyal-rho/maman-releases --title "…" --notes-file notes.md
+  --repo shaamakgoyal-rho/maman-agent --title "…" --notes-file notes.md
 ```
 
 The download page reads `releases/latest/download/Maman.dmg`, so publishing a new
 release with that asset name is all that is needed — the page needs no redeploy.
 
-Source stays in the private repo; `maman-releases` holds **artifacts only**, and is
-public so the download works without a GitHub account.
+Releases live on THIS repository. They used to live in a separate
+`maman-releases` repo from when the source was private; the source went public
+on 2026-08-10, and a release asset on a private repo is not downloadable
+anyway, so the split stopped serving its purpose. `maman-releases` now just
+points here.
 
 ## Three build facts that are easy to get wrong
 
