@@ -11,6 +11,8 @@ explicit, diff-bound approval, and every run reports honest verified time saved 
 **[Download Maman for macOS →](https://github.com/shaamakgoyal-rho/maman-agent/releases/latest/download/Maman.dmg)**
 (universal — Apple Silicon and Intel, macOS 14+; [release notes](https://github.com/shaamakgoyal-rho/maman-agent/releases/latest))
 
+Or visit the download page: **[getmaman.vercel.app](https://getmaman.vercel.app)**
+
 Open the DMG, drag Maman into Applications, then **right-click Maman → Open** the first
 time — this preview is not yet notarized, so macOS will say the developer cannot be
 verified; right-click → Open is the one-time escape hatch. Grant Accessibility when
