@@ -226,7 +226,10 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
   registry.set("browser.extract_structured_fields", {
     id: "browser.extract_structured_fields",
     read: async (inputs, ctx) => {
-      const fields = normaliseFields(inputs["fields"]);
+      const fields =
+        normaliseFields(inputs["fields"]).length > 0
+          ? normaliseFields(inputs["fields"])
+          : fieldsFromTargetBinding(inputs);
       if (fields.length === 0) {
         throw new Error(
           "No fields were configured to read. Teach the workflow which fields matter first.",
@@ -258,7 +261,11 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
   registry.set("browser.propose_form_fill", {
     id: "browser.propose_form_fill",
     proposeWrite: async (inputs, ctx): Promise<ProposedDiff> => {
-      const wanted = normaliseFills(inputs["fields"]);
+      const fromFields = normaliseFills(inputs["fields"]);
+      const fromTarget = fieldsFromTargetBinding(inputs).filter(
+        (f): f is BrowserFieldTarget & { value: string } => typeof f.value === "string",
+      );
+      const wanted = fromFields.length > 0 ? fromFields : fromTarget;
       if (wanted.length === 0) {
         throw new Error("No field values were configured, so there is nothing to propose.");
       }
@@ -390,6 +397,41 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
   // correctly refusing it today.
 
   return registry;
+}
+
+/**
+ * The learned-workflow binding shape, accepted alongside `fields`.
+ *
+ * `compileLearnedWorkflow` binds each configured step as `target` (a JSON
+ * {role, name, nth?} the user picked in Configure) plus `value`. These adapters
+ * only read `fields`, so a compiled LEARNED agent's first step threw "No fields
+ * were configured to read. Teach the workflow which fields matter first" — the
+ * user had just taught exactly that, and the two halves did not share a wire
+ * shape. Same class of defect as the unbound-inputs bug, one layer up.
+ */
+function fieldsFromTargetBinding(
+  inputs: Record<string, unknown>,
+): Array<BrowserFieldTarget & { value?: string }> {
+  const rawTarget = inputs["target"];
+  if (typeof rawTarget !== "string") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawTarget);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const name = (parsed as { name?: unknown }).name;
+  if (typeof name !== "string" || name.length === 0) return [];
+  const nth = (parsed as { nth?: unknown }).nth;
+  const value = inputs["value"];
+  return [
+    {
+      name,
+      ...(typeof nth === "number" ? { nth } : {}),
+      ...(typeof value === "string" ? { value } : {}),
+    },
+  ];
 }
 
 function normaliseFields(raw: unknown): BrowserFieldTarget[] {

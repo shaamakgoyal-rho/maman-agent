@@ -21,6 +21,34 @@ import {
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DemoModelProvider } from "@maman/model-provider";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
+import { browserAdapters } from "@maman/agent-runtime";
+import { tauriAgentBrowserHost } from "./agentBrowser.js";
+import { browserActuationOrigins, mintAuthorization } from "./browserRun.js";
+import { useSettings } from "../state/settings.js";
+
+/**
+ * Everything this device could execute, for the COMPILE-TIME capability check
+ * only. Execution never uses this union: the agent service registers against a
+ * real-only registry, and the demo arcs keep their own in runs.ts.
+ */
+function compileCheckRegistry() {
+  const registry = demoAdapterRegistry(new DemoSalesforceWorld());
+  const origins = browserActuationOrigins(
+    useSettings.getState().settings.browser_actuation_origins ?? [],
+  );
+  if (origins.length === 0) return registry;
+  for (const [id, adapter] of browserAdapters({
+    host: tauriAgentBrowserHost(origins),
+    allowedOrigins: origins,
+    userPresent: () => true, // presence is a RUN gate, not a compile gate
+    allowSupervisedBrowserWrites: true,
+    newRequestId: () => uuidv7(),
+    mintAuthorization,
+  })) {
+    registry.set(id, adapter);
+  }
+  return registry;
+}
 
 /**
  * Local agent store (demo/local mode; server persistence joins at M7).
@@ -74,6 +102,9 @@ const agentRecordSchema = z
     // explicit grant changes anything. Never auto-promoted.
     approved_runs: z.number().int().nonnegative().default(0),
     draft_autonomy: z.boolean().default(false),
+    /** Runtime history, persisted so a restart can say when it last acted. */
+    last_triggered_at: z.string().nullable().default(null),
+    last_run_at: z.string().nullable().default(null),
     // The REAL detected candidate this agent was compiled from, so reruns
     // recompile from the same evidence. Older records lack it and fall back
     // to a minimal stand-in (Agents.tsx candidateFor).
@@ -231,6 +262,17 @@ type AgentsStore = {
   ) => Promise<{ ok: true; server_agent_id: string } | { ok: false; message: string }>;
   /** Records one approved, completed supervised run (the autonomy meter). */
   recordApprovedRun: (agentId: string) => Promise<void>;
+  /** Installs the derived trigger and moves the agent out of draft. */
+  finalizeCreation: (
+    agentId: string,
+    trigger: AgentSpec["trigger"],
+    state: AgentRecord["state"],
+  ) => Promise<AgentSpec | null>;
+  /** Persists runtime history (last triggered / last ran). */
+  recordRuntimeActivity: (
+    agentId: string,
+    activity: { last_triggered_at?: string; last_run_at?: string },
+  ) => Promise<void>;
   /**
    * WORKER-granted draft autonomy. Only enabled once approved_runs reaches the
    * settings threshold; a match record never auto-promotes anything.
@@ -312,9 +354,15 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       policy_version_id: uuidv7(),
       now: () => new Date(),
       model: new DemoModelProvider(),
-      // Compile for the runtime that will actually run it, so a helper is never
-      // created from steps this device cannot execute.
-      runtime: runtimeFromRegistry("local-demo", demoAdapterRegistry(new DemoSalesforceWorld())),
+      // Compile against the UNION of what this device could execute — the real
+      // browser adapters (from the settings allowlist) plus the demo world.
+      // This gate answers "can anything here run these steps?"; WHICH
+      // environment actually runs them is decided at registration, where the
+      // agent service holds a REAL-only registry and a demo-only agent is
+      // labelled as such rather than silently blended. Compiling against demo
+      // alone (the previous behaviour) refused every live browser workflow the
+      // moment it reached this check.
+      runtime: runtimeFromRegistry("local-any", compileCheckRegistry()),
     });
 
     // `needs_runtime` is a DIFFERENT answer from `blocked`: the workflow is
@@ -371,6 +419,8 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       desired_outcome: desiredOutcome,
       approved_runs: 0,
       draft_autonomy: false,
+      last_triggered_at: null,
+      last_run_at: null,
     };
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
     await persist(agents);
@@ -427,6 +477,44 @@ export const useAgents = create<AgentsStore>((set, get) => ({
 
   setState: async (agentId, state) => {
     const agents = get().agents.map((a) => (a.agent_id === agentId ? { ...a, state } : a));
+    await persist(agents);
+    set({ agents });
+  },
+
+  /**
+   * Completes creation: the derived trigger lands on the spec, the state leaves
+   * `draft`, and the whole thing is re-validated before persisting — a trigger
+   * is part of the spec the validator vouched for, so it does not get to skip
+   * the validator on its way in.
+   */
+  finalizeCreation: async (agentId, trigger, state) => {
+    const agents = [...get().agents];
+    const agent = agents.find((a) => a.agent_id === agentId);
+    if (!agent) return null;
+    const latest = agent.versions[agent.versions.length - 1]!;
+    const spec: AgentSpec = { ...latest.spec, trigger, state };
+    const validation = validateAgentSpec(spec);
+    if (!validation.valid) return null;
+    latest.spec = validation.spec;
+    agent.state = state;
+    await persist(agents);
+    set({ agents });
+    return validation.spec;
+  },
+
+  /** Persists when the runtime last triggered or ran this agent. */
+  recordRuntimeActivity: async (agentId, activity) => {
+    const agents = get().agents.map((a) =>
+      a.agent_id === agentId
+        ? {
+            ...a,
+            ...(activity.last_triggered_at !== undefined
+              ? { last_triggered_at: activity.last_triggered_at }
+              : {}),
+            ...(activity.last_run_at !== undefined ? { last_run_at: activity.last_run_at } : {}),
+          }
+        : a,
+    );
     await persist(agents);
     set({ agents });
   },

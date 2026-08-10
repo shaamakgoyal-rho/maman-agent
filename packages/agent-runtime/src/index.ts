@@ -80,6 +80,7 @@ export type { MissingConfiguration } from "./compiler.js";
 export * from "./browser-adapters.js";
 export * from "./compile-learned.js";
 export * from "./resolve-on-surface.js";
+export * from "./local-runtime.js";
 export {
   validateAgentInputs,
   describeMissingInputs,

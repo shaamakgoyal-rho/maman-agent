@@ -312,6 +312,45 @@ this is defence in depth rather than a live leak. The guard is on the field
 rather than on the convention, because a future source that puts a captured
 value in a segment would otherwise send it verbatim.
 
+## Create Agent is the whole verb (local agent runtime)
+
+Create Agent used to be: compile → persist `state:"draft"` → show success →
+stop. Nothing validated the spec against a runtime, nothing registered it,
+nothing installed a trigger, and "proactive" meant the user remembering to open
+Agents and press Run. Two more fake arrows fell out of tracing it:
+`compileLearnedWorkflow` flattened every configured trigger to `manual`
+(`trigger.type === "manual" ? {type:"manual"} : {type:"manual"}`), and it bound
+step inputs as `target`/`value` while the browser adapters only read `fields` —
+so a compiled LEARNED agent's first step threw "Teach the workflow which fields
+matter first" to a user who had just done exactly that.
+
+| Component           | Status   | Evidence                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LocalAgentRuntime` | complete | `packages/agent-runtime/src/local-runtime.ts`. Registration IS validation (spec + capabilities, gap named); context triggers with per-agent cooldown dedupe; `runShadow` structurally never dispatches a write; rehydration re-validates so a revoked capability is not resurrected. 11 tests.                                                                                                  |
+| `context` trigger   | complete | New `agentTriggerSchema` variant matching the canonical-token vocabulary (category/object/host) — never content. `WorkflowContext` carries the observed DOMAIN, not a synthesized origin: the observer never saw a scheme, and the no-HTTP-in-webview guard caught the synthesized version.                                                                                                     |
+| context emission    | complete | `ingestEvents` emits per stored event (JS paths, web preview included); `emit_workflow_context` in Rust emits for live observer/relay events, which were previously invisible to JS entirely.                                                                                                                                                                                                   |
+| agent service       | complete | `apps/desktop/src/lib/agentService.ts`, booted from `main.tsx` — module scope, survives navigation. REAL registry structurally: the module does not import the demo world, so no trigger can reach fixture data; a spec wanting a demo capability fails registration by name.                                                                                                                   |
+| Create Agent path   | complete | compile → validate → persist → register → trigger installed → shadow → `state:"shadow"`, with per-phase progress lines and specific failures. A registration failure returns the record to `draft` — the UI cannot show a lifecycle that never happened. Compile-time capability check now runs against the union of real+demo (it used to be demo-ONLY, refusing every live browser workflow). |
+| autonomy consumed   | complete | `draft_autonomy` (worker-granted) → a firing auto-runs SHADOW (never a write); without it a firing stages a suggestion. The setting the product already had, now driving behaviour.                                                                                                                                                                                                             |
+| no cloud keys       | complete | Suite deletes OPENAI/ANTHROPIC/GEMINI/GROQ vars, then compiles (deterministic `compileLearnedWorkflow`, no model field), registers, and shadow-runs a browser agent whose diff shows the real page value vs the configured one.                                                                                                                                                                 |
+| restart             | complete | New runtime instance from the persisted file re-registers, and the next matching context fires. Tested at both layers (runtime + service).                                                                                                                                                                                                                                                      |
+
+18 new tests (`local-runtime.test.ts`, `create-agent-flow.test.ts`).
+
+Honest gaps, mandate items still open:
+
+- The trigger service lives in the panel webview (module scope), so it runs for
+  the app's lifetime but NOT if every window is closed. A Rust-side daemon
+  evaluating triggers without a webview is the remaining step for "durable".
+- `schedule` triggers are carried but nothing ticks them locally yet.
+- The end-to-end browser WRITE (propose → approve → execute → readback) exists
+  in the runs store; the trigger-staged path stops at shadow + suggestion and
+  hands off to the existing approval flow rather than driving it.
+- The JS `appCategoryOf` mirror is cruder than Rust's `categorize_app`; live and
+  simulated events could categorize differently at the margins.
+- The demo reconciliation card still creates a draft-only helper; it now fails
+  REAL registration honestly (salesforce.* unavailable) rather than blending in.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

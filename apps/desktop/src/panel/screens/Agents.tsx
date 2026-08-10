@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { describeAgentSpec } from "@maman/agent-runtime";
 import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
+import { agentRuntime, runAgentShadow } from "../../lib/agentService.js";
 import { useRuns, type RunQuestion } from "../../lib/runs.js";
 import { browserActuationOrigins } from "../../lib/browserRun.js";
 import { useServerRuns } from "../../lib/serverRuns.js";
@@ -124,6 +125,43 @@ function AnswerForm({
   );
 }
 
+/**
+ * "Test agent" — the SAME runtime, in shadow. Not a separate fake test path:
+ * this invokes the registered agent through the service, so what the user sees
+ * here is exactly what a trigger firing would produce, minus the trigger.
+ */
+function TestAgentControl({ agentId }: { agentId: string }) {
+  const [result, setResult] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (!agentRuntime().get(agentId)) return null;
+  return (
+    <div className="mt-1">
+      <Button
+        variant="secondary"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            const outcome = await runAgentShadow(agentId);
+            setResult(
+              outcome.status === "shadow_complete"
+                ? `Shadow OK: ${outcome.steps_run} step(s), ${outcome.diff?.summary.change_count ?? 0} proposed change(s), nothing written.`
+                : outcome.status === "needs_input"
+                  ? `Needs you first: ${outcome.detail}`
+                  : `Could not run: ${outcome.detail}`,
+            );
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Testing…" : "Test agent (shadow)"}
+      </Button>
+      {result && <p className="mt-1 text-[11px] text-muted">{result}</p>}
+    </div>
+  );
+}
+
 /** Agents: state, plain-language plan, immutable versions, budgets, controls. */
 
 const STATE_TONE: Record<
@@ -221,9 +259,20 @@ export function Agents() {
             </div>
             <Muted>Why: {latest.spec.description}</Muted>
             <p className="mt-1 text-xs text-muted tabular-nums">
-              v{latest.version_number} · {latest.spec.steps.length} steps · {described.limits} ·
-              last run — · verified time 0 min · cost $0.00
+              v{latest.version_number} · {latest.spec.steps.length} steps · {described.limits}
             </p>
+            {/* The trigger and runtime history, from the persisted record —
+                "last run —" used to be a literal dash regardless of history. */}
+            <p className="text-xs text-muted tabular-nums">
+              trigger:{" "}
+              {latest.spec.trigger.type === "context"
+                ? `when you work in ${latest.spec.trigger.app_category}${latest.spec.trigger.object_type ? ` on ${latest.spec.trigger.object_type} records` : ""}`
+                : latest.spec.trigger.type}{" "}
+              · last triggered{" "}
+              {agent.last_triggered_at ? new Date(agent.last_triggered_at).toLocaleString() : "—"} ·
+              last run {agent.last_run_at ? new Date(agent.last_run_at).toLocaleString() : "—"}
+            </p>
+            <TestAgentControl agentId={agent.agent_id} />
 
             {isOpen && (
               <div className="mt-2 space-y-2">

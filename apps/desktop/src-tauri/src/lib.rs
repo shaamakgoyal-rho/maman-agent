@@ -2405,6 +2405,48 @@ fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
 /// observer's allowlist/private/paused config is pushed once at spawn and can
 /// go stale, so this guarantees a freshly paused / newly private / hard-denied
 /// context is dropped even before the sidecar restarts (spec §10 central gate).
+/// Emits the redacted context of one stored event on the app-event channel the
+/// panel's agent service listens on. Canonical-token fields only, never content
+/// — field-for-field what `contextOf` emits for the JS ingest paths, so live
+/// and simulated events wake triggers identically.
+fn emit_workflow_context<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
+    let s = |path: &[&str]| -> Option<String> {
+        let mut v = event;
+        for key in path {
+            v = v.get(key)?;
+        }
+        v.as_str().map(|x| x.to_string())
+    };
+    let (Some(source), Some(event_type), Some(occurred_at), Some(display)) = (
+        s(&["source"]),
+        s(&["event_type"]),
+        s(&["occurred_at"]),
+        s(&["app", "display_name"]),
+    ) else {
+        return;
+    };
+    let domain = s(&["app", "domain"]);
+    let context = serde_json::json!({
+        "source": source,
+        "app_category": store::categorize_app(&display, domain.as_deref()),
+        "event_type": event_type,
+        "target_role": s(&["target", "role"]).unwrap_or_else(|| "-".into()),
+        "semantic_type": s(&["target", "semantic_type"]).unwrap_or_else(|| "-".into()),
+        "object_type": s(&["context", "object_type"]).unwrap_or_else(|| "-".into()),
+        "occurred_at": occurred_at,
+    });
+    let mut context = context;
+    if let Some(d) = domain {
+        // The bare host, exactly as observed — matching the JS emitter. The
+        // scheme is the trigger's business, not the observer's.
+        context["domain"] = serde_json::json!(d);
+    }
+    let _ = app.emit(
+        "maman-app-events",
+        serde_json::json!({ "type": "workflow_context", "context": context }),
+    );
+}
+
 async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
     let settings = load_gate_settings(app);
     let mut deltas = IngestResult {
@@ -2424,7 +2466,16 @@ async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_jso
             };
             if let Some(store) = guard.as_mut() {
                 match store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await {
-                    Ok(_) => deltas.stored += 1,
+                    Ok(_) => {
+                        deltas.stored += 1;
+                        // Trigger evaluation hears about STORED live events. The
+                        // payload is the canonical-token vocabulary only — the
+                        // same redacted fields patterns are built from — so this
+                        // channel cannot carry content. Without it, live relay
+                        // work was invisible to JS and agents could only be
+                        // proactive about simulated events.
+                        emit_workflow_context(app, event);
+                    }
                     Err(store::StoreError::ForbiddenField(_)) => deltas.rejected_forbidden += 1,
                     Err(_) => {}
                 }

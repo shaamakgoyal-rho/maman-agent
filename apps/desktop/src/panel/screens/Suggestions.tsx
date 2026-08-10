@@ -8,9 +8,9 @@ import {
   type AutomationStep,
 } from "@maman/pattern-engine";
 import { emitAppEvent } from "../../lib/bridge.js";
-import { useAgents } from "../../lib/agents.js";
 import { useLearnedWorkflows } from "../../lib/learnedWorkflows.js";
 import { useNavigation } from "../../state/navigation.js";
+import { createAgentAndActivate, useAgentService } from "../../lib/agentService.js";
 import {
   useRecommendations,
   type FormingItem,
@@ -20,6 +20,27 @@ import type { ProactiveItem } from "../../lib/proactive.js";
 import type { SnoozeOption } from "../../lib/suggestion-policy.js";
 import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
+
+/**
+ * The lifecycle, shown while Create Agent works. Each line is a REAL phase the
+ * service passed through — "Registering with the local runtime…" prints when
+ * registration actually starts, not on a timer. A failure line carries the
+ * specific gap (the capability, the permission, the missing field), because
+ * "something went wrong" is a sentence the user can do nothing with.
+ */
+function CreationProgressView() {
+  const creation = useAgentService((s) => s.creation);
+  if (creation.length === 0) return null;
+  return (
+    <ol className="mt-2 space-y-0.5 text-[11px] list-none">
+      {creation.map((step, i) => (
+        <li key={i} className={step.phase === "failed" ? "text-danger" : "text-muted"}>
+          {step.detail}
+        </li>
+      ))}
+    </ol>
+  );
+}
 
 /**
  * Journey C: recommendation cards with full evidence, ordered by opportunity
@@ -682,7 +703,11 @@ function SuggestionCard({
                 return;
               }
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
-              const created = await useAgents.getState().createDraft(
+              // THE WHOLE VERB, not the first third of it. This used to stop at
+              // a persisted draft; it now compiles, validates against the local
+              // runtime, registers, installs the trigger, and shadow-runs — and
+              // only claims success once registration succeeded.
+              const created = await createAgentAndActivate(
                 item.candidate,
                 rec.generalized_intent,
                 rec.summary,
@@ -693,11 +718,11 @@ function SuggestionCard({
                 await act(item.signature, { type: "accepted" });
                 return;
               }
-              // NEEDS TEACHING, NOT A DEAD END. When the compiler refuses
-              // because observation never captured the specifics — which field,
-              // which value — the useful next step is to ask, not to print an
-              // error the user can do nothing about. Anything else (a policy
-              // block, an unavailable runtime) is a real refusal and is shown.
+              // NEEDS TEACHING, NOT A DEAD END. When the refusal is that
+              // observation never captured the specifics — which field, which
+              // value — the useful next step is to ask, not to print an error
+              // the user can do nothing about. Anything else (a policy block,
+              // an unavailable runtime) is a real refusal and is shown verbatim.
               if (created.missing_configuration && created.missing_configuration.length > 0) {
                 const workflow = await useLearnedWorkflows
                   .getState()
@@ -725,10 +750,11 @@ function SuggestionCard({
         </div>
       )}
       {draftError && <p className="mt-2 text-xs text-danger">{draftError}</p>}
+      <CreationProgressView />
       {item.entry.status === "accepted" && (
         <p className="mt-3 text-xs text-success">
-          Draft agent created — inspect its full plan in the Agents tab. It drafts and stages only;
-          every step needs your approval until its record says otherwise.
+          Agent created and registered — its trigger is installed and a shadow test ran. Inspect the
+          result in the Agents tab; every write still needs your approval.
         </p>
       )}
     </Card>

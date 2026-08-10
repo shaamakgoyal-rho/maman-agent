@@ -18,6 +18,8 @@ export async function invokeCommand<T>(cmd: string, args?: Record<string, unknow
 
 import type { StatusBeat } from "./status.js";
 
+import type { WorkflowContext } from "@maman/contracts";
+
 export type AppEvent =
   | { type: "observation_changed" }
   | { type: "settings_changed" }
@@ -25,7 +27,15 @@ export type AppEvent =
   | { type: "pet_state_report"; state: string }
   | { type: "simulate_pet_event"; event: string }
   /** A pipeline moment for the status bar (see lib/status.ts). */
-  | { type: "status_beat"; beat: StatusBeat };
+  | { type: "status_beat"; beat: StatusBeat }
+  /**
+   * One REDACTED observation moment, for trigger evaluation. Exactly the
+   * canonical-token fields the pattern engine consumes — category, event type,
+   * role, semantic, object — never content. Emitted by `ingestEvents` for the
+   * JS paths and by the Rust observer ingest for live events, so the agent
+   * trigger service hears about work regardless of which screen is mounted.
+   */
+  | { type: "workflow_context"; context: WorkflowContext };
 
 type Listener = (event: AppEvent) => void;
 

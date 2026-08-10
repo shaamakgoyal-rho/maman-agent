@@ -60,6 +60,11 @@ export interface CompileLearnedRequest {
   policy_version_id: string;
   now: () => Date;
   runtime?: CapabilityRuntime;
+  /**
+   * The observed context a `workflow_start` trigger should match on, derived by
+   * the caller from the source pattern's canonical tokens. Category-level only.
+   */
+  trigger_context?: { app_category: string; object_type?: string; origin?: string };
 }
 
 /**
@@ -122,6 +127,36 @@ function toAgentStep(step: LearnedStep): AgentStep {
       backoff_seconds: capability?.retry_class === "safe" ? [1, 5, 30] : [],
     },
   };
+}
+
+/**
+ * The trigger the user configured, carried into the spec instead of flattened.
+ *
+ * This used to read `trigger.type === "manual" ? {type:"manual"} : {type:"manual"}`
+ * — every configured trigger became manual, which is the "trigger field that
+ * nothing consumes" anti-pattern verbatim: the Teach flow let the user pick
+ * when the agent should run, and compilation threw the answer away.
+ *
+ * `workflow_start` needs the observed context (which app category, which
+ * origin) to become a matchable trigger; the workflow record does not carry
+ * that, so the caller derives it from the source pattern and passes it in.
+ * Without it the honest answer is manual — stated, not silently substituted.
+ */
+function toAgentTrigger(req: CompileLearnedRequest): AgentSpec["trigger"] {
+  const trigger = req.workflow.trigger;
+  if (trigger.type === "schedule") {
+    return { type: "schedule", cron: trigger.cron, timezone: trigger.timezone };
+  }
+  if (trigger.type === "workflow_start" && req.trigger_context) {
+    return {
+      type: "context",
+      app_category: req.trigger_context.app_category,
+      ...(req.trigger_context.object_type ? { object_type: req.trigger_context.object_type } : {}),
+      ...(req.trigger_context.origin ? { origin: req.trigger_context.origin } : {}),
+      cooldown_seconds: 300,
+    };
+  }
+  return { type: "manual" };
 }
 
 export function compileLearnedWorkflow(req: CompileLearnedRequest): CompileLearnedResult {
@@ -195,7 +230,7 @@ export function compileLearnedWorkflow(req: CompileLearnedRequest): CompileLearn
     generalized_intent: `learned:${req.workflow.workflow_id}`,
     source_pattern_id: req.workflow.source_pattern_id,
     state: "draft",
-    trigger: req.workflow.trigger.type === "manual" ? { type: "manual" } : { type: "manual" },
+    trigger: toAgentTrigger(req),
     inputs,
     steps: [...req.workflow.steps].sort((a, b) => a.order - b.order).map(toAgentStep),
     assertions: [],
