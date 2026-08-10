@@ -239,6 +239,44 @@ Two gaps left open, both needing contract changes rather than code:
   worker has no baseline at all and reports 0 with "estimated" provenance. The
   device has the numbers; the run input is the missing hop.
 
+## A failed load never overwrites the file (Phase 8)
+
+The rule is "do not hide operational failures in empty catch blocks". There were
+no literally-empty catches; there was something worse. `useAgents.hydrate` read:
+
+    try {
+      const raw = await loadRaw();
+      if (raw) { ...if (parsed.success) { set(...); return; } }
+    } catch { }                          // "defaults"
+    set({ agents: [], hydrated: true });
+
+Three different failures — a read that threw, bytes that were not JSON, and a
+file whose SHAPE no longer matched the schema — all arrived at the same line: an
+empty agent list marked `hydrated`, indistinguishable from a first run. The
+third case does not even involve the catch; it falls past the `if`.
+
+Six mutations then wrote the in-memory array back through `saveRaw`. So the
+agents were not merely hidden: **the next action destroyed them on disk.** The
+realistic trigger is a schema change that is not backward-compatible, which
+wipes every existing user's agents on upgrade. This session added `intent_plan`
+with `.default([])`, which kept old files loadable — but nothing enforced that
+care and nothing would have reported its absence.
+
+| Component         | Status   | Evidence                                                                                                                                                                               |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parseAgentsFile` | complete | Returns `absent` / `unreadable` / `loaded`. Per-record salvage mirrors `parseWorkflowsFile`: one drifted agent must not cost the user the rest, and the count is returned.             |
+| write refusal     | complete | All six `saveRaw` call sites now go through one `persist()`, which throws `AgentsNotLoadedError` while `loadFailure` is set. Asserted: the stored bytes are byte-identical afterwards. |
+| read vs parse     | complete | A read that throws is treated as firmly as bad bytes — the file may be intact and merely unreachable, and that is exactly when overwriting is worst.                                   |
+| first run         | complete | `absent` does NOT set `loadFailure`, or the refusal would lock the app for every new user.                                                                                             |
+| the user is told  | complete | The Agents screen shows the failure and says the file is untouched, instead of "No agents yet" — which is what made the loss invisible. A partial-salvage count is shown too.          |
+
+9 tests in `agents-load-failure.test.ts`, driving the real Tauri persistence path
+via a bridge mock rather than the web-preview localStorage fallback.
+
+Not done: `learnedWorkflows.ts` has the same shape — `parseWorkflowsFile`
+returns `{workflows: [], discarded: 0}` for unparseable JSON, conflating it with
+an empty file, and its saves are unguarded. Same fix, not yet applied.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

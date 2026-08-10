@@ -141,7 +141,8 @@ const STATE_TONE: Record<
 };
 
 export function Agents() {
-  const { agents, hydrated, hydrate, editDescription, setState } = useAgents();
+  const { agents, hydrated, hydrate, editDescription, setState, loadFailure, discarded } =
+    useAgents();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
@@ -151,6 +152,25 @@ export function Agents() {
   }, [hydrate]);
 
   if (!hydrated) return <Muted>Loading agents…</Muted>;
+
+  // A FAILED LOAD IS NOT AN EMPTY ACCOUNT. Showing "No agents yet" here is what
+  // made the loss invisible: the user saw a fresh-looking app, created
+  // something, and the save replaced their real file. The store now refuses to
+  // write while this is set, and this says why rather than leaving them to
+  // discover it.
+  if (loadFailure !== null) {
+    return (
+      <div className="card border-danger/40 bg-danger/5 p-3">
+        <p className="text-sm font-medium text-ink">I could not read your saved agents</p>
+        <p className="mt-1 text-xs text-muted">{loadFailure}</p>
+        <p className="mt-2 text-xs text-muted">
+          Your file has been left exactly as it is, and I will not save over it. Nothing here can be
+          changed until it can be read — that is deliberate, because writing now would replace your
+          agents with an empty list.
+        </p>
+      </div>
+    );
+  }
 
   const visible = agents.filter((a) => a.state !== "archived");
 
@@ -165,6 +185,15 @@ export function Agents() {
 
   return (
     <div className="space-y-3">
+      {/* Records the file held that this build can no longer read. Salvage kept
+          the rest, and the count is shown rather than swallowed — "you have 3
+          agents" and "you have 3 and I dropped 2" are different statements. */}
+      {discarded > 0 && (
+        <p className="rounded-lg border border-warning/40 bg-warning/5 p-2 text-[11px] text-ink">
+          {discarded} saved {discarded === 1 ? "agent" : "agents"} could not be read by this version
+          and {discarded === 1 ? "is" : "are"} not shown. The others loaded normally.
+        </p>
+      )}
       {visible.map((agent) => {
         const latest = agent.versions[agent.versions.length - 1]!;
         const described = describeAgentSpec(latest.spec);

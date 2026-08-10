@@ -103,6 +103,81 @@ async function saveRaw(json: string): Promise<void> {
   localStorage.setItem("maman-agents", json);
 }
 
+/**
+ * What reading the agents file actually produced.
+ *
+ * `absent` and `unreadable` used to be the same thing. Hydration was:
+ *
+ *     try {
+ *       const raw = await loadRaw();
+ *       if (raw) { ...if (parsed.success) { set(...); return; } }
+ *     } catch { }             // "defaults"
+ *     set({ agents: [], hydrated: true });
+ *
+ * A read that threw, a file that was not JSON, and a file whose SHAPE no longer
+ * matched the schema all arrived at the same line: an empty agent list,
+ * `hydrated: true`, indistinguishable from a first run. The six mutations below
+ * then write the in-memory array back with `saveRaw`, so the user's agents were
+ * not merely hidden — the next action destroyed them on disk.
+ *
+ * The third case is the realistic one. Any schema change that is not
+ * backward-compatible wipes every existing user's agents on upgrade. This
+ * session added `intent_plan` to `versionSchema` with `.default([])`, which
+ * kept old files loadable — but nothing enforced that care, and nothing would
+ * have reported it if the care had been missing.
+ */
+/** Thrown instead of writing over a file whose contents we never understood. */
+export class AgentsNotLoadedError extends Error {
+  constructor(detail: string) {
+    super(
+      `I could not read your saved agents (${detail}), so I will not save over that file — doing so would replace it with an empty list. The file is untouched.`,
+    );
+    this.name = "AgentsNotLoadedError";
+  }
+}
+
+export type AgentsLoad =
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "loaded"; agents: AgentRecord[]; discarded: number };
+
+/**
+ * Parses the file, salvaging what it can.
+ *
+ * Per-record salvage mirrors `parseWorkflowsFile`: one agent whose shape has
+ * drifted must not cost the user the rest. The count is returned rather than
+ * swallowed, because "you have 3 agents" and "you have 3 agents and I dropped
+ * 2" are different statements.
+ */
+export function parseAgentsFile(raw: string | null): AgentsLoad {
+  if (raw === null || raw.trim() === "") return { kind: "absent" };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    // NOT `absent`. There are bytes here that we could not understand, and
+    // treating them as "no agents yet" is what licensed overwriting them.
+    return { kind: "unreadable", detail: e instanceof Error ? e.message : "not valid JSON" };
+  }
+
+  const whole = agentsFileSchema.safeParse(parsed);
+  if (whole.success) return { kind: "loaded", agents: whole.data.agents, discarded: 0 };
+
+  const list = (parsed as { agents?: unknown }).agents;
+  if (!Array.isArray(list)) {
+    return { kind: "unreadable", detail: "the file has no agents list" };
+  }
+  const agents: AgentRecord[] = [];
+  let discarded = 0;
+  for (const item of list) {
+    const one = agentRecordSchema.safeParse(item);
+    if (one.success) agents.push(one.data);
+    else discarded += 1;
+  }
+  return { kind: "loaded", agents, discarded };
+}
+
 export type CreateDraftResult =
   | { ok: true; agent: AgentRecord; policy_summary: string }
   | {
@@ -124,6 +199,14 @@ export type CreateDraftResult =
 type AgentsStore = {
   agents: AgentRecord[];
   hydrated: boolean;
+  /**
+   * Set when the file existed but could not be understood. While this is set
+   * the store REFUSES to write, because saving the (empty) in-memory list would
+   * replace whatever is on disk with nothing.
+   */
+  loadFailure: string | null;
+  /** Agents whose shape no longer parses. Reported, never silently dropped. */
+  discarded: number;
   hydrate: () => Promise<void>;
   createDraft: (
     candidate: PatternCandidate,
@@ -155,24 +238,56 @@ type AgentsStore = {
   grantDraftAutonomy: (agentId: string) => Promise<void>;
 };
 
+/**
+ * The single write path, so the refusal cannot be forgotten at one of six
+ * call sites. Each of those previously inlined
+ * `saveRaw(JSON.stringify(agentsFileSchema.parse(...)))`, and any one of them
+ * reached after a failed load would have overwritten the file.
+ */
+async function persist(agents: AgentRecord[]): Promise<void> {
+  const failure = useAgents.getState().loadFailure;
+  if (failure !== null) throw new AgentsNotLoadedError(failure);
+  await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+}
+
 export const useAgents = create<AgentsStore>((set, get) => ({
   agents: [],
   hydrated: false,
+  loadFailure: null,
+  discarded: 0,
 
   hydrate: async () => {
+    let raw: string | null;
     try {
-      const raw = await loadRaw();
-      if (raw) {
-        const parsed = agentsFileSchema.safeParse(JSON.parse(raw));
-        if (parsed.success) {
-          set({ agents: parsed.data.agents, hydrated: true });
-          return;
-        }
-      }
-    } catch {
-      // defaults
+      raw = await loadRaw();
+    } catch (e) {
+      // The read itself failed — the file may be perfectly intact and simply
+      // unreachable. Reporting zero agents here is what made the next save
+      // destroy them.
+      set({
+        agents: [],
+        hydrated: true,
+        loadFailure: e instanceof Error ? e.message : "could not read the agents file",
+        discarded: 0,
+      });
+      return;
     }
-    set({ agents: [], hydrated: true });
+
+    const load = parseAgentsFile(raw);
+    if (load.kind === "unreadable") {
+      set({ agents: [], hydrated: true, loadFailure: load.detail, discarded: 0 });
+      return;
+    }
+    if (load.kind === "absent") {
+      set({ agents: [], hydrated: true, loadFailure: null, discarded: 0 });
+      return;
+    }
+    set({
+      agents: load.agents,
+      hydrated: true,
+      loadFailure: null,
+      discarded: load.discarded,
+    });
   },
 
   createDraft: async (candidate, generalizedIntent, desiredOutcome, displayName) => {
@@ -258,7 +373,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       draft_autonomy: false,
     };
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
     await emitAppEvent({
       type: "status_beat",
@@ -305,14 +420,14 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     ];
     // Material edit returns the agent to shadow.
     agent.state = stateAfterMaterialEdit(agent.state);
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
     return true;
   },
 
   setState: async (agentId, state) => {
     const agents = get().agents.map((a) => (a.agent_id === agentId ? { ...a, state } : a));
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
   },
 
@@ -320,7 +435,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = get().agents.map((a) =>
       a.agent_id === agentId ? { ...a, approved_runs: a.approved_runs + 1 } : a,
     );
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
   },
 
@@ -328,7 +443,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = get().agents.map((a) =>
       a.agent_id === agentId ? { ...a, draft_autonomy: true } : a,
     );
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
   },
 
@@ -369,7 +484,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       const agents = get().agents.map((a) =>
         a.agent_id === agentId ? { ...a, server_agent_id: created.agent_id } : a,
       );
-      await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+      await persist(agents);
       set({ agents });
       return { ok: true, server_agent_id: created.agent_id };
     } catch (e) {
