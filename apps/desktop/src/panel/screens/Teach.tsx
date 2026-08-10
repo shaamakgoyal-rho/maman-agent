@@ -9,7 +9,7 @@ import { visionSessionPrice } from "@maman/model-provider";
 import { APP_PRESETS, useSettings } from "../../state/settings.js";
 import { useTeach } from "../../state/teach.js";
 import { onTeachObservation, onTeachStatus, secondsRemaining } from "../../lib/teachMode.js";
-import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
+import { Button, Card, Muted, SectionTitle, StatusPill } from "../ui.js";
 
 /**
  * Teach Mode: the user demonstrates a workflow, and Maman says what it thinks it
@@ -59,8 +59,8 @@ const DURATIONS = [
   { label: "15 min", seconds: TEACH_MODE_MAX_SECONDS },
 ];
 
-export function Teach() {
-  const { settings } = useSettings();
+export function Teach({ onDone }: { onDone: () => void }) {
+  const { settings, update } = useSettings();
   const teach = useTeach();
   const [scope, setScope] = useState<string[]>([]);
   const [duration, setDuration] = useState(300);
@@ -102,12 +102,45 @@ export function Teach() {
   const allowed = APP_PRESETS.filter((a) => settings.allowlist_bundles.includes(a.bundleId));
   const others = APP_PRESETS.filter((a) => !settings.allowlist_bundles.includes(a.bundleId));
 
+  // THE CONSENT LIVES HERE, not behind a trip to Privacy.
+  //
+  // This used to be a dead end that said "Privacy → Teach Mode explains…",
+  // which asked the user to leave, find a toggle, and come back — and most of
+  // them arrived here having just been told Maman could not verify their
+  // workflow, so the friction landed at exactly the wrong moment.
+  //
+  // What does NOT change: it is still off until they turn it on. Screen capture
+  // is the one thing Maman does that leaves the device, `teach_session_start`
+  // refuses without this setting, and a Rust test pins the default to OFF so a
+  // missing settings file can never be the reason capture becomes possible.
+  // Moving a decision closer to where it is made is not the same as making it
+  // for them.
   if (!settings.teach_mode_enabled) {
     return (
-      <EmptyState
-        title="Teach Mode is off"
-        body="It is the one part of Maman that sends pictures of your screen to Anthropic, so it stays off until you turn it on. Privacy → Teach Mode explains exactly what it captures and what it refuses."
-      />
+      <div className="card border-warning/40 bg-warning/5 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <SectionTitle>Showing Maman means letting it see your screen</SectionTitle>
+          <StatusPill tone="muted">off</StatusPill>
+        </div>
+        <Muted>
+          This is the one part of Maman that sends pictures of your screen to Anthropic. Frames go
+          only while a session you started is running, only from the apps you pick, and only after
+          credential-shaped areas are masked on this device. They are never stored, never synced,
+          and never logged — only what Maman worked out from them is kept, and you review that
+          before anything is learned.
+        </Muted>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button onClick={() => void update({ teach_mode_enabled: true })}>
+            Turn it on for this
+          </Button>
+          <Button variant="secondary" onClick={onDone}>
+            Not now
+          </Button>
+        </div>
+        <Muted>
+          Privacy → Teach Mode has the full detail, including everything a frame is refused for.
+        </Muted>
+      </div>
     );
   }
 

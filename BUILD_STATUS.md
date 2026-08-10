@@ -65,6 +65,328 @@ Evidence must be exact (commands run, test counts). No marketing language.
 | desktop capability panel           | complete | "Maman can currently use" card in plain language (observation, Browser Relay pairing status via boolean-only command, connectors honest about no API execution claims)                                                                                                                                                                                |
 | remaining mesh work                | complete | All landed: broker routes wire connector-auth to the vault (M8); worker executes real + demo adapters with run-time receipts (M7/M11/M14); Browser Relay popup renamed (M8); the reconciliation recipe/bindings drive the run engine (M6/M7); shadow-run against demo adapters (M7/M12); the 12-step end-to-end demo is the Playwright journey (M17). |
 
+## Intent layer (`packages/intent-layer`)
+
+Replaces the bare `generalized_intent` string with a structure that says what an
+automation NEEDS: typed slots, which the agent can discover by reading the live
+surface, and which are genuinely unknowable without being told. This is what
+makes a description concrete, and it is the alternative to teaching every
+detail — the agent finds the field itself and only asks for the value.
+
+| Component            | Status   | Evidence                                                                                                                                                                                                                                                                                                                                           |
+| -------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resolveIntent`      | complete | 28 tests. Supplied answers outrank discovery; the record locator comes from the allowlisted origin; ambiguity fails closed (two "Phone" textboxes resolve to nothing, not the first); `not_looked_yet` is a distinct verdict from `no_matching_control`; observed semantics narrow candidates and never conjure a control that is not on the page. |
+| descriptions         | complete | `describeIntentTitle` / `describeIntentPlan` / `describeIntentPlanSteps` build every noun from a resolved slot or from the vocabulary discovery will search for. An unresolved intent cannot produce the confident sentence — `describeResolvedIntent` degrades to naming the gap.                                                                 |
+| compiler integration | complete | 5 tests in `compiler-browser-recipe.test.ts`. An intent may name a spec only when every capability it requires is in the emitted steps, so a description can never promise a write the steps do not perform; the reconciliation recipe (no fitting intent) keeps its own name and gets an empty plan.                                              |
+
+Measured on the live device's own eligible pattern (AX gives no semantic type):
+`Helper: automate record workflow` → **"Update a field on this record"** /
+_"Set the field you point me at on the record you have open to a value you give
+me, then read it back to confirm it took."_ With a source that does record
+semantics, the same pattern reads **"Update the phone field on this record"**.
+
+### Run-time resolution — the agent looks at the page
+
+Two defects made every compiled browser agent unrunnable, and each hid the
+other. The read step asked for `fields` that nothing supplied, so step one threw
+_"No fields were configured to read. Teach the workflow which fields matter
+first."_ Behind it, the propose step bound `fields` to the read step's OUTPUT
+(`{origin, values, unread}`), which is not the `{name, value}` pairs a proposal
+needs — and nothing anywhere supplied the value to write. A browser agent could
+be detected, compiled, validated and approved, and could not take one action.
+
+| Component                | Status   | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `list_controls` verb     | complete | Seventh verb in the closed action set, and the only one with no target — it is how the agent learns what targets exist. Returns the page's SHAPE: role, name, secure, editable, duplicate count. No `value` member exists on `browserControlSchema`, asserted against the serialised result in three suites. Roles and a limit are required; there is no "everything" or unbounded form, and a partial listing reports `controls_truncated`.                                                                       |
+| both actuation lanes     | complete | Pure `listControls` projection (11 tests) drives the extension lane; the in-page script answers it for Maman's own window, and `parseControls` re-derives every entry on the trusted side. Secret-shaped control NAMES are dropped rather than reported — the contract would reject them, and rejecting the whole listing would let one hostile label deny the agent every other control. Password fields ARE listed, marked secure, so the agent can see and avoid them rather than reporting "not on this page". |
+| `resolveIntentOnSurface` | complete | Looks once, before any step, and returns `ready` / `needs_you` / `could_not_look`. Collapsed repeats are re-expanded so `duplicate_count: 12` becomes the ambiguity it represents and resolves to nothing. Secure controls are never passed on as candidates. A truncated listing changes the gap wording, because "I looked and it isn't there" is only true if the looking was complete.                                                                                                                         |
+| desktop run wiring       | complete | `discoverInputsFor` runs before the step loop in both shadow and supervised paths, and its result is held across the approval gate rather than re-derived — re-resolving after approval could land on a different control than the diff the user approved.                                                                                                                                                                                                                                                         |
+| honest input sources     | complete | `agentInputSchema.source` gained `discovered_on_surface`. The field comes from looking; the VALUE is a separate `user` input, because no page reveals what a person intends to type. `renderPlainLanguagePlan` lists only `user` inputs under "You provide:" — asking someone for the field the agent finds itself would send them looking for a form that does not exist.                                                                                                                                         |
+
+End-to-end proof (`discovery-end-to-end.test.ts`, 9 tests): a spec compiled from
+an observed pattern reads the right field off a page it was never taught, writes
+it after approval, and the independent readback confirms it — while the
+neighbouring "Internal notes" field is untouched. The same suite pins the
+refusals: a credential box is never offered as a target, two controls sharing a
+name resolve to nothing, an unopened window reports "I could not look" rather
+than "nothing found", and a missing value stops the run at a question instead of
+writing something invented.
+
+### The one question (`needs_input`)
+
+The gate that asks for what looking cannot reveal. It is a run PHASE, not an
+error: `failed` would put a red message in front of someone when nothing went
+wrong — the agent did its half and is waiting on theirs.
+
+| Component          | Status   | Evidence                                                                                                                                                                                                                                                                                   |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `describeQuestion` | complete | Built from the resolved intent, so it names the control discovery already found: **"What should “Phone” say?"**, not "What should the field say?". 4 tests, including that it stays a label (<60 chars) rather than repeating `describeGap`'s explanation.                                 |
+| `AnswerForm`       | complete | Shows the per-step plan above the box, so the answer is given for a stated purpose rather than into an unnamed field. `type="text"`, `autoComplete="off"` — never a password input, because this value is typed into a page.                                                               |
+| `checkAnswer`      | complete | Refuses a credential BEFORE the run restarts and before anything is dispatched: this value would be written to a field, relayed over the native channel, and recorded on the receipt. The contract rejects it at `set_value` too, but that arrives as an opaque mid-run refusal.           |
+| `answer()`         | complete | A full restart, not a resume. Nothing was written, so there is no partial state — and re-running discovery re-reads the page, which matters: the box may have been open for minutes, and acting on the surface as it was when the question appeared is how a stale target gets written to. |
+| answer lifetime    | complete | Held in memory for the run that asked, cleared by `reset()`, never persisted. An answer given once is not a standing instruction to write that value every time.                                                                                                                           |
+
+`answer-form.test.ts` (11 tests) drives the real store through the real page
+script: the question names the discovered field and never asks about the field
+itself, only `list_controls` is dispatched while it waits, a credential answer
+is refused without touching the page, and answering carries the run to
+`completed` with a diff of `Phone: 555-0100 → 555-0199`.
+
+That last assertion caught a defect I introduced. It first read
+`expect(phase).not.toBe("needs_input")`, which passes on a failed run — and the
+run WAS failing, with "No fields were configured to read. Teach the workflow
+which fields matter first." The verify step (the independent readback) had no
+`fields` binding, so the readback that proves a write landed took the whole run
+down. Fixed by binding the same discovered fields, and the assertion now pins
+`completed` plus the diff.
+
+Verified in the panel preview: the Agents screen renders with no console errors.
+The form itself was not eyeballed — reaching it needs the Tauri host, which the
+web preview does not have — so its behaviour rests on the tests above.
+
+## Required inputs must actually arrive (Phase 5)
+
+A declared requirement that nothing enforced. The reconciliation spec declares
+`account_csv` **required**; the desktop passed `agentInputs: {}`;
+`resolveStepInputs` bound `undefined` without complaint (the spec parameter was
+literally `void spec`); and `local.parse_csv` was
+`read: async () => structuredClone(DEMO_CSV_ROWS)` — it took no parameters at
+all. So the run reconciled **fixture rows** end to end, produced a diff, and
+published a receipt with ROI for an account list nobody had ever provided.
+
+Ten tests in `agent-runtime` and one in `worker` passed against that path, which
+is how it survived. Both the desktop and the durable Temporal path were affected.
+
+| Component             | Status   | Evidence                                                                                                                                                                                                                     |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `validateAgentInputs` | complete | Pre-execution gate in the same shape as `validateRuntimeCapabilities`. `null`, `""` and `[]` count as MISSING, not as answers — an empty array is exactly what the browser read adapter received when discovery had not run. |
+| resolution backstop   | complete | `resolveStepInputs` now throws for an unbound REQUIRED input instead of binding `undefined`; optional inputs still resolve to `undefined`, which is correct.                                                                 |
+| demo adapter          | complete | `local.parse_csv` reads its input and serves the bundled sample ONLY for the `DEMO_ACCOUNT_LIST` sentinel. A real file path is refused (it cannot read files) rather than answered with fixtures.                            |
+| desktop + worker      | complete | `requireInputs` before the step loop in both desktop paths; `validateAgentInputs` beside the policy gate in `agentRunWorkflow`, so the durable path refuses before step one too.                                             |
+| sample data is said   | complete | The local runtime cannot read a user's file, so a reconciliation run binds the sample **explicitly** and the panel shows "…used Maman's bundled sample list — the numbers below describe that sample, not your data."        |
+
+13 new tests in `agent-inputs.test.ts`. Reported as `failed` rather than a
+dedicated `inputs_missing` status: the run status is a persisted enum with a
+CHECK constraint in `0003_agents_runs_approvals.up.sql`, so adding one is a
+migration whose integration tests need Docker — worth doing, not worth
+smuggling into this change.
+
+## A write is never served by demo data (Phase 6)
+
+`realAdapterRegistry` wraps each Salesforce capability with a per-org fallback:
+when the org has no connector linked, the demo adapter answers. Every method
+resolved the same way —
+
+    const use = (await linked(ctx)) ? real : (demo ?? real);
+
+— including `write`. So an unlinked org's supervised write ran against the
+in-memory `DemoSalesforceWorld`, which genuinely mutates
+(`account[change.field] = change.new_value`) and returns `{applied: n}`. The
+write succeeded, just somewhere else, and the run reported records updated in a
+Salesforce it had never contacted. Nothing downstream could detect it.
+
+| Component                | Status   | Evidence                                                                                                                                                                                                                          |
+| ------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| write refuses            | complete | `ConnectorNotLinkedError` names the provider and what to connect, and says what it will NOT do ("I will not write to demo data and call it done"). Asserted: no HTTP call, and the demo world is unmutated.                       |
+| reads still fall back    | complete | Deliberately kept — an org that has connected nothing can still see the shape of a run. The existing fallback tests are unchanged.                                                                                                |
+| the fallback is reported | complete | `onDemoFallback` fires for reads and proposals served by fixtures, with capability, provider and org. The worker logs it structurally. A proposal built from demo records is what the user is asked to approve, so it counts too. |
+
+6 new tests in `registry.test.ts`. The asymmetry is the design: a read served
+from fixtures produces a number that is wrong; a write served from fixtures
+produces a claim that cannot be retracted.
+
+Gap left open: the demo-fallback signal reaches the worker's logs but not the
+`ExecutionReceipt`, so a receipt still cannot say "these numbers came from demo
+data". That needs a receipt field and is a contract change.
+
+## Receipts report measured values (Phase 7)
+
+The receipt is the audit record, and every number in it was a literal:
+
+    started_at: new Date(Date.now() - 2000)          // always "2 seconds ago"
+    duration_ms: 100                                  // every step, always
+    totals.duration_ms: 2000
+    totals.records_read: 10                           // over per-step zeroes
+    provider_cost_usd: mode === "shadow" ? 0 : 0.08
+    computeReceiptRoi({ manual_baseline_ms: 11 * 60_000,
+                        baseline_observation_count: 6, ... })
+
+The ROI line is the one that mattered. `MEASURED_BASELINE_MIN_OBSERVATIONS` is
+3, so a hardcoded count of 6 made the provenance system stamp the savings
+**"measured"**, and `petReceiptSummary` reported "Saved approximately 11
+minutes" for every supervised run. The machinery was correct throughout — it was
+being fed invented inputs. The worker's comment even claimed "measured baseline
+from the source pattern's manual observations", which it never was.
+
+| Component       | Status   | Evidence                                                                                                                                                                                                      |
+| --------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| desktop timings | complete | `beginMeasuring` per run, `measured()` around every `executeStep`. `performance.now()` because demo adapters finish under a millisecond and wall-clock would round them all to 0.                             |
+| records read    | complete | Counted from real step outputs; `countRecords` returns undefined (not 0) for shapes carrying no count, so "none" and "unknown" stay distinct. Totals are the sum of the steps.                                |
+| ROI baseline    | complete | Taken from the source pattern's `median_duration_ms` and `occurrence_count` — genuinely observed. A pattern seen twice now yields `baseline_provenance: "estimated"`, which the old literal made unreachable. |
+| cost            | complete | 0 on the local runtime, which bills nothing. A fabricated cost is worse than a zero because ROI subtracts it as real.                                                                                         |
+| worker          | partial  | Invented values removed (baseline, per-step duration, records, `cost_usd: 0.08`). It reports 0 where it cannot measure and lets provenance fall to "estimated".                                               |
+
+10 tests in `receipt-honesty.test.ts` drive the real store: the elapsed window
+must sit inside the wall-clock window of the call, totals must equal the sum of
+their steps, and provenance must degrade for a thinly-observed pattern.
+
+Two gaps left open, both needing contract changes rather than code:
+
+- `RunStepSummary` has no `records_read` field, so the worker measures the count
+  in `executeReadStep` and discards it at the workflow boundary. Its optional
+  `started_at`/`completed_at` are likewise never populated.
+- `AgentRunInput` does not carry the source pattern's observations, so the
+  worker has no baseline at all and reports 0 with "estimated" provenance. The
+  device has the numbers; the run input is the missing hop.
+
+## A failed load never overwrites the file (Phase 8)
+
+The rule is "do not hide operational failures in empty catch blocks". There were
+no literally-empty catches; there was something worse. `useAgents.hydrate` read:
+
+    try {
+      const raw = await loadRaw();
+      if (raw) { ...if (parsed.success) { set(...); return; } }
+    } catch { }                          // "defaults"
+    set({ agents: [], hydrated: true });
+
+Three different failures — a read that threw, bytes that were not JSON, and a
+file whose SHAPE no longer matched the schema — all arrived at the same line: an
+empty agent list marked `hydrated`, indistinguishable from a first run. The
+third case does not even involve the catch; it falls past the `if`.
+
+Six mutations then wrote the in-memory array back through `saveRaw`. So the
+agents were not merely hidden: **the next action destroyed them on disk.** The
+realistic trigger is a schema change that is not backward-compatible, which
+wipes every existing user's agents on upgrade. This session added `intent_plan`
+with `.default([])`, which kept old files loadable — but nothing enforced that
+care and nothing would have reported its absence.
+
+| Component         | Status   | Evidence                                                                                                                                                                               |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parseAgentsFile` | complete | Returns `absent` / `unreadable` / `loaded`. Per-record salvage mirrors `parseWorkflowsFile`: one drifted agent must not cost the user the rest, and the count is returned.             |
+| write refusal     | complete | All six `saveRaw` call sites now go through one `persist()`, which throws `AgentsNotLoadedError` while `loadFailure` is set. Asserted: the stored bytes are byte-identical afterwards. |
+| read vs parse     | complete | A read that throws is treated as firmly as bad bytes — the file may be intact and merely unreachable, and that is exactly when overwriting is worst.                                   |
+| first run         | complete | `absent` does NOT set `loadFailure`, or the refusal would lock the app for every new user.                                                                                             |
+| the user is told  | complete | The Agents screen shows the failure and says the file is untouched, instead of "No agents yet" — which is what made the loss invisible. A partial-salvage count is shown too.          |
+
+9 tests in `agents-load-failure.test.ts`, driving the real Tauri persistence path
+via a bridge mock rather than the web-preview localStorage fallback.
+
+`learnedWorkflows.ts` now carries the same fix. `parseWorkflowsFile` returns the
+same three-way outcome, the three saves go through one guarded `persist`, and
+`Configure` no longer says "Workflow not found" when the file simply could not
+be read — that wording invited the user to teach it again, which is the write
+that would have destroyed the original. Its hydrate branch previously _claimed_
+to report the failure (`console.error`) while still setting an empty list the
+next save would overwrite; a console line the user never sees is not a report.
+
+## Nothing secret-shaped reaches a model prompt (Phase 9)
+
+"Secret material never enters logs, analytics, prompts, or AgentSpec" is a
+standing invariant, and three of those four were enforced structurally:
+`browserActionSchema` bounds every field with `boundedNonSecret`, the Teach Mode
+redaction gate masks credential regions before egress, and the logger redacts.
+**Prompts — named explicitly in that sentence — had nothing.**
+
+`namingInputSchema` carried the comment "Redacted structured summary — NEVER raw
+events" over fields that were bare `z.string()`, and `AnthropicModelProvider`
+builds its prompt as `JSON.stringify(input)` **without parsing the input at
+all**. TypeScript types are erased before the wire, so that comment was the
+entire enforcement between a captured value and Anthropic.
+
+| Component         | Status   | Evidence                                                                                                                                                                                  |
+| ----------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| input schemas     | complete | Every free-text field is `promptSafeText(max)` — bounded AND secret-refusing, mirroring `boundedNonSecret` on the browser wire. An unbounded field is an exfiltration channel of its own. |
+| parse before send | complete | Both provider methods `safeParse` the input and return `policy_violation` without calling the SDK. Asserted with a stubbed SDK: the create spy is never invoked.                          |
+| the error is safe | complete | The refusal names the offending FIELD, never the value — a rejected secret repeated in an error string lands in the logs this check protects.                                             |
+| the normal path   | complete | An ordinary request still sends, so naming does not silently stop working and leave every agent on its deterministic title.                                                               |
+
+9 tests in `prompt-boundary.test.ts`. The load-bearing one is that the SDK is
+never called for a secret-carrying input — a schema that rejects while the
+caller sends anyway would be no protection at all.
+
+Note on `canonical_steps`: tokens are category-level by construction
+(`source:app_category:event_type:target_role:semantic_type:object_type`), so
+this is defence in depth rather than a live leak. The guard is on the field
+rather than on the convention, because a future source that puts a captured
+value in a segment would otherwise send it verbatim.
+
+## Create Agent is the whole verb (local agent runtime)
+
+Create Agent used to be: compile → persist `state:"draft"` → show success →
+stop. Nothing validated the spec against a runtime, nothing registered it,
+nothing installed a trigger, and "proactive" meant the user remembering to open
+Agents and press Run. Two more fake arrows fell out of tracing it:
+`compileLearnedWorkflow` flattened every configured trigger to `manual`
+(`trigger.type === "manual" ? {type:"manual"} : {type:"manual"}`), and it bound
+step inputs as `target`/`value` while the browser adapters only read `fields` —
+so a compiled LEARNED agent's first step threw "Teach the workflow which fields
+matter first" to a user who had just done exactly that.
+
+| Component           | Status   | Evidence                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LocalAgentRuntime` | complete | `packages/agent-runtime/src/local-runtime.ts`. Registration IS validation (spec + capabilities, gap named); context triggers with per-agent cooldown dedupe; `runShadow` structurally never dispatches a write; rehydration re-validates so a revoked capability is not resurrected. 11 tests.                                                                                                  |
+| `context` trigger   | complete | New `agentTriggerSchema` variant matching the canonical-token vocabulary (category/object/host) — never content. `WorkflowContext` carries the observed DOMAIN, not a synthesized origin: the observer never saw a scheme, and the no-HTTP-in-webview guard caught the synthesized version.                                                                                                     |
+| context emission    | complete | `ingestEvents` emits per stored event (JS paths, web preview included); `emit_workflow_context` in Rust emits for live observer/relay events, which were previously invisible to JS entirely.                                                                                                                                                                                                   |
+| agent service       | complete | `apps/desktop/src/lib/agentService.ts`, booted from `main.tsx` — module scope, survives navigation. REAL registry structurally: the module does not import the demo world, so no trigger can reach fixture data; a spec wanting a demo capability fails registration by name.                                                                                                                   |
+| Create Agent path   | complete | compile → validate → persist → register → trigger installed → shadow → `state:"shadow"`, with per-phase progress lines and specific failures. A registration failure returns the record to `draft` — the UI cannot show a lifecycle that never happened. Compile-time capability check now runs against the union of real+demo (it used to be demo-ONLY, refusing every live browser workflow). |
+| autonomy consumed   | complete | `draft_autonomy` (worker-granted) → a firing auto-runs SHADOW (never a write); without it a firing stages a suggestion. The setting the product already had, now driving behaviour.                                                                                                                                                                                                             |
+| no cloud keys       | complete | Suite deletes OPENAI/ANTHROPIC/GEMINI/GROQ vars, then compiles (deterministic `compileLearnedWorkflow`, no model field), registers, and shadow-runs a browser agent whose diff shows the real page value vs the configured one.                                                                                                                                                                 |
+| restart             | complete | New runtime instance from the persisted file re-registers, and the next matching context fires. Tested at both layers (runtime + service).                                                                                                                                                                                                                                                      |
+
+18 new tests (`local-runtime.test.ts`, `create-agent-flow.test.ts`).
+
+### The Rust trigger daemon
+
+Trigger evaluation no longer needs a webview. `trigger_service.rs` parses
+agents.json into trigger records (per-record tolerant: one unreadable agent
+cannot silence the rest; `draft`/`paused`/`archived` never fire), matches live
+events' redacted context in `ingest_observer_value`, applies per-agent
+cooldowns, and on a firing: emits `agent_trigger_fired` (the status bar — its
+own window — shows the beat with no panel open) and appends to a capped
+staged_runs.json. The panel drains that file on boot, so "it noticed while you
+were away" is literally true. Records reload on every `agents_save` and at app
+setup; cooldown history survives reloads so a re-save cannot unleash a burst.
+The daemon MATCHES and ANNOUNCES; it never executes — execution needs
+discovery, inputs, and approvals, which the panel's runtime owns, and the
+actuator's presence gate would refuse an unwatched write anyway. Both
+evaluators can be alive at once, so `pushStaged` dedupes per agent per cooldown
+window. 6 Rust unit tests + 2 desktop tests.
+
+### The acceptance test — one continuous chain
+
+`acceptance.test.ts` runs the mandate's required end-to-end proof as ONE test,
+with every cloud key deleted first: four repetitions → the REAL pattern engine
+detects and derives the intent (nothing hand-picked) → `createAgentAndActivate`
+(the function the button calls) → registered, trigger installed, state
+`shadow` → matching context stages the agent proactively → the user supplies
+the one value looking cannot reveal → `proposeForApproval` returns the exact
+diff and its hash → `executeApproved` re-proposes FRESH, requires the hash to
+match, writes through the real in-page protocol, and the adapter's independent
+readback verifies → the page value actually changed → the same context inside
+the cooldown stages nothing. A second test proves the stale abort: page changes
+after approval → `aborted_stale`, nothing written, the intruding edit untouched.
+`runApproved` continues past the write so the spec's own verify-read executes —
+the plan the user approved is the plan that runs. The presence gate stays REAL
+in the test (jsdom document, not a mocked `userPresent`).
+
+The one repetition-bar note: the test lowers the tunable VOLUME knobs
+(occurrences 3, opportunity 0.4 — the same knobs the demo tuning screen
+exposes). The untunable safety bars pass at their real values: similarity 1,
+feasibility 1, risk 0.5.
+
+Honest gaps, mandate items still open:
+
+- `schedule` triggers are carried but nothing ticks them locally yet.
+- The end-to-end browser WRITE (propose → approve → execute → readback) exists
+  in the runs store; the trigger-staged path stops at shadow + suggestion and
+  hands off to the existing approval flow rather than driving it.
+- The JS `appCategoryOf` mirror is cruder than Rust's `categorize_app`; live and
+  simulated events could categorize differently at the margins.
+- The demo reconciliation card still creates a draft-only helper; it now fails
+  REAL registration honestly (salesforce.* unavailable) rather than blending in.
+
 ## Known limitations
 
 - No application logic yet (by design at M0). `pnpm demo` starts infrastructure only and

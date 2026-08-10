@@ -1,5 +1,5 @@
-import type { WorkflowEvent } from "@maman/contracts";
-import { invokeCommand, isTauri } from "./bridge.js";
+import type { WorkflowContext, WorkflowEvent } from "@maman/contracts";
+import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 
 /**
  * Event-store bridge. In Tauri, calls the Rust encrypted store (panel-only
@@ -40,16 +40,39 @@ export function getMemoryRawEvents(): WorkflowEvent[] {
   return memoryRaw;
 }
 
+/** The JS mirror of the Rust domain→category mapping, for preview + emission. */
+export function appCategoryOf(e: WorkflowEvent): string {
+  return e.app.domain?.includes("force.com")
+    ? "crm"
+    : e.app.domain?.includes("docs.google")
+      ? "spreadsheet"
+      : "browser";
+}
+
+/**
+ * The redacted context of one event, as the trigger service will hear it.
+ * Field-for-field the canonical-token vocabulary — subscribing to this can
+ * never become a side-channel to content, because content is not in it.
+ */
+export function contextOf(e: WorkflowEvent): WorkflowContext {
+  return {
+    source: e.source,
+    app_category: appCategoryOf(e),
+    event_type: e.event_type,
+    target_role: e.target.role ?? "-",
+    semantic_type: e.target.semantic_type ?? "-",
+    object_type: e.context.object_type ?? "-",
+    ...(e.app.domain ? { domain: e.app.domain } : {}),
+    occurred_at: e.occurred_at,
+  };
+}
+
 function toEntry(e: WorkflowEvent): TimelineEntry {
   return {
     event_id: e.event_id,
     occurred_at: e.occurred_at,
     source: e.source,
-    app_category: e.app.domain?.includes("force.com")
-      ? "crm"
-      : e.app.domain?.includes("docs.google")
-        ? "spreadsheet"
-        : "browser",
+    app_category: appCategoryOf(e),
     event_type: e.event_type,
     sensitivity: e.sensitivity,
     app_display_name: e.app.display_name,
@@ -65,9 +88,16 @@ export async function ingestEvents(
   opts: { observationPaused: boolean },
 ): Promise<IngestResult> {
   if (isTauri()) {
-    return invokeCommand<IngestResult>("events_ingest", {
+    const result = await invokeCommand<IngestResult>("events_ingest", {
       eventsJson: JSON.stringify(events),
     });
+    // Trigger evaluation hears what was STORED, not what was attempted: a
+    // paused or denied event never wakes an agent.
+    if (result.stored > 0) {
+      for (const e of events)
+        void emitAppEvent({ type: "workflow_context", context: contextOf(e) });
+    }
+    return result;
   }
   if (opts.observationPaused) {
     return {
@@ -81,6 +111,7 @@ export async function ingestEvents(
   }
   memory.unshift(...events.map(toEntry));
   memoryRaw.push(...events);
+  for (const e of events) void emitAppEvent({ type: "workflow_context", context: contextOf(e) });
   return {
     stored: events.length,
     dropped_paused: 0,

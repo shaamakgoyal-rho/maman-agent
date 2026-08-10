@@ -38,10 +38,25 @@ export function resolveStepInputs(
   const resolved: Record<string, unknown> = {};
   for (const [name, binding] of Object.entries(step.inputs)) {
     if (binding.source === "literal") resolved[name] = binding.value;
-    if (binding.source === "agent_input") resolved[name] = agentInputs[binding.ref];
     if (binding.source === "step_output") resolved[name] = state.outputs[binding.ref];
+    if (binding.source === "agent_input") {
+      const value = agentInputs[binding.ref];
+      // The spec used to be `void spec` here — the declaration of what is
+      // required was read by nobody. A required input that nothing supplied
+      // became `undefined` and went into the adapter, where it either threw
+      // something unrelated-sounding or, worse, was ignored in favour of
+      // fixture data. `validateAgentInputs` is the primary gate and runs before
+      // any step; this is the backstop for a caller that skipped it, because a
+      // step executing with `undefined` where a value was declared is never the
+      // right thing to do.
+      if (value === undefined && spec.inputs.some((i) => i.key === binding.ref && i.required)) {
+        throw new Error(
+          `step ${step.step_id} needs the agent input "${binding.ref}", which was not supplied`,
+        );
+      }
+      resolved[name] = value;
+    }
   }
-  void spec;
   return resolved;
 }
 

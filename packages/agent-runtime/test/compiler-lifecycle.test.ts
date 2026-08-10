@@ -117,11 +117,13 @@ describe("compiler (M6 gate)", () => {
     }
   });
 
-  it("prohibited/unknown intents without a model are blocked with a safe message", async () => {
+  it("prohibited/unknown intents without a model need configuration, with a safe message", async () => {
     const result = await compileAgentSpec(request({ generalized_intent: "unknown_thing" }));
-    expect(result.status).toBe("blocked");
-    if (result.status === "blocked") {
-      expect(result.message).toMatch(/couldn't safely draft/);
+    // Typed, actionable: the workflow needs to be taught, not dead-ended.
+    expect(result.status).toBe("needs_configuration");
+    if (result.status === "needs_configuration") {
+      expect(result.missing[0]!.kind).toBe("workflow_definition");
+      expect(result.message).toMatch(/Walk me through it once/);
     }
   });
 
@@ -145,8 +147,9 @@ describe("compiler (M6 gate)", () => {
     const result = await compileAgentSpec(
       request({ generalized_intent: "unknown_thing", model: hostileModel }),
     );
-    // The unknown capabilities cannot enter a spec — compilation is blocked.
-    expect(result.status).toBe("blocked");
+    // The unknown capabilities cannot enter a spec — the hostile draft is
+    // rejected and the workflow reports as needing configuration instead.
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("model drafts never receive direct write steps", async () => {
@@ -166,8 +169,8 @@ describe("compiler (M6 gate)", () => {
     if (result.status === "valid") {
       expect(result.spec.steps.every((s) => s.mode !== "write")).toBe(true);
     } else {
-      // blocked is also acceptable — but never a direct write
-      expect(result.status).toBe("blocked");
+      // needing configuration is also acceptable — but never a direct write
+      expect(result.status).toBe("needs_configuration");
     }
   });
 });

@@ -76,25 +76,45 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("the screen refuses to exist until the user turns Teach Mode on", () => {
-  it("shows why, and offers no way to start", () => {
+describe("the screen refuses to record until the user turns Teach Mode on", () => {
+  it("still offers NO way to start while it is off", () => {
+    // The property that matters, unchanged: screen capture is the one thing
+    // Maman does that leaves the device, so nothing here can begin a session
+    // until the user has said yes.
     enableTeachMode(false);
-    render(<Teach />);
-    expect(screen.getByText("Teach Mode is off")).toBeTruthy();
+    render(<Teach onDone={() => {}} />);
     expect(screen.queryByText("Start showing Maman")).toBeNull();
+  });
+
+  it("asks for consent HERE instead of sending the user to Privacy", () => {
+    // This used to be a dead end reading "Privacy → Teach Mode explains…",
+    // which asked someone to leave, find a toggle, and come back — at the exact
+    // moment they had just been told Maman could not verify their workflow.
+    enableTeachMode(false);
+    render(<Teach onDone={() => {}} />);
+    expect(screen.getByText("Turn it on for this")).toBeTruthy();
+    expect(screen.getByText("Not now")).toBeTruthy();
+  });
+
+  it("says what turning it on means before they turn it on", () => {
+    enableTeachMode(false);
+    render(<Teach onDone={() => {}} />);
+    expect(screen.getByText(/sends pictures of your screen to Anthropic/)).toBeTruthy();
+    // The limits are part of the ask, not fine print discovered later.
+    expect(screen.getByText(/never stored, never synced/)).toBeTruthy();
   });
 });
 
 describe("the setup step says what it does where the button is", () => {
   it("names the egress next to Start, not only in Privacy", () => {
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     // The one sentence a user must not be able to miss.
     expect(screen.getByText(/pictures of the apps you pick are sent to Anthropic/)).toBeTruthy();
     expect(screen.getByText(/thrown away entirely if a password field has focus/)).toBeTruthy();
   });
 
   it("cannot start without naming at least one app", () => {
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     const start = screen.getByText("Start showing Maman") as HTMLButtonElement;
     expect(start.disabled).toBe(true);
     expect(screen.getByText("pick at least one app first")).toBeTruthy();
@@ -108,7 +128,7 @@ describe("the review step", () => {
   it("shows what Maman thinks it saw, and remembers nothing on its own", () => {
     useTeach.getState().applyObservation(observation([action()]));
     useTeach.setState({ session: { phase: "ended", sessionId: SESSION_ID, reason: "stopped" } });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
 
     expect(screen.getByText(/Maman thinks you filled in "Close date"/)).toBeTruthy();
     expect(screen.getByText("1 to check")).toBeTruthy();
@@ -121,7 +141,7 @@ describe("the review step", () => {
       .getState()
       .applyObservation(observation([action({ label: "Close date" }), action({ label: "Stage" })]));
     useTeach.setState({ session: { phase: "ended", sessionId: SESSION_ID, reason: "stopped" } });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
 
     const rights = screen.getAllByText("Right");
     fireEvent.click(rights[0]!);
@@ -137,7 +157,7 @@ describe("the review step", () => {
     // Three frames showing the same action must not read as three things to check.
     for (let i = 0; i < 3; i++) useTeach.getState().applyObservation(observation([action()]));
     useTeach.setState({ session: { phase: "ended", sessionId: SESSION_ID, reason: "stopped" } });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText("1 to check")).toBeTruthy();
     expect(screen.getByText(/seen 3×/)).toBeTruthy();
   });
@@ -152,7 +172,7 @@ describe("the review step", () => {
         startedAtMs: Date.now(),
       },
     });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.queryByText(/^Remember/)).toBeNull();
   });
 });
@@ -161,7 +181,7 @@ describe("refusals are legible, not silent", () => {
   it("explains a withheld frame in plain words", () => {
     useTeach.getState().applyStatus({ state: "frame_refused", detail: "secure_field_focused" });
     useTeach.getState().applyStatus({ state: "frame_refused", detail: "secure_field_focused" });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText("Moments Maman did not use")).toBeTruthy();
     expect(
       screen.getByText(/a password field had focus — the whole frame was thrown away \(2×\)/),
@@ -172,13 +192,13 @@ describe("refusals are legible, not silent", () => {
     useTeach
       .getState()
       .applyStatus({ state: "refused", detail: "screen_recording_permission_required" });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText(/Screen Recording permission is not granted/)).toBeTruthy();
   });
 
   it("falls back to the raw reason it does not have words for, rather than hiding it", () => {
     useTeach.getState().applyStatus({ state: "frame_refused", detail: "something_new_from_rust" });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText(/something_new_from_rust/)).toBeTruthy();
   });
 });
@@ -194,7 +214,7 @@ describe("the recording step", () => {
       },
       maxSeconds: 300,
     });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText("5:00 left")).toBeTruthy();
     expect(screen.getByText(/Sending pictures of 1 app to Anthropic/)).toBeTruthy();
     expect(screen.getByText("Stop")).toBeTruthy();
@@ -204,7 +224,7 @@ describe("the recording step", () => {
     useTeach.setState({
       session: { phase: "ended", sessionId: SESSION_ID, reason: "time_box_elapsed" },
     });
-    render(<Teach />);
+    render(<Teach onDone={() => {}} />);
     expect(screen.getByText(/The time was up, so it stopped itself/)).toBeTruthy();
     expect(screen.getByText(/Nothing has been learned yet/)).toBeTruthy();
   });

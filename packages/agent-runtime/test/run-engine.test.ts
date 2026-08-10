@@ -6,6 +6,7 @@ import {
   compileAgentSpec,
   demoAdapterRegistry,
   DemoSalesforceWorld,
+  DEMO_ACCOUNT_LIST,
   diffSha256,
   executeStep,
   PermanentAdapterError,
@@ -13,6 +14,16 @@ import {
   type ProposedDiff,
   type RunState,
 } from "../src/index.js";
+
+/**
+ * The account list these runs reconcile, stated rather than assumed.
+ *
+ * These tests used to pass `agentInputs: {}` against a spec that declares
+ * `account_csv` REQUIRED, and passed — because `local.parse_csv` took no
+ * parameters and returned the bundled fixture regardless. Ten tests were
+ * exercising a run whose required input nothing had supplied.
+ */
+const DEMO_INPUTS = { account_csv: DEMO_ACCOUNT_LIST };
 
 /**
  * Drives the compiled reconciliation spec through the demo adapters — the
@@ -79,7 +90,7 @@ async function runThroughProposal(
   for (const step of spec.steps) {
     if (step.mode === "write") break; // stop before the approval gate
     const adapter = registry.get(step.capability_id)!;
-    const result = await executeStep({ spec, step, state, agentInputs: {}, ctx, adapter });
+    const result = await executeStep({ spec, step, state, agentInputs: DEMO_INPUTS, ctx, adapter });
     if (result.kind === "proposed") {
       diff = result.diff;
       diffSha = result.diff_sha256;
@@ -124,7 +135,7 @@ describe("expected shadow diff (spec §24)", () => {
         spec,
         step,
         state,
-        agentInputs: {},
+        agentInputs: DEMO_INPUTS,
         ctx: ctx("shadow"),
         adapter,
         // even if someone passes an approved diff, shadow must skip
@@ -171,7 +182,7 @@ describe("supervised write path (spec §24)", () => {
       spec,
       step: writeStep,
       state: outcome.state,
-      agentInputs: {},
+      agentInputs: DEMO_INPUTS,
       ctx: ctx("supervised"),
       adapter: registry.get(writeStep.capability_id)!,
       approvedDiff: outcome.diff,
@@ -221,7 +232,7 @@ describe("supervised write path (spec §24)", () => {
         spec,
         step: writeStep,
         state: { outputs: {} },
-        agentInputs: {},
+        agentInputs: DEMO_INPUTS,
         ctx: ctx("supervised"),
         adapter: registry.get(writeStep.capability_id)!,
       }),

@@ -179,7 +179,13 @@ export function createActivities(deps: ActivityDeps): RunActivities {
           verify_detail: result.verify_detail,
           idempotency_key: result.idempotency_key,
           change_count: approvedDiff.summary.change_count,
-          cost_usd: 0.08,
+          // 0, not 0.08. This accumulates into the workflow's `totalCost` and
+          // lands on the receipt as `provider_cost_usd` — so a made-up figure
+          // here becomes a cost the user is told they incurred, and is then
+          // subtracted from ROI. Salesforce API calls are not billed per write;
+          // when a provider genuinely does charge, the adapter is where that
+          // number has to come from.
+          cost_usd: 0,
         };
       } catch (e) {
         return {
@@ -295,14 +301,55 @@ function buildReceipt(input: {
       : 0;
   const durationMs = Math.max(1, input.now.getTime() - input.entry.startedAt);
 
-  // ROI: measured baseline from the source pattern's manual observations.
+  // ROI: NO BASELINE IS AVAILABLE HERE, and the receipt says so.
+  //
+  // The comment above this used to read "measured baseline from the source
+  // pattern's manual observations", which was false — the values were
+  // `11 * 60_000` and `6`, both literals. Since 6 clears
+  // `MEASURED_BASELINE_MIN_OBSERVATIONS` (3), `computeReceiptRoi` stamped the
+  // savings "measured" and `petReceiptSummary` reported "Saved approximately 11
+  // minutes" for every run the worker ever finalized.
+  //
+  // The real baseline lives on the pattern candidate (`median_duration_ms`,
+  // `occurrence_count`), which the device has and `AgentRunInput` does not
+  // carry. Zeroes drop provenance to "estimated", which is the truthful answer
+  // until those observations are threaded through the run input — a contract
+  // change tracked in BUILD_STATUS rather than papered over with a plausible
+  // number.
   const roi = computeReceiptRoi({
-    manual_baseline_ms: 11 * 60_000,
-    baseline_observation_count: 6,
+    manual_baseline_ms: 0,
+    baseline_observation_count: 0,
     automated_human_ms: intervention_ms,
     human_review_ms: intervention_ms,
     mode: run.mode,
   });
+
+  const receiptSteps = steps.map((s) => ({
+    step_id: s.step_id,
+    capability_id: s.capability_id,
+    source: "api" as const,
+    // 0 because nothing here measured it, not because nothing was read. The
+    // activity DOES count records (`executeReadStep` returns `records_read`),
+    // but `RunStepSummary` has no field to carry it back, so the count is
+    // discarded at the workflow boundary. Threading it is an additive
+    // contract change, noted in BUILD_STATUS; inventing a number in the
+    // meantime is what this whole change is removing.
+    records_read: 0,
+    writes_proposed: s.mode === "propose_write" ? proposed : 0,
+    writes_completed: s.mode === "write" && s.status === "completed" ? proposed : 0,
+    verification:
+      s.mode === "write" && s.status === "completed"
+        ? ("independent_read_passed" as const)
+        : ("none" as const),
+    // Per-step timing is not measured on this path either. `RunStepSummary`
+    // carries optional `started_at`/`completed_at` that nothing populates.
+    // The RUN's total below is real (`durationMs`), so the receipt reports
+    // the window it can prove and 0 for the parts it cannot — rather than
+    // 100ms per step, which summed to a number no clock produced.
+    duration_ms: 0,
+    retries: 0,
+    ...(s.error_code ? { error_code: s.error_code } : {}),
+  }));
 
   const receipt = {
     schema_version: 1 as const,
@@ -315,24 +362,12 @@ function buildReceipt(input: {
     mode: run.mode === "active" ? ("autonomous" as const) : run.mode,
     started_at: new Date(input.entry.startedAt).toISOString(),
     completed_at: now.toISOString(),
-    steps: steps.map((s) => ({
-      step_id: s.step_id,
-      capability_id: s.capability_id,
-      source: "api" as const,
-      records_read: 0,
-      writes_proposed: s.mode === "propose_write" ? proposed : 0,
-      writes_completed: s.mode === "write" && s.status === "completed" ? proposed : 0,
-      verification:
-        s.mode === "write" && s.status === "completed"
-          ? ("independent_read_passed" as const)
-          : ("none" as const),
-      duration_ms: 100,
-      retries: 0,
-      ...(s.error_code ? { error_code: s.error_code } : {}),
-    })),
+    steps: receiptSteps,
     approvals: [],
     totals: {
-      records_read: 10,
+      // Sum of the steps above, so the total and its parts cannot disagree.
+      // This was the literal `10`, sitting over per-step zeroes.
+      records_read: receiptSteps.reduce((n, s) => n + s.records_read, 0),
       writes_proposed: proposed,
       writes_completed: run.mode === "shadow" ? 0 : completedWrites > 0 ? proposed : 0,
       duration_ms: durationMs,

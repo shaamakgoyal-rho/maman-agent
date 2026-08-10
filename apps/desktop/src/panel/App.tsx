@@ -11,13 +11,20 @@ import { Activity } from "./screens/Activity.js";
 import { Suggestions } from "./screens/Suggestions.js";
 import { Agents } from "./screens/Agents.js";
 import { Teach } from "./screens/Teach.js";
+import { Configure } from "./screens/Configure.js";
+import { useNavigation } from "../state/navigation.js";
+import { useLearnedWorkflows } from "../lib/learnedWorkflows.js";
 
-const TABS = ["Home", "Suggestions", "Agents", "Teach", "Activity", "Privacy", "Settings"] as const;
+// Teach is deliberately NOT here. Demonstrating is something the user does at
+// the moment Maman says it could not see enough, so it opens from that card
+// rather than being a place to browse — see `useNavigation.openTeach`.
+const TABS = ["Home", "Suggestions", "Agents", "Activity", "Privacy", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App() {
   const { settings, hydrated, hydrate } = useSettings();
   const [tab, setTab] = useState<Tab>("Home");
+  const { configureWorkflowId, closeConfigure, teachOpen, closeTeach } = useNavigation();
   const [reportedPetState, setReportedPetState] = useState<PetStateName | null>(null);
   // Until the pet window reports, derive the display state from settings.
   const petState: PetStateName =
@@ -27,6 +34,11 @@ export function App() {
 
   useEffect(() => {
     void hydrate();
+    // Learned workflows are persisted on disk; without this the panel starts
+    // with an empty list and a workflow the user taught yesterday reads as
+    // "not found" — their configuration silently invisible until a save
+    // overwrote it.
+    void useLearnedWorkflows.getState().hydrate();
   }, [hydrate]);
 
   useEffect(() => {
@@ -134,13 +146,23 @@ export function App() {
         ))}
       </nav>
       <div className="flex-1 overflow-y-auto p-4">
-        {tab === "Home" && <Home petState={petState} />}
-        {tab === "Suggestions" && <Suggestions />}
-        {tab === "Agents" && <Agents />}
-        {tab === "Teach" && <Teach />}
-        {tab === "Activity" && <Activity />}
-        {tab === "Privacy" && <Privacy />}
-        {tab === "Settings" && <Settings />}
+        {/* Configure belongs to one workflow, so it takes over the content area
+            rather than being a tab. The tab bar stays visible: leaving a
+            half-finished teach session must not require finishing it. */}
+        {configureWorkflowId ? (
+          <Configure workflowId={configureWorkflowId} onDone={closeConfigure} />
+        ) : teachOpen ? (
+          <Teach onDone={closeTeach} />
+        ) : (
+          <>
+            {tab === "Home" && <Home petState={petState} />}
+            {tab === "Suggestions" && <Suggestions />}
+            {tab === "Agents" && <Agents />}
+            {tab === "Activity" && <Activity />}
+            {tab === "Privacy" && <Privacy />}
+            {tab === "Settings" && <Settings />}
+          </>
+        )}
       </div>
     </main>
   );

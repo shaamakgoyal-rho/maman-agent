@@ -82,6 +82,40 @@ const navigateAction = z
   .strict();
 
 /**
+ * Read-only: what controls this page has, so the agent can find its own target.
+ *
+ * This is what makes an agent able to act without being taught the page. Every
+ * other verb here must already know the accessible name it wants; before this,
+ * the only way to learn that name was for a human to type it in. The agent can
+ * now look, match what it sees against what it observed the user doing, and
+ * address a real control — or say plainly that it cannot find one.
+ *
+ * The privacy line is exact: this returns the page's SHAPE (which controls
+ * exist, what they are called, whether they can be typed into) and never a
+ * single control's VALUE. Reading the shape of a form the user is looking at is
+ * not reading their record. Values still come one at a time through
+ * `read_field`, which refuses secure fields and is recorded per field on the
+ * receipt.
+ *
+ * It also reaches no further into the page than the executor already does: the
+ * adapter enumerates candidate controls on every action in order to resolve a
+ * target at all, and this returns a projection of that same list. It is a new
+ * answer, not new access.
+ *
+ * `roles` is required and has no "everything" value — the caller states what it
+ * is looking for. `limit` is a hard cap; a page with more matching controls
+ * reports `controls_truncated`, because silently returning a partial surface
+ * would turn "I looked and it isn't there" into a claim that was never checked.
+ */
+const listControlsAction = z
+  .object({
+    kind: z.literal("list_controls"),
+    roles: z.array(browserTargetRole).min(1).max(7),
+    limit: z.number().int().min(1).max(60),
+  })
+  .strict();
+
+/**
  * Write. `expect_current` is optimistic concurrency, not decoration: when present,
  * the executor refuses with `precondition_failed` unless the field currently holds
  * that value. It is how a stale plan — built from a page that has since changed —
@@ -120,6 +154,7 @@ const clickControlAction = z
 
 export const browserActionSchema = z.discriminatedUnion("kind", [
   navigateAction,
+  listControlsAction,
   readFieldAction,
   focusFieldAction,
   setValueAction,
@@ -218,10 +253,48 @@ export type BrowserActionRefusal = z.infer<typeof browserActionRefusal>;
  * user. It is never interpreted as an instruction and never used to choose the next
  * action.
  */
+/**
+ * One control the page offers, as seen by `list_controls`.
+ *
+ * There is no `value` member, and that absence is the contract: a surface
+ * listing describes the form, not what the record holds. Adding one here would
+ * turn a shape read into a bulk page read in a single field.
+ */
+export const browserControlSchema = z
+  .object({
+    role: browserTargetRole,
+    name: boundedNonSecret(1, 120),
+    /**
+     * True for password and other secure inputs. Listed rather than hidden so
+     * the agent can see that it found a credential box and route around it —
+     * an omitted control reads as "not on this page", which would send the user
+     * off to configure something that is right in front of them.
+     */
+    secure: z.boolean(),
+    /** False for disabled/readonly controls: findable, but not writable. */
+    editable: z.boolean(),
+    /**
+     * How many controls share this role and name. Greater than one means an
+     * action must state `nth`, and is what lets a caller refuse an ambiguous
+     * target before dispatching anything.
+     */
+    duplicate_count: z.number().int().min(1).max(200),
+  })
+  .strict();
+export type BrowserControl = z.infer<typeof browserControlSchema>;
+
 export const browserObservationSchema = z
   .object({
     /** Resolved accessible name of the control that was acted on. */
     resolved_name: boundedNonSecret(0, 120),
+    /** Present only for `list_controls`: the page's shape, never its values. */
+    controls: z.array(browserControlSchema).max(60).optional(),
+    /**
+     * True when the page had more matching controls than `limit`. A caller that
+     * concludes "no such field" from a truncated listing is wrong, so the
+     * listing has to say when it is partial.
+     */
+    controls_truncated: z.boolean().optional(),
     /** Value before the action, when the field was readable. */
     value_before: boundedNonSecret(0, 512).optional(),
     /** Value after the action, read back independently for verification. */

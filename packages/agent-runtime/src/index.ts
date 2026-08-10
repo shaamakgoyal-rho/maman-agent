@@ -17,7 +17,11 @@ export {
 } from "./lifecycle.js";
 export {
   compileAgentSpec,
+  intentFittingSteps,
+  observedSemantics,
   renderPlainLanguagePlan,
+  DISCOVERED_FIELDS_INPUT,
+  FIELD_VALUES_INPUT,
   type CompileRequest,
   type CompileResult,
 } from "./compiler.js";
@@ -45,6 +49,7 @@ export {
   matchAccounts,
   normalizeDomain,
   DemoSalesforceWorld,
+  DEMO_ACCOUNT_LIST,
   diffSha256,
   TransientAdapterError,
   PermanentAdapterError,
@@ -61,3 +66,25 @@ export {
   type AgentDescription,
   type ProposedHelperDescription,
 } from "./describe.js";
+export {
+  runtimeFromRegistry,
+  validateRuntimeCapabilities,
+  requireAdapter,
+  describeMissingCapabilities,
+  RuntimeCapabilityError,
+  type CapabilityRuntime,
+  type MissingCapability,
+  type RuntimeReadiness,
+} from "./runtime-capabilities.js";
+export type { MissingConfiguration } from "./compiler.js";
+export * from "./browser-adapters.js";
+export * from "./compile-learned.js";
+export * from "./resolve-on-surface.js";
+export * from "./local-runtime.js";
+export {
+  validateAgentInputs,
+  describeMissingInputs,
+  AgentInputError,
+  type MissingInput,
+  type InputReadiness,
+} from "./agent-inputs.js";

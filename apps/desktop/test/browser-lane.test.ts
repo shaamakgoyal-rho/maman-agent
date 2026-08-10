@@ -229,7 +229,12 @@ function obedientDeps(): ExecuteDeps {
           ? "applied"
           : "observed",
         observed: {
-          resolved_name: action.kind === "navigate" ? action.url : action.target.name,
+          resolved_name:
+            action.kind === "navigate"
+              ? action.url
+              : action.kind === "list_controls"
+                ? "" // a surface listing resolves no single control
+                : action.target.name,
           value_before: "120",
           value_after: value,
           match_count: 1,

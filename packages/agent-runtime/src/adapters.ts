@@ -3,6 +3,7 @@ import {
   DEMO_CSV_ROWS,
   DEMO_SF_ACCOUNTS,
   type CsvAccountRow,
+  isSfWritableField,
   type ProposedFieldChange,
   type SfAccount,
 } from "@maman/demo-fixtures";
@@ -197,12 +198,46 @@ export function matchAccounts(rows: CsvAccountRow[], accounts: SfAccount[]): Mat
  * demo registry and the real connector registry compose these; only
  * query_records / update_fields differ by provider.
  */
+/**
+ * The value `account_csv` must hold for the bundled sample list to be used.
+ *
+ * A sentinel rather than a default, so choosing demo data is something a caller
+ * DID, recorded in the run's inputs and visible on the receipt — not something
+ * that happened because nobody supplied anything.
+ */
+export const DEMO_ACCOUNT_LIST = "demo:bundled-account-list";
+
 export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
   const registry = new Map<string, CapabilityAdapter>();
 
   registry.set("local.parse_csv", {
     id: "local.parse_csv",
-    read: async () => structuredClone(DEMO_CSV_ROWS),
+    /**
+     * Serves the bundled sample list, and ONLY when it was explicitly asked for.
+     *
+     * This used to be `read: async () => structuredClone(DEMO_CSV_ROWS)` — no
+     * parameters at all. Whatever the spec bound to `account_csv` was ignored,
+     * including nothing: the reconciliation spec declares that input required,
+     * the desktop supplied none, and the run reconciled FIXTURE ROWS end to
+     * end, produced a diff, and published a receipt with ROI for an account
+     * list the user never gave it.
+     *
+     * Reading the value fixes both halves. An unbound input can no longer reach
+     * demo data, and a REAL file path is refused rather than silently answered
+     * with fixtures — this adapter cannot read a file, and pretending otherwise
+     * is how demo output gets mistaken for a result.
+     */
+    read: async (inputs) => {
+      const file = inputs["file"];
+      if (file !== DEMO_ACCOUNT_LIST) {
+        throw new PermanentAdapterError(
+          typeof file === "string" && file.length > 0
+            ? `This demo runtime cannot read "${file}". It only has the bundled sample list.`
+            : "No account list was provided, and this demo runtime will not invent one.",
+        );
+      }
+      return structuredClone(DEMO_CSV_ROWS);
+    },
   });
 
   registry.set("local.transform_columns", {
@@ -244,23 +279,22 @@ export function pureReconciliationAdapters(): Map<string, CapabilityAdapter> {
 export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, CapabilityAdapter> {
   const registry = pureReconciliationAdapters();
 
-  // Read-only browser capabilities: compiled specs for patterns observed on
-  // generic (non-CRM) surfaces resolve to these. Deterministic canned reads so
-  // a read-only agent can complete a run instead of dying on a missing adapter.
-  registry.set("browser.extract_table", {
-    id: "browser.extract_table",
-    read: async () => {
-      await world.guard("browser.extract_table");
-      return DEMO_CSV_ROWS;
-    },
-  });
-  registry.set("browser.extract_structured_fields", {
-    id: "browser.extract_structured_fields",
-    read: async () => {
-      await world.guard("browser.extract_structured_fields");
-      return DEMO_CSV_ROWS.slice(0, 1);
-    },
-  });
+  // NO BROWSER ADAPTERS HERE, deliberately.
+  //
+  // This registry used to serve `browser.extract_table` and
+  // `browser.extract_structured_fields` with DEMO_CSV_ROWS — Salesforce CSV
+  // fixtures returned as "the fields I read off the page". A browser workflow's
+  // read step was therefore answered with invented data that the user would see
+  // as a real observation of their own page.
+  //
+  // The stated reason was "so a read-only agent can complete a run instead of
+  // dying on a missing adapter". That is obsolete: `validateRuntimeCapabilities`
+  // and `requireAdapter` now refuse a spec whose capabilities are unavailable,
+  // with a message naming what is missing. An honest refusal beats a completed
+  // run built on fixtures.
+  //
+  // Real browser capabilities come from `browserAdapters()`, which needs a
+  // transport and the user's origin allowlist.
 
   registry.set("salesforce.query_records", {
     id: "salesforce.query_records",
@@ -292,6 +326,12 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
       for (const change of approvedDiff.changes) {
         const account = world.accounts.find((a) => a.id === change.account_id);
         if (!account) continue;
+        // EXPLICIT: only fields this adapter owns may be written. Previously the
+        // union type was the only thing stopping an arbitrary key being set on
+        // the account object; now a diff naming a field Salesforce does not have
+        // (e.g. a browser control's accessible name) is skipped rather than
+        // silently creating a property.
+        if (!isSfWritableField(change.field)) continue;
         if (change.field === "employee_count") {
           account.employee_count = Number(change.new_value);
         } else {
@@ -310,6 +350,7 @@ export function demoAdapterRegistry(world: DemoSalesforceWorld): Map<string, Cap
       const changes = proposal?.changes ?? [];
       let confirmed = 0;
       for (const change of changes) {
+        if (!isSfWritableField(change.field)) continue;
         const account = world.accounts.find((a) => a.id === change.account_id);
         if (account && String(account[change.field]) === change.new_value) confirmed++;
       }

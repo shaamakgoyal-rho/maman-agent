@@ -6,6 +6,7 @@ import {
   detectionTuned,
   useSettings,
 } from "../../state/settings.js";
+import { setSubtitleBarVisible } from "../../lib/statusbar.js";
 import { useEnrollment } from "../../state/enrollment.js";
 import { invokeCommand, isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle, Toggle } from "../ui.js";
@@ -251,10 +252,10 @@ export function Settings() {
         <Toggle
           id="statusbar-enabled"
           checked={settings.statusbar_enabled}
-          onChange={(on) => {
-            void update({ statusbar_enabled: on });
-            if (isTauri()) void invokeCommand("statusbar_set_visible", { visible: on });
-          }}
+          // The same helper the Home screen uses. Two inlined copies of
+          // "record the preference, then move the window" would drift, and the
+          // drift shows up as a stored `false` over a bar still on screen.
+          onChange={(on) => void setSubtitleBarVisible(on, update)}
           label="Show the status bar while you work"
           description="A small always-on-top line: a green dot when Maman is genuinely observing, plus what it's watching, which agent is being created, and any run waiting for your approval."
         />

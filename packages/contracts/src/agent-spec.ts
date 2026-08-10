@@ -41,8 +41,54 @@ export const agentTriggerSchema = z.discriminatedUnion("type", [
       event_name: z.string().min(1),
     })
     .strict(),
+  /**
+   * Fires when observed WORKFLOW CONTEXT matches — the trigger that makes an
+   * agent proactive rather than a thing the user must remember to run.
+   *
+   * Matching is on the same REDACTED vocabulary patterns are built from
+   * (canonical-token fields), never on content: an agent wakes because "the
+   * user is doing CRM work on records again", not because of anything typed.
+   * `origin` is exact-origin, same comparison rule as actuation allowlists.
+   */
+  z
+    .object({
+      type: z.literal("context"),
+      app_category: z.string().min(1),
+      object_type: z.string().min(1).optional(),
+      origin: z.string().url().startsWith("https://").optional(),
+      /** Suppress re-fires within this window. Bounded: no zero, no forever. */
+      cooldown_seconds: z.number().int().min(30).max(86_400).default(300),
+    })
+    .strict(),
 ]);
 export type AgentTrigger = z.infer<typeof agentTriggerSchema>;
+
+/**
+ * One redacted observation moment, as trigger evaluation sees it.
+ *
+ * Deliberately the canonical-token fields and nothing else — the trigger
+ * service consumes exactly what the pattern engine consumes, so subscribing to
+ * context can never become a side-channel to content.
+ */
+export const workflowContextSchema = z
+  .object({
+    source: z.string().min(1),
+    app_category: z.string().min(1),
+    event_type: z.string().min(1),
+    target_role: z.string(),
+    semantic_type: z.string(),
+    object_type: z.string(),
+    /**
+     * The observed host, exactly as observation recorded it ("acme.example").
+     * A DOMAIN, not an origin: the observer never saw a scheme, and stamping
+     * "https://" on here would be asserting something nobody observed. Trigger
+     * matching compares this against the HOST of the trigger's origin.
+     */
+    domain: z.string().min(1).optional(),
+    occurred_at: utcTimestamp,
+  })
+  .strict();
+export type WorkflowContext = z.infer<typeof workflowContextSchema>;
 
 export const agentInputSchema = z
   .object({
@@ -51,7 +97,19 @@ export const agentInputSchema = z
     type: z.enum(["string", "number", "boolean", "date", "record_reference", "file_reference"]),
     required: z.boolean(),
     sensitivity: z.enum(["public", "internal", "confidential"]),
-    source: z.enum(["user", "trigger", "previous_step"]),
+    /**
+     * Where the value comes from.
+     *
+     * `discovered_on_surface` means the agent resolves it by LOOKING at the
+     * page it is on, before any step executes — the field it will act on, found
+     * by matching what the user was observed doing against the controls that
+     * are really there. It is not `user`: nobody types it in, and labelling it
+     * so would put "you provide: the field to change" in front of someone who
+     * provides no such thing. It is not `previous_step` either: discovery
+     * happens before the first step, and its failure stops the run rather than
+     * producing an output some later step consumes.
+     */
+    source: z.enum(["user", "trigger", "previous_step", "discovered_on_surface"]),
     source_ref: z.string().optional(),
   })
   .strict();

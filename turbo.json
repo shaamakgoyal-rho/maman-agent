@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "//": "Internal packages export TypeScript SOURCE directly (see CLAUDE.md), so a dependent's typecheck, lint and tests all read their dependencies' .ts files. With no `dependsOn`, turbo's default inputs are the package's own files only — a type change in packages/* could not invalidate a cached result in apps/*, and `pnpm -w typecheck` reported 24/24 while apps/api had a genuine cross-package type error. `^typecheck` puts the dependency's hash into the dependent's, which is what closes that.",
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -9,10 +10,14 @@
       "cache": false,
       "persistent": true
     },
-    "lint": {},
-    "typecheck": {},
+    "lint": {
+      "dependsOn": ["^lint"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
     "test": {
-      "dependsOn": []
+      "dependsOn": ["^typecheck"]
     },
     "test:unit": {},
     "test:integration": {

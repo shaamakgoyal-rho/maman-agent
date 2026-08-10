@@ -8,6 +8,8 @@ import {
 } from "@maman/pattern-engine";
 import { DETECTION_LIVE_DEMO } from "../src/state/settings.js";
 import { useRuns } from "../src/lib/runs.js";
+import { compileAgentSpec } from "@maman/agent-runtime";
+import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 
 /**
  * The LIVE demo arc's acceptance test: events shaped exactly like the live
@@ -160,13 +162,81 @@ describe("live arc: same-day repetitions → suggestion → executed run", () =>
     expect(report.runs_matched / report.runs_tested).toBeGreaterThanOrEqual(0.85);
   });
 
-  it("the derived intent compiles and runs: shadow → supervised → approve → applied", async () => {
+  it("the derived intent HONESTLY refuses to compile: the data source was never observed", async () => {
+    // THIS TEST USED TO PIN THE WRONG-AGENT PATHOLOGY. The live pattern is a
+    // CRM edit — the user retypes two fields in Salesforce; no spreadsheet, no
+    // file was ever observed. Yet `update_account_records` matched the
+    // CSV→Salesforce reconciliation recipe on intent alone, so this arc
+    // compiled a CSV-parsing agent demanding an `account_csv` input the user
+    // never mentioned, ran it against demo rows, and the old assertions below
+    // celebrated the result ("shadow → supervised → approve → applied").
+    //
+    // The honest behaviour: the workflow updates records, but WHERE the new
+    // values come from was never seen — so compilation reports exactly that,
+    // as a typed needs_configuration, instead of shipping an unrelated agent.
     const rec = result.recommendations[0]!;
     const candidate = result.candidates.find((c) => c.pattern_id === rec.pattern_id)!;
+    const compile = await compileAgentSpec({
+      candidate,
+      generalized_intent: rec.generalized_intent!,
+      desired_outcome: rec.summary,
+      organization_id: "00000000-0000-7000-8000-000000000002",
+      owner_user_id: OWNER,
+      budgets: {
+        max_runtime_seconds: 300,
+        max_model_tokens: 12_000,
+        max_cost_usd: 1,
+        max_records_read: 1000,
+        max_records_written: 20,
+      },
+      policy: DEFAULT_ORG_POLICY,
+      policy_version_id: "00000000-0000-7000-8000-00000000p001",
+      now: () => new Date("2026-08-01T11:00:00.000Z"),
+    });
+    expect(compile.status).toBe("needs_configuration");
+    if (compile.status !== "needs_configuration") return;
+    expect(compile.missing.map((m) => m.kind)).toContain("data_source");
+
+    // And the run path surfaces the refusal as a clear failure, not a crash —
+    // and NEVER as a completed run against substituted demo data.
+    const runs = useRuns.getState();
+    await runs.startShadow(candidate, rec.generalized_intent, rec.summary);
+    const s = useRuns.getState();
+    expect(s.phase).toBe("failed");
+    expect(s.error).toMatch(/where the new values come from/);
+    expect(s.receipt).toBeNull();
+  });
+
+  it("the EXPLICIT reconciliation demo arc still runs end to end", async () => {
+    // The demo workflow really is spreadsheet→Salesforce reconciliation (both
+    // halves of the evidence present), so the explicit intent still compiles
+    // and the full shadow → approve → applied arc works.
+    const demoCandidate = {
+      pattern_id: uuidv7(),
+      owner_user_id: OWNER,
+      first_seen_at: "2026-07-01T09:00:00.000Z",
+      last_seen_at: "2026-07-21T09:00:00.000Z",
+      occurrence_count: 23,
+      distinct_day_count: 12,
+      median_duration_ms: 480_000,
+      p90_duration_ms: 600_000,
+      canonical_sequence: [
+        "chrome:spreadsheet:table_read:grid:account_list:account",
+        "chrome:crm:record_opened:row:account:account",
+        "chrome:crm:record_updated:field:account_field:account",
+      ],
+      episode_ids: [],
+      similarity_mean: 0.95,
+      repeatability_score: 0.9,
+      feasibility_score: 0.8,
+      risk_score: 0.3,
+      projected_minutes_saved_weekly: 64,
+      opportunity_score: 0.72,
+      status: "eligible" as const,
+    };
     const runs = useRuns.getState();
 
-    // Shadow: full read path, a real proposed diff, zero writes.
-    await runs.startShadow(candidate, rec.generalized_intent, rec.summary);
+    await runs.startShadow(demoCandidate, "reconcile_account_list", "Reconcile accounts.");
     let s = useRuns.getState();
     expect(s.phase).toBe("completed");
     expect(s.diff).not.toBeNull();
@@ -174,20 +244,12 @@ describe("live arc: same-day repetitions → suggestion → executed run", () =>
     expect(shadowChanges).toBeGreaterThan(0);
     expect(s.receipt!.totals.writes_completed).toBe(0);
 
-    // Supervised: pauses at the approval gate, applies only after approval.
-    await runs.startSupervised(candidate, rec.generalized_intent, rec.summary);
+    await runs.startSupervised(demoCandidate, "reconcile_account_list", "Reconcile accounts.");
     s = useRuns.getState();
     expect(s.phase).toBe("waiting_approval");
-    expect(s.pending).not.toBeNull();
     await runs.approve();
     s = useRuns.getState();
     expect(s.phase).toBe("completed");
     expect(s.receipt!.totals.writes_completed).toBe(shadowChanges);
-
-    // The demo world persisted: a fresh shadow now finds nothing left to change.
-    await runs.startShadow(candidate, rec.generalized_intent, rec.summary);
-    s = useRuns.getState();
-    expect(s.phase).toBe("completed");
-    expect(s.diff!.summary.change_count).toBeLessThan(shadowChanges);
   });
 });

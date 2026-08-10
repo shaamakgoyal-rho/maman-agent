@@ -142,10 +142,13 @@ describe("compiler — model provider wiring (M14)", () => {
     const result = await compileAgentSpec(
       request({ model, generalized_intent: "unknown_custom_intent" }),
     );
-    expect(result.status).toBe("blocked");
+    // The hostile draft is REJECTED (the safety property), and the compiler
+    // then reports the workflow as needing configuration — typed, actionable —
+    // rather than a generic dead-end "blocked".
+    expect(result.status).toBe("needs_configuration");
   });
 
-  it("falls back to blocked when the model draft would exceed the compile budget", async () => {
+  it("falls back to needs_configuration when the model draft would exceed the compile budget", async () => {
     const model = new MockModel({
       draft: {
         ok: true,
@@ -160,7 +163,8 @@ describe("compiler — model provider wiring (M14)", () => {
         budgets: { ...request().budgets, max_cost_usd: 0.1 },
       }),
     );
-    expect(result.status).toBe("blocked");
+    // Over-budget draft dropped; the workflow honestly needs configuration.
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("no model provided → deterministic recipe with zero model cost", async () => {

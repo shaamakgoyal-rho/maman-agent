@@ -29,9 +29,10 @@ function request(over: Record<string, unknown> = {}) {
 }
 
 describe("the action set is closed", () => {
-  it("accepts exactly the six verbs", () => {
+  it("accepts exactly the seven verbs", () => {
     const kinds = [
       { kind: "navigate", url: `${ORIGIN}/x` },
+      { kind: "list_controls", roles: ["textbox"], limit: 40 },
       { kind: "read_field", target: { role: "textbox", name: "A" } },
       { kind: "focus_field", target: { role: "textbox", name: "A" } },
       { kind: "set_value", target: { role: "textbox", name: "A" }, value: "v" },
@@ -40,6 +41,21 @@ describe("the action set is closed", () => {
     ];
     for (const k of kinds) expect(browserActionSchema.safeParse(k).success).toBe(true);
     expect(browserActionSchema.options).toHaveLength(kinds.length);
+  });
+
+  it("gives list_controls no way to ask for everything, or for an unbounded page", () => {
+    // The caller must say which roles it wants and how many it will accept.
+    // An "all roles" or unlimited listing is how a shape read becomes a bulk
+    // page read, so neither is representable.
+    const bad = [
+      { kind: "list_controls", roles: [], limit: 40 },
+      { kind: "list_controls", roles: ["textbox"], limit: 0 },
+      { kind: "list_controls", roles: ["textbox"], limit: 500 },
+      { kind: "list_controls", roles: ["everything"], limit: 40 },
+      { kind: "list_controls", roles: ["textbox"] },
+      { kind: "list_controls", roles: ["textbox"], limit: 40, include_values: true },
+    ];
+    for (const a of bad) expect(browserActionSchema.safeParse(a).success).toBe(false);
   });
 
   it("has no script, eval, or selector escape hatch", () => {

@@ -133,7 +133,7 @@ describe("the live browser workflow compiles to a real agent", () => {
         "chrome:spreadsheet:table_read:grid:account_list:account",
       ]),
     );
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("REFUSES when the observed steps map to no capability at all", async () => {
@@ -142,7 +142,7 @@ describe("the live browser workflow compiles to a real agent", () => {
     const result = await compileAgentSpec(
       request(["macos_ax:other:value_committed:AXTextField:-:-"]),
     );
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("needs_configuration");
   });
 
   it("leaves CRM reconciliation intents on their own recipe", async () => {
@@ -152,5 +152,78 @@ describe("the live browser workflow compiles to a real agent", () => {
     );
     if (result.status !== "valid") throw new Error("expected valid");
     expect(result.spec.steps.some((s) => s.capability_id.startsWith("salesforce."))).toBe(true);
+  });
+});
+
+/**
+ * What the user is shown about a compiled agent.
+ *
+ * The complaint these pin: every agent read "Helper: automate record workflow",
+ * which names the compiler's own label rather than the work. Two agents over
+ * different fields carried identical copy, so there was nothing to check before
+ * approving one.
+ */
+describe("the compiled agent says concretely what it does", () => {
+  /** The same shape, but the source recorded what the fields meant. */
+  const WITH_SEMANTICS = [
+    "chrome_ext:browser:element_focused:textbox:phone:contact",
+    "chrome_ext:browser:value_committed:textbox:phone:contact",
+  ];
+
+  it("names the observed field, the record and the single write", async () => {
+    const result = await compileAgentSpec(request(WITH_SEMANTICS));
+    if (result.status !== "valid") throw new Error("expected valid");
+    expect(result.spec.name).toBe("Update the phone field on this record");
+    expect(result.spec.description).toBe(
+      "Set the phone field on the record you have open to a value you give me, then read it back to confirm it took.",
+    );
+    expect(result.spec.description).not.toMatch(/^Helper:/);
+  });
+
+  it("says it will have to be pointed at the field when nothing named it", async () => {
+    // The live device's own pattern: AX gave no semantic type, so the honest
+    // copy is that the agent will find the field at run time — not a confident
+    // noun it cannot back up, and not the old generic label either.
+    const result = await compileAgentSpec(request(LIVE_SEQUENCE));
+    if (result.status !== "valid") throw new Error("expected valid");
+    expect(result.spec.description).toContain("the field you point me at");
+    expect(result.spec.description).not.toMatch(/^Helper:/);
+  });
+
+  it("gives a plan whose write step is exactly one line, and says so", async () => {
+    const result = await compileAgentSpec(request(WITH_SEMANTICS));
+    if (result.status !== "valid") throw new Error("expected valid");
+    expect(result.intent_plan).toContain(
+      "After you approve, set the phone field. This is the only write.",
+    );
+    // The plan's write count must match the spec's. A plan that understated
+    // the writes would be an approval obtained under a false description.
+    expect(result.intent_plan.filter((l) => /only write/.test(l))).toHaveLength(
+      result.spec.steps.filter((s) => s.mode === "write").length,
+    );
+  });
+
+  it("NEVER describes a write for a helper that compiled to reads only", async () => {
+    const result = await compileAgentSpec(
+      request([
+        "chrome_ext:browser:element_focused:textbox:phone:contact",
+        "macos_ax:browser:value_committed:AXStaticText:-:-",
+      ]),
+    );
+    if (result.status !== "valid") throw new Error("expected valid");
+    expect(result.spec.steps.every((s) => s.mode === "read")).toBe(true);
+    expect(result.spec.name).toBe("Read the phone field on this record");
+    expect(result.intent_plan.some((l) => /write|approve/i.test(l))).toBe(false);
+  });
+
+  it("stays silent rather than describing an agent no intent covers", async () => {
+    // The reconciliation recipe emits Salesforce and CSV steps, which no
+    // catalogued intent claims. A concrete-sounding plan the spec does not
+    // implement is worse than no plan, so this must be empty and the old
+    // deterministic name must remain.
+    const result = await compileAgentSpec(request(LIVE_SEQUENCE, "reconcile_account_list"));
+    if (result.status !== "valid") throw new Error("expected valid");
+    expect(result.intent_plan).toEqual([]);
+    expect(result.spec.name).toBe("Reconcile account lists with Salesforce");
   });
 });

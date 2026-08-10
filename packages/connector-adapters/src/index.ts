@@ -15,4 +15,8 @@ export {
   type SalesforceAdapterConfig,
 } from "./salesforce.js";
 export { googleSheetsCapabilities, type GoogleSheetsAdapterConfig } from "./google-sheets.js";
-export { realAdapterRegistry, type RealRegistryConfig } from "./registry.js";
+export {
+  realAdapterRegistry,
+  ConnectorNotLinkedError,
+  type RealRegistryConfig,
+} from "./registry.js";

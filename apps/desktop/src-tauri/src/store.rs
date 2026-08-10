@@ -308,6 +308,41 @@ const COLUMN_MIGRATIONS: &[&str] = &[
     // L2 template recognition: "<pack_domain>/<workflow_id>", NULL for novel
     // patterns. Plaintext taxonomy id, same privacy class as app_category.
     "ALTER TABLE pattern_candidates ADD COLUMN template_id TEXT",
+    // Which verification implementation produced runs_tested/runs_matched.
+    // NULL = written by the pre-VERIFICATION_SCHEMA logic, whose scores cannot
+    // be trusted (see DATA_MIGRATIONS).
+    "ALTER TABLE pattern_candidates ADD COLUMN verification_schema INTEGER",
+];
+
+/// Current verification implementation. Bump when a change invalidates stored
+/// scores, and add the matching invalidation to DATA_MIGRATIONS.
+pub const VERIFICATION_SCHEMA: i64 = 2;
+
+/// One-time DATA migrations, run after the column migrations.
+///
+/// Each must be idempotent: they run on every open, so every statement is
+/// guarded by the state it repairs (a `WHERE` that stops matching once applied).
+const DATA_MIGRATIONS: &[&str] = &[
+    // INVALIDATE PRE-SCHEMA-2 VERIFICATION SCORES.
+    //
+    // Schema 1 replay could return `verdict: "match"` after filtering every
+    // step out of the comparison, so a pattern whose tokens carried neither
+    // semantic_type nor object_type scored a full match against ANY trace —
+    // including unrelated and empty ones. Real devices persisted rows such as
+    // 21 tested / 21 matched that proved nothing, and the UI showed them a
+    // "verified" badge.
+    //
+    // Those numbers cannot be re-interpreted, only discarded: clear them so the
+    // pattern reverts to unverified and is re-checked by the current logic on
+    // the next pass. The candidate row itself, its history and its traces are
+    // untouched — only the false claim is removed.
+    "UPDATE pattern_candidates
+       SET runs_tested = NULL,
+           runs_matched = NULL,
+           last_verified_at = NULL,
+           verification_detail = NULL
+     WHERE verification_schema IS NULL
+       AND (runs_tested IS NOT NULL OR runs_matched IS NOT NULL)",
 ];
 
 pub struct LocalStore {
@@ -421,6 +456,12 @@ impl LocalStore {
                     return Err(StoreError::Db(e));
                 }
             }
+        }
+        // Data migrations run AFTER the columns they reference exist. These are
+        // not best-effort: a failure here would leave a known-false verification
+        // claim in place, so it propagates.
+        for migration in DATA_MIGRATIONS {
+            sqlx::query(migration).execute(&pool).await?;
         }
         Ok(Self {
             pool,
@@ -1092,13 +1133,17 @@ impl LocalStore {
         let blob = self.encrypt(&plaintext, &aad)?;
         let result = sqlx::query(
             "UPDATE pattern_candidates
-             SET runs_tested = ?, runs_matched = ?, last_verified_at = ?, verification_detail = ?
+             SET runs_tested = ?, runs_matched = ?, last_verified_at = ?, verification_detail = ?,
+                 verification_schema = ?
              WHERE pattern_id = ?",
         )
         .bind(runs_tested)
         .bind(runs_matched)
         .bind(now_iso())
         .bind(blob)
+        // Stamps WHICH implementation produced these numbers, so a future
+        // correctness fix can invalidate them precisely instead of guessing.
+        .bind(VERIFICATION_SCHEMA)
         .bind(pattern_id)
         .execute(&self.pool)
         .await?;
@@ -2078,6 +2123,75 @@ mod domain_ingest_tests {
         store.insert_event(&event, 30).await.unwrap();
 
         assert!(store.watched_dates(50).await.unwrap().is_empty());
+    }
+
+    /// A stored verification score written by the pre-schema-2 replay logic is a
+    /// claim we now know could be vacuous (a "match" over zero compared steps).
+    /// Re-opening the store must discard it so the pattern reads as unverified,
+    /// while leaving the candidate itself intact — and must NOT touch a score
+    /// stamped by the current implementation.
+    #[tokio::test]
+    async fn legacy_verification_scores_are_invalidated_not_trusted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.sqlite");
+        let candidate = json!({ "pattern_id": "p-legacy", "status": "eligible" });
+
+        {
+            let store =
+                LocalStore::open(&path, &StaticKeyProvider(TEST_KEY), "user-1").await.unwrap();
+            store
+                .candidate_upsert("p-legacy", "eligible", 0.7, "2026-08-01", "2026-08-05", &candidate)
+                .await
+                .unwrap();
+            // Simulate the old writer: scores present, no schema stamp.
+            sqlx::query(
+                "UPDATE pattern_candidates
+                   SET runs_tested = 21, runs_matched = 21, last_verified_at = '2026-08-07T00:00:00Z',
+                       verification_schema = NULL
+                 WHERE pattern_id = 'p-legacy'",
+            )
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        // Re-open: the data migration runs.
+        let store = LocalStore::open(&path, &StaticKeyProvider(TEST_KEY), "user-1").await.unwrap();
+        let row: (Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT runs_tested, runs_matched, last_verified_at FROM pattern_candidates
+              WHERE pattern_id = 'p-legacy'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, None, "stale runs_tested must be cleared");
+        assert_eq!(row.1, None, "stale runs_matched must be cleared");
+        assert_eq!(row.2, None, "stale last_verified_at must be cleared");
+
+        // The candidate itself survives — only the false claim was removed.
+        let still_there: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pattern_candidates WHERE pattern_id = 'p-legacy'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(still_there, 1);
+
+        // A score written by the CURRENT implementation is stamped and preserved
+        // across the next open.
+        store
+            .candidate_verification_save("p-legacy", 5, 4, &json!([]))
+            .await
+            .unwrap();
+        drop(store);
+        let store = LocalStore::open(&path, &StaticKeyProvider(TEST_KEY), "user-1").await.unwrap();
+        let kept: (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT runs_tested, runs_matched, verification_schema FROM pattern_candidates
+              WHERE pattern_id = 'p-legacy'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, (Some(5), Some(4), Some(VERIFICATION_SCHEMA)));
     }
 
     #[tokio::test]

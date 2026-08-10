@@ -4,6 +4,7 @@
 //! Commands validate their inputs, and window-sensitive commands check the
 //! calling window's label (the pet window may never reach privileged surfaces).
 
+pub mod agent_browser;
 pub mod browser_bridge;
 pub mod browser_relay;
 pub mod domain;
@@ -11,6 +12,7 @@ pub mod observer;
 pub mod redaction;
 pub mod store;
 pub mod sync;
+pub mod trigger_service;
 pub mod vision;
 
 use std::collections::HashMap;
@@ -1114,6 +1116,58 @@ fn browser_relay_paired() -> bool {
         .is_ok()
 }
 
+// ---- the agent's own browser window (see agent_browser.rs) ----
+//
+// Three panel-only commands, mirroring the `OwnWindowHost` interface the pure
+// actuator needs. They are deliberately thin: the allowlist comes from the
+// panel's settings on every call rather than being cached here, so revoking a
+// site takes effect on the next action instead of the next restart.
+
+#[tauri::command]
+async fn agent_browser_open<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    url: String,
+    allowed_origins: Vec<String>,
+) -> Result<(), String> {
+    require_panel(&window)?;
+    agent_browser::open_agent_browser(&app, &url, &allowed_origins)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The origin the agent's window is showing, per the HOST's view of the webview.
+/// Never asks the page: `document.location` is page-controlled.
+#[tauri::command]
+fn agent_browser_origin<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<Option<String>, String> {
+    require_panel(&window)?;
+    Ok(agent_browser::current_origin(&app))
+}
+
+/// Evaluates one in-page expression and returns the page's answer verbatim.
+///
+/// The answer is UNTRUSTED: it is re-parsed and re-validated by
+/// `parseAgentEnvelope`, which checks the echoed request id and rejects anything
+/// it cannot attribute to the action that was sent.
+#[tauri::command]
+async fn agent_browser_evaluate<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    expression: String,
+) -> Result<String, String> {
+    require_panel(&window)?;
+    agent_browser::evaluate_in_page(&app, &expression)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn agent_browser_close<R: Runtime>(app: AppHandle<R>, window: Window<R>) -> Result<(), String> {
+    require_panel(&window)?;
+    agent_browser::close_agent_browser(&app);
+    Ok(())
+}
+
 /// Local agent persistence (drafts + immutable versions; demo/local mode).
 #[tauri::command]
 fn agents_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
@@ -1132,6 +1186,37 @@ fn agents_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), String
         return Err("payload too large".into());
     }
     let path = config_path(&app, "agents.json")?;
+    fs::write(&path, json.clone()).map_err(|e| format!("write failed: {e}"))?;
+    // The daemon's records come from this file; a save IS a trigger reload, so
+    // a newly created agent is proactive the moment its record exists.
+    trigger_service::reload(&app, Some(&json));
+    Ok(())
+}
+
+/// Learned-workflow persistence: what the user TAUGHT Maman — field targets,
+/// configured values, success conditions.
+///
+/// Local-only by construction. These are things the user typed about their own
+/// work; nothing here is ever queued for sync, and the file lives beside the
+/// other config rather than in the encrypted event store because it contains no
+/// observations — only configuration the user can read back and edit.
+#[tauri::command]
+fn learned_workflows_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    let path = config_path(&app, "learned-workflows.json")?;
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+
+#[tauri::command]
+fn learned_workflows_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&json).map_err(|e| format!("invalid JSON: {e}"))?;
+    if json.len() > 4 * 1024 * 1024 {
+        return Err("payload too large".into());
+    }
+    let path = config_path(&app, "learned-workflows.json")?;
     fs::write(&path, json).map_err(|e| format!("write failed: {e}"))?;
     Ok(())
 }
@@ -2324,6 +2409,52 @@ fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
 /// observer's allowlist/private/paused config is pushed once at spawn and can
 /// go stale, so this guarantees a freshly paused / newly private / hard-denied
 /// context is dropped even before the sidecar restarts (spec §10 central gate).
+/// Emits the redacted context of one stored event on the app-event channel the
+/// panel's agent service listens on. Canonical-token fields only, never content
+/// — field-for-field what `contextOf` emits for the JS ingest paths, so live
+/// and simulated events wake triggers identically.
+fn emit_workflow_context<R: Runtime>(
+    app: &AppHandle<R>,
+    event: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let s = |path: &[&str]| -> Option<String> {
+        let mut v = event;
+        for key in path {
+            v = v.get(key)?;
+        }
+        v.as_str().map(|x| x.to_string())
+    };
+    let (Some(source), Some(event_type), Some(occurred_at), Some(display)) = (
+        s(&["source"]),
+        s(&["event_type"]),
+        s(&["occurred_at"]),
+        s(&["app", "display_name"]),
+    ) else {
+        return None;
+    };
+    let domain = s(&["app", "domain"]);
+    let context = serde_json::json!({
+        "source": source,
+        "app_category": store::categorize_app(&display, domain.as_deref()),
+        "event_type": event_type,
+        "target_role": s(&["target", "role"]).unwrap_or_else(|| "-".into()),
+        "semantic_type": s(&["target", "semantic_type"]).unwrap_or_else(|| "-".into()),
+        "object_type": s(&["context", "object_type"]).unwrap_or_else(|| "-".into()),
+        "occurred_at": occurred_at,
+    });
+    let mut context = context;
+    if let Some(d) = domain {
+        // The bare host, exactly as observed — matching the JS emitter. The
+        // scheme is the trigger's business, not the observer's.
+        context["domain"] = serde_json::json!(d);
+    }
+    let _ = app.emit(
+        "maman-app-events",
+        serde_json::json!({ "type": "workflow_context", "context": context }),
+    );
+    Some(context)
+}
+
 async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
     let settings = load_gate_settings(app);
     let mut deltas = IngestResult {
@@ -2343,7 +2474,20 @@ async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_jso
             };
             if let Some(store) = guard.as_mut() {
                 match store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await {
-                    Ok(_) => deltas.stored += 1,
+                    Ok(_) => {
+                        deltas.stored += 1;
+                        // Trigger evaluation hears about STORED live events. The
+                        // payload is the canonical-token vocabulary only — the
+                        // same redacted fields patterns are built from — so this
+                        // channel cannot carry content. Without it, live relay
+                        // work was invisible to JS and agents could only be
+                        // proactive about simulated events.
+                        if let Some(context) = emit_workflow_context(app, event) {
+                            // The DAEMON half: evaluated in Rust so a firing
+                            // happens with every webview closed.
+                            trigger_service::evaluate(app, &context);
+                        }
+                    }
                     Err(store::StoreError::ForbiddenField(_)) => deltas.rejected_forbidden += 1,
                     Err(_) => {}
                 }
@@ -2624,6 +2768,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(StoreState(Mutex::new(None)))
+        .manage(trigger_service::TriggerServiceState::default())
         .manage(KeyAcquireState(store::GuardedKeyAcquire::new()))
         .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
         .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
@@ -2635,13 +2780,20 @@ pub fn run() {
             hide_panel,
             quit_app,
             events_ingest,
+            trigger_service::staged_runs_drain,
             events_timeline,
             events_pattern_features,
             suggestions_load,
             suggestions_save,
+            learned_workflows_load,
+            learned_workflows_save,
             agents_load,
             agents_save,
             browser_relay_paired,
+            agent_browser_open,
+            agent_browser_origin,
+            agent_browser_evaluate,
+            agent_browser_close,
             events_delete,
             events_delete_all,
             events_delete_app,
@@ -2693,6 +2845,15 @@ pub fn run() {
             setup_statusbar(&app.handle().clone());
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
+            // The daemon loads persisted agents at startup, so triggers from a
+            // previous session are live before any webview asks for anything.
+            {
+                let handle = app.handle().clone();
+                let agents = config_path(&handle, "agents.json")
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p).ok());
+                trigger_service::reload(&handle, agents.as_deref());
+            }
             start_sync_loop(app.handle().clone());
             start_observer_supervisor(app.handle().clone());
 

@@ -13,8 +13,23 @@ import {
   type ModelUsage,
   type NamingInput,
 } from "@maman/model-provider";
+import {
+  candidateIntents,
+  describeIntentPlan,
+  describeIntentPlanSteps,
+  describeIntentTitle,
+  resolveIntent,
+  type AutomationIntent,
+  type ResolvedIntent,
+} from "@maman/intent-layer";
 import { evaluateSpec, type EvaluationContext, type OrgPolicy } from "@maman/policy-engine";
 import { validateAgentSpec, type ValidationIssue } from "./validator.js";
+import {
+  describeMissingCapabilities,
+  validateRuntimeCapabilities,
+  type CapabilityRuntime,
+  type MissingCapability,
+} from "./runtime-capabilities.js";
 
 /**
  * AgentSpec compiler (spec §13). Order of authority:
@@ -36,6 +51,16 @@ export type CompileRequest = {
   policy_version_id: string;
   now: () => Date;
   model?: ModelProvider;
+  /**
+   * The runtime that will execute the result. When supplied, a recipe may only
+   * emit steps this runtime has an adapter for, in the mode the step needs; a
+   * workflow whose required capabilities are unavailable returns
+   * `needs_runtime` instead of a spec that would crash mid-run.
+   *
+   * Optional so existing callers keep compiling (they then get the previous,
+   * runtime-blind behaviour) — but the desktop and worker paths pass it.
+   */
+  runtime?: CapabilityRuntime;
 };
 
 export type CompileResult =
@@ -43,15 +68,66 @@ export type CompileResult =
       status: "valid";
       spec: AgentSpec;
       plain_language_plan: string[];
+      /**
+       * What the agent does, in terms of the real workflow — the field it will
+       * look for, the surface, and which single step writes.
+       *
+       * Kept separate from `plain_language_plan` rather than replacing it. That
+       * plan is derived from the spec's own steps and budgets, so it is the
+       * authoritative account of what will execute; this is the readable one.
+       * Empty when no catalogued intent fits the compiled steps, because a
+       * concrete-sounding plan the spec does not implement is a lie a user
+       * would act on.
+       */
+      intent_plan: string[];
       policy_decision: PolicyDecision;
       warnings: string[];
       compiled_by: "recipe" | "model";
+      /**
+       * Audit trail: which observed pattern, which derived intent, and which
+       * recipe (or "model") produced this spec. Together with the spec's
+       * `source_pattern_id` this makes every compiled agent traceable back to
+       * the evidence it came from.
+       */
+      compiled_from: { pattern_id: string; generalized_intent: string; recipe: string };
       /** Model usage across naming + drafting for this compile (null if none). */
       model_usage: ModelUsage | null;
       /** Priced compile cost from the usage above ($0 in demo mode). */
       model_cost_usd: number;
     }
-  | { status: "blocked"; issues: ValidationIssue[]; message: string };
+  | { status: "blocked"; issues: ValidationIssue[]; message: string }
+  /**
+   * A recipe covers this workflow, but the selected runtime cannot execute it.
+   * Distinct from `blocked` on purpose: `blocked` means "we do not know how to
+   * do this", while this means "we know how, but not here" — the user needs to
+   * connect or install something, not describe their workflow differently.
+   */
+  | {
+      status: "needs_runtime";
+      runtime_id: string;
+      missing: MissingCapability[];
+      message: string;
+    }
+  /**
+   * The workflow was recognised, but observation alone did not capture enough
+   * to compile it safely — the user must teach the missing pieces. This is the
+   * typed replacement for two dishonest behaviours: silently compiling an
+   * unrelated generic recipe (an observed CRM-edit pattern used to become the
+   * CSV→Salesforce reconciliation agent, inventing an `account_csv` input the
+   * user never mentioned), and a generic "couldn't draft this" for workflows
+   * that are perfectly automatable once configured.
+   */
+  | {
+      status: "needs_configuration";
+      missing: MissingConfiguration[];
+      message: string;
+    };
+
+/** One concrete thing observation could not learn and the user must provide. */
+export type MissingConfiguration = {
+  kind: "data_source" | "field_mapping" | "target" | "success_condition" | "workflow_definition";
+  detail: string;
+};
 
 /** Copy the model may set (title/summary only); deterministic values win. */
 type NameCopy = { title: string; summary: string } | null;
@@ -59,6 +135,9 @@ type NameCopy = { title: string; summary: string } | null;
 // ---- deterministic recipes ----
 
 type Recipe = {
+  /** Stable identity, recorded on the compile result for the audit trail
+   * (observed pattern → intent → recipe → spec). */
+  id: string;
   /** Whether this recipe safely covers the given intent AND candidate — some
    * recipes are shaped by what was actually observed, not the intent alone. */
   matches: (intent: string, req: CompileRequest) => boolean;
@@ -68,6 +147,48 @@ type Recipe = {
     assertions: AgentSpec["assertions"];
   };
 };
+
+/**
+ * Whether the compile target can execute `capabilityId`. With no runtime
+ * supplied the answer is "assume yes" — the previous behaviour, kept so
+ * existing callers are unaffected.
+ */
+function runtimeHas(req: CompileRequest, capabilityId: string): boolean {
+  if (!req.runtime) return true;
+  if (!req.runtime.available.has(capabilityId)) return false;
+  return (req.runtime.unmet_prerequisites?.get(capabilityId) ?? undefined) === undefined;
+}
+
+/** Capabilities the browser recipe will emit for this candidate. */
+function requiredForBrowserRecipe(req: CompileRequest): string[] {
+  const mapped = new Set(req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t)));
+  const required = ["browser.extract_structured_fields"];
+  if (mapped.has("browser.extract_table")) required.push("browser.extract_table");
+  if (mapped.has("browser.supervised_form_fill")) {
+    required.push("browser.propose_form_fill", "browser.supervised_form_fill");
+  }
+  return required;
+}
+
+/**
+ * Input key the browser recipe binds its field targets to.
+ *
+ * Exported because the run path must fill exactly this key from discovery, and
+ * a mismatched string here would fail as "no fields configured" — the same
+ * unhelpful error this whole path exists to remove.
+ */
+export const DISCOVERED_FIELDS_INPUT = "discovered_fields";
+
+/**
+ * Input key carrying the values a browser write will set.
+ *
+ * Separate from the discovered fields on purpose: WHICH control to touch is
+ * something the agent can find by looking, and WHAT to put in it is not. Those
+ * two answers have different sources and different failure modes, and merging
+ * them into one input would hide the fact that only one of them can be
+ * discovered.
+ */
+export const FIELD_VALUES_INPUT = "field_values";
 
 /** Derived intents the deterministic naming emits for CRM update patterns. */
 const UPDATE_RECORDS_INTENT = /^update_([a-z0-9_]+)_records$/;
@@ -114,13 +235,49 @@ const step = (
 };
 
 /**
+ * Evidence that the observed workflow actually HAS a tabular data source and a
+ * CRM destination — the two halves the reconciliation recipe wires together.
+ * The recipe's shape (parse a file → match rows → update Salesforce) is only
+ * honest when both halves were seen.
+ */
+function looksLikeReconciliation(req: CompileRequest): boolean {
+  const parts = req.candidate.canonical_sequence.map((t) => {
+    const [, category = "-", eventType = "-"] = t.split(":");
+    return { category, eventType };
+  });
+  const hasTabularSource = parts.some(
+    (p) => p.category === "spreadsheet" || p.eventType === "table_read",
+  );
+  const hasCrmDestination = parts.some((p) => p.category === "crm");
+  return hasTabularSource && hasCrmDestination;
+}
+
+/**
  * The primary demo recipe: account-list reconciliation (spec §24 exactly).
- * Also covers the derived update_<object>_records intents that live-observed
- * CRM edit patterns produce — same safe shape (read → match → propose →
- * approved write → report), with the queried object taken from the intent.
+ *
+ * MATCHES ON EVIDENCE, NOT INTENT ALONE. It previously accepted any
+ * `update_<object>_records` intent — so a live-observed CRM edit pattern (a
+ * user retyping two fields in Salesforce, no spreadsheet, no file anywhere)
+ * compiled into THIS recipe: a CSV-parsing, row-matching agent demanding an
+ * `account_csv` input the user never mentioned, whose steps 1, 2, 4 and 7 the
+ * user never performed. An ERP invoice workflow did the same. The suggestion
+ * card then described a workflow the compiled agent does not implement.
+ *
+ * The split is explicit-vs-derived:
+ * - `reconcile_account_list` is the recipe's own name — an EXPLICIT selection
+ *   (the naming layer only derives it from crm+spreadsheet evidence, and a
+ *   teach/configure flow sets it deliberately). It always matches.
+ * - `update_<object>_records` is DERIVED from any CRM-edit pattern, so it
+ *   additionally requires the observed sequence to contain a tabular source
+ *   AND a CRM destination. CRM edits without a seen source are a real
+ *   automation opportunity — but the missing half must be TAUGHT, so they
+ *   return `needs_configuration` (below) instead of an unrelated agent.
  */
 const RECONCILIATION_RECIPE: Recipe = {
-  matches: (intent) => intent === "reconcile_account_list" || UPDATE_RECORDS_INTENT.test(intent),
+  id: "reconciliation-v1",
+  matches: (intent, req) =>
+    intent === "reconcile_account_list" ||
+    (UPDATE_RECORDS_INTENT.test(intent) && looksLikeReconciliation(req)),
   build: (req) => ({
     inputs: [
       {
@@ -256,16 +413,47 @@ const BROWSER_WORKFLOW_INTENT = /^automate_([a-z0-9_]+)_workflow$/;
  * blocked (honest) rather than compiling a helper that ignores half the work.
  */
 const BROWSER_WORKFLOW_RECIPE: Recipe = {
+  id: "browser-workflow-v1",
   matches: (intent, req) => {
     if (!BROWSER_WORKFLOW_INTENT.test(intent)) return false;
     const mapped = req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t));
-    return mapped.length > 0 && mapped.every((id) => id.startsWith("browser."));
+    if (mapped.length === 0 || !mapped.every((id) => id.startsWith("browser."))) return false;
+    // A recipe must not emit steps the target runtime cannot execute. Without
+    // this the write branch below produced browser.propose_form_fill and
+    // browser.supervised_form_fill, which NO adapter registry implements, and
+    // the desktop run path passed the resulting `undefined` adapter into the
+    // run engine — a TypeError mid-run instead of an honest refusal.
+    return requiredForBrowserRecipe(req).every((id) => runtimeHas(req, id));
   },
   build: (req) => {
     const mapped = new Set(
       req.candidate.canonical_sequence.flatMap((t) => capabilitiesForToken(t)),
     );
     const writes = mapped.has("browser.supervised_form_fill");
+
+    /**
+     * The fields this agent will act on, resolved by LOOKING at the page.
+     *
+     * Every step below used to bind only `page: "current_page"`, and the read
+     * adapter wants `fields`. Nothing supplied them, so the first step of every
+     * compiled browser agent threw "Teach the workflow which fields matter
+     * first" — the spec compiled, passed validation, and could not run.
+     *
+     * Declaring it as an input with `discovered_on_surface` is what makes the
+     * spec honest about the gap AND closes it: the run path resolves the intent
+     * against the live controls before step one and binds this, or refuses
+     * before anything executes.
+     */
+    const inputs: AgentSpec["inputs"] = [
+      {
+        key: DISCOVERED_FIELDS_INPUT,
+        label: "The fields on the page, which I find by looking",
+        type: "string",
+        required: true,
+        sensitivity: "internal",
+        source: "discovered_on_surface",
+      },
+    ];
 
     const steps: AgentStep[] = [
       step(
@@ -274,7 +462,10 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
         "Read the fields on the open page",
         "browser.extract_structured_fields",
         "read",
-        { page: { source: "literal", value: "current_page" } },
+        {
+          page: { source: "literal", value: "current_page" },
+          fields: { source: "agent_input", ref: DISCOVERED_FIELDS_INPUT },
+        },
         "page_fields",
       ),
     ];
@@ -292,6 +483,14 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
       );
     }
     if (writes) {
+      inputs.push({
+        key: FIELD_VALUES_INPUT,
+        label: "What the field should say",
+        type: "string",
+        required: true,
+        sensitivity: "internal",
+        source: "user",
+      });
       steps.push(
         step(
           steps.length + 1,
@@ -299,7 +498,17 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
           "Propose the form fill",
           "browser.propose_form_fill",
           "propose_write",
-          { fields: { source: "step_output", ref: "page_fields" } },
+          // The VALUES to write, which come from the user and from nowhere else.
+          //
+          // This used to bind `page_fields` — the read step's output, whose
+          // shape is `{origin, values, unread}` and not the `{name, value}`
+          // pairs a proposal needs. So the write branch could not run either,
+          // and failed with "No field values were configured, so there is
+          // nothing to propose." The deeper problem the old binding hid is that
+          // NOTHING supplied a value: no page reveals what a person intends to
+          // type, so this has to be asked for, and saying so is the honest
+          // shape.
+          { fields: { source: "agent_input", ref: FIELD_VALUES_INPUT } },
           "proposed_fill",
         ),
         step(
@@ -320,13 +529,18 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
           "read",
           {
             page: { source: "literal", value: "current_page" },
+            // The SAME discovered fields step one read. The verification is
+            // only a verification if it re-reads the control that was written;
+            // leaving this unbound made the readback throw "no fields were
+            // configured" and take the whole run down with it.
+            fields: { source: "agent_input", ref: DISCOVERED_FIELDS_INPUT },
             after: { source: "step_output", ref: "fill_result" },
           },
           "verification_fields",
         ),
       );
     }
-    return { inputs: [], steps, assertions: [] };
+    return { inputs, steps, assertions: [] };
   },
 };
 
@@ -376,7 +590,68 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
   // 1. Deterministic recipe when the intent maps to a known shape.
   const recipe = RECIPES.find((r) => r.matches(req.generalized_intent, req));
   if (recipe) {
-    return finalize(req, recipe.build(req), "recipe", [], usages, nameCopy);
+    const result = finalize(req, recipe.build(req), "recipe", recipe.id, [], usages, nameCopy);
+    // Final gate: even a matched recipe must not produce a spec this runtime
+    // cannot execute. Checked on the BUILT spec, so it covers every step
+    // actually emitted rather than what the matcher predicted.
+    if (result.status === "valid" && req.runtime) {
+      const readiness = validateRuntimeCapabilities(result.spec, req.runtime);
+      if (!readiness.ready) {
+        return {
+          status: "needs_runtime",
+          runtime_id: readiness.runtime_id,
+          missing: readiness.missing,
+          message: describeMissingCapabilities(readiness.missing),
+        };
+      }
+    }
+    return result;
+  }
+
+  // A CRM update pattern whose data source was never observed. The old
+  // behaviour compiled the reconciliation recipe anyway; the honest answer is
+  // that the SOURCE of the new values is exactly what observation could not
+  // see, and the user has to teach it.
+  if (UPDATE_RECORDS_INTENT.test(req.generalized_intent) && !looksLikeReconciliation(req)) {
+    return {
+      status: "needs_configuration",
+      missing: [
+        {
+          kind: "data_source",
+          detail:
+            "I watched you update records, but I never saw where the new values come from — a file, a spreadsheet, another system, or your own judgment.",
+        },
+        {
+          kind: "field_mapping",
+          detail: "Which source values map onto which record fields.",
+        },
+      ],
+      message:
+        "I can see this workflow updates records, but not where the new values come from. Teach me the source and the field mapping, and I can draft it.",
+    };
+  }
+
+  // A browser workflow whose recipe declined ONLY because the runtime lacks an
+  // adapter must say so, rather than falling through to "I couldn't safely
+  // draft this" (which sends the user to reconfigure a workflow that is fine).
+  if (req.runtime && BROWSER_WORKFLOW_INTENT.test(req.generalized_intent)) {
+    const unavailable = requiredForBrowserRecipe(req).filter((id) => !runtimeHas(req, id));
+    if (unavailable.length > 0) {
+      const missing: MissingCapability[] = unavailable.map((id) => ({
+        capability_id: id,
+        step_id: "-",
+        reason: req.runtime!.available.has(id) ? "prerequisite_unmet" : "no_adapter",
+        detail:
+          req.runtime!.unmet_prerequisites?.get(id) ??
+          `${req.runtime!.runtime_id} has no adapter for ${id}`,
+      }));
+      return {
+        status: "needs_runtime",
+        runtime_id: req.runtime.runtime_id,
+        missing,
+        message: describeMissingCapabilities(missing),
+      };
+    }
   }
 
   // 2. Constrained model draft (twice), fully validated. Budget-capped: a draft
@@ -398,21 +673,55 @@ export async function compileAgentSpec(req: CompileRequest): Promise<CompileResu
       if (modelCostUsd(sumUsage([...usages, draft.usage])) > budget) break; // over budget → stop
       const built = planToSpecParts(draft.value);
       if (!built) continue;
-      const result = finalize(req, built, "model", [], [...usages, draft.usage], nameCopy);
-      if (result.status === "valid") return result;
+      const result = finalize(
+        req,
+        built,
+        "model",
+        "model",
+        [
+          // The propose-only rule (model drafts never receive direct write
+          // steps) is a safety property, but it must be VISIBLE — a user whose
+          // workflow writes should know this draft will only propose until a
+          // human elevates it.
+          "Drafted by a model: every step proposes only; nothing is written until you elevate and approve it.",
+        ],
+        [...usages, draft.usage],
+        nameCopy,
+      );
+      if (result.status !== "valid") continue;
+      // The model path must not bypass the runtime gate the recipe path has:
+      // a model plan referencing an adapter-less capability is just as
+      // unexecutable as a recipe doing so.
+      if (req.runtime) {
+        const readiness = validateRuntimeCapabilities(result.spec, req.runtime);
+        if (!readiness.ready) {
+          return {
+            status: "needs_runtime",
+            runtime_id: readiness.runtime_id,
+            missing: readiness.missing,
+            message: describeMissingCapabilities(readiness.missing),
+          };
+        }
+      }
+      return result;
     }
   }
 
+  // Unknown workflow: typed as "needs configuration", because that is what it
+  // is — nothing about the workflow is prohibited, we simply were not taught
+  // enough to compile it. The previous generic `blocked` (C-NO-PLAN) read as a
+  // dead end and gave the user nothing actionable.
   return {
-    status: "blocked",
-    issues: [
+    status: "needs_configuration",
+    missing: [
       {
-        rule: "C-NO-PLAN",
-        message: "no deterministic recipe matches and model generation failed or is unavailable",
+        kind: "workflow_definition",
+        detail:
+          "No safe recipe covers this workflow, and observation alone did not capture its targets, inputs and success conditions.",
       },
     ],
     message:
-      "I couldn't safely draft this helper yet. Tell me more about the outcome you want, or try again after connecting the relevant tools.",
+      "I don't know how to do this workflow safely yet. Walk me through it once — which fields, which values, and what a successful result looks like — and I can draft it.",
   };
 }
 
@@ -447,19 +756,74 @@ function planToSpecParts(
   return { steps: built, inputs: [], assertions: [] };
 }
 
+/**
+ * The semantic types the observer actually recorded for this pattern.
+ *
+ * Position 4 of the canonical token. `-` means the source could not tell, and
+ * an absent semantic must stay absent rather than become a guess.
+ */
+export function observedSemantics(tokens: readonly string[]): string[] {
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    const semantic = token.split(":")[4];
+    if (semantic && semantic !== "-") seen.add(semantic);
+  }
+  return [...seen];
+}
+
+/**
+ * The automation intent this compiled spec actually carries out, if any.
+ *
+ * The fit test is deliberately strict: an intent may describe this agent only
+ * when every capability it requires is present in the steps that will really
+ * run. Without that check a description is free to promise a write that the
+ * compiled steps never perform — a confident sentence about work that does not
+ * happen is worse than the generic one it replaced, because a user would act on
+ * it. So the intent has to earn the right to speak for the spec.
+ */
+export function intentFittingSteps(
+  canonicalSequence: readonly string[],
+  steps: readonly AgentStep[],
+): AutomationIntent | null {
+  const emitted = new Set(steps.map((s) => s.capability_id));
+  return (
+    candidateIntents(canonicalSequence).find((intent) =>
+      intent.requires_capabilities.every((c) => emitted.has(c)),
+    ) ?? null
+  );
+}
+
+function intentForSpec(req: CompileRequest, steps: readonly AgentStep[]): ResolvedIntent | null {
+  const fit = intentFittingSteps(req.candidate.canonical_sequence, steps);
+  if (!fit) return null;
+  // Compile time: no page has been opened, so only the observed vocabulary is
+  // available. The description says what the agent will look for; discovery
+  // fills in the real control names when the run actually starts. The RUN path
+  // calls `intentFittingSteps` too, so both reach the same intent — a run that
+  // resolved a different one from the description the user approved would be
+  // executing something they were never shown.
+  return resolveIntent(fit, {
+    observed_semantics: observedSemantics(req.candidate.canonical_sequence),
+  });
+}
+
 function finalize(
   req: CompileRequest,
   parts: { steps: AgentStep[]; inputs: AgentSpec["inputs"]; assertions: AgentSpec["assertions"] },
   compiled_by: "recipe" | "model",
+  recipeId: string,
   warnings: string[],
   usages: ModelUsage[],
   nameCopy: NameCopy,
 ): CompileResult {
   const now = req.now();
+  const intent = intentForSpec(req, parts.steps);
   const deterministicName =
     req.generalized_intent === "reconcile_account_list"
       ? "Reconcile account lists with Salesforce"
-      : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`;
+      : intent
+        ? describeIntentTitle(intent)
+        : `Helper: ${req.generalized_intent.replaceAll("_", " ")}`;
   const spec: AgentSpec = {
     schema_version: 1,
     agent_id: uuidv7({ timestampMs: now.getTime(), random: seeded(req.candidate.pattern_id) }),
@@ -471,7 +835,11 @@ function finalize(
     owner_user_id: req.owner_user_id,
     // Model may supply the title as COPY; deterministic name is the fallback.
     name: nameCopy?.title ?? deterministicName,
-    description: nameCopy?.summary ?? req.desired_outcome,
+    // The intent description outranks the model's summary on purpose. It is
+    // derived from the observed workflow and cross-checked against the steps
+    // that will run, so it names the field, the surface and the single write;
+    // the model's is copy, and copy may not assert what an agent does.
+    description: intent ? describeIntentPlan(intent) : (nameCopy?.summary ?? req.desired_outcome),
     generalized_intent: req.generalized_intent,
     source_pattern_id: req.candidate.pattern_id,
     state: "draft",
@@ -517,9 +885,15 @@ function finalize(
     status: "valid",
     spec: validation.spec,
     plain_language_plan: renderPlainLanguagePlan(validation.spec),
+    intent_plan: intent ? describeIntentPlanSteps(intent) : [],
     policy_decision: decision,
     warnings,
     compiled_by,
+    compiled_from: {
+      pattern_id: req.candidate.pattern_id,
+      generalized_intent: req.generalized_intent,
+      recipe: recipeId,
+    },
     model_usage,
     model_cost_usd: model_usage ? modelCostUsd(model_usage) : 0,
   };
@@ -528,9 +902,20 @@ function finalize(
 /** Plain-language plan: inputs, steps, approval points, budgets, rollback. */
 export function renderPlainLanguagePlan(spec: AgentSpec): string[] {
   const lines: string[] = [];
-  if (spec.inputs.length > 0) {
+  // Only inputs the USER actually supplies are listed as theirs. A discovered
+  // input under "You provide:" would ask someone for a thing the agent finds
+  // for itself, and leave them looking for a form that does not exist.
+  const fromUser = spec.inputs.filter((i) => i.source === "user");
+  if (fromUser.length > 0) {
     lines.push(
-      `You provide: ${spec.inputs.map((i) => i.label + (i.required ? "" : " (optional)")).join(", ")}.`,
+      `You provide: ${fromUser.map((i) => i.label + (i.required ? "" : " (optional)")).join(", ")}.`,
+    );
+  }
+  const discovered = spec.inputs.filter((i) => i.source === "discovered_on_surface");
+  if (discovered.length > 0) {
+    lines.push(
+      `I work out for myself, by looking at the page before I touch anything: ` +
+        `${discovered.map((i) => i.label).join(", ")}. If I cannot find it, I stop and ask.`,
     );
   }
   for (const s of [...spec.steps].sort((a, b) => a.order - b.order)) {

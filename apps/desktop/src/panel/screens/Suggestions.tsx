@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import { describeProposedHelper } from "@maman/agent-runtime";
 import {
+  evaluateVerification,
   explainWorkflowSteps,
   stepPhrase,
   type WorkflowExplanation,
   type AutomationStep,
 } from "@maman/pattern-engine";
 import { emitAppEvent } from "../../lib/bridge.js";
-import { useAgents } from "../../lib/agents.js";
+import { useLearnedWorkflows } from "../../lib/learnedWorkflows.js";
+import { useNavigation } from "../../state/navigation.js";
+import { createAgentAndActivate, useAgentService } from "../../lib/agentService.js";
 import {
   useRecommendations,
   type FormingItem,
@@ -17,6 +20,27 @@ import type { ProactiveItem } from "../../lib/proactive.js";
 import type { SnoozeOption } from "../../lib/suggestion-policy.js";
 import { useSettings } from "../../state/settings.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
+
+/**
+ * The lifecycle, shown while Create Agent works. Each line is a REAL phase the
+ * service passed through — "Registering with the local runtime…" prints when
+ * registration actually starts, not on a timer. A failure line carries the
+ * specific gap (the capability, the permission, the missing field), because
+ * "something went wrong" is a sentence the user can do nothing with.
+ */
+function CreationProgressView() {
+  const creation = useAgentService((s) => s.creation);
+  if (creation.length === 0) return null;
+  return (
+    <ol className="mt-2 space-y-0.5 text-[11px] list-none">
+      {creation.map((step, i) => (
+        <li key={i} className={step.phase === "failed" ? "text-danger" : "text-muted"}>
+          {step.detail}
+        </li>
+      ))}
+    </ol>
+  );
+}
 
 /**
  * Journey C: recommendation cards with full evidence, ordered by opportunity
@@ -286,10 +310,18 @@ function FormingCard({
   onToggleExpand: () => void;
 }) {
   const { progress } = item;
+  const [teachError, setTeachError] = useState<string | null>(null);
   // Same "what this actually is" line as a suggestion card: a workflow being
   // watched is just as opaque as one being offered if all you see is a name.
   const steps = stepPhrase(item.candidate.canonical_sequence);
   const explanation = explainWorkflowSteps(item.candidate.canonical_sequence);
+  /**
+   * True when this pattern can never be verified as observed: it has real work
+   * to automate, but no step carries anything specific enough to replay. That
+   * is a teaching problem, not a patience problem.
+   */
+  const unverifiableWithoutTeaching =
+    item.verification?.meaningful_expected_steps === 0 && explanation.automated_count > 0;
   return (
     <Card>
       <div className="flex items-start justify-between gap-2">
@@ -315,6 +347,56 @@ function FormingCard({
         </div>
         <p className="mt-1.5 text-xs text-ink">{progress.nextStep}</p>
       </div>
+
+      {/* TEACHING IS THE REMEDY FOR THE COMMONEST BLOCK.
+          A pattern that cannot be verified because nothing about it is specific
+          enough — the exact state of every AX-observed browser workflow, whose
+          tokens carry a role but no field name and no value — will NEVER clear
+          the bar by waiting. More repetitions of an unspecific workflow are
+          still unspecific. The only thing that moves it is the user telling
+          Maman what it could not see, so the offer sits here rather than being
+          reachable only from a card this pattern cannot become. */}
+      {unverifiableWithoutTeaching && (
+        <div className="mt-2 rounded border border-line bg-panel p-2">
+          <p className="text-xs text-ink">
+            {item.previously_accepted
+              ? "You accepted this one, but the helper I built from it can't actually run — I never saw which fields it touches or what values belong in them. Your existing helper stays exactly as it is; teaching this creates a separate one that works."
+              : "Waiting longer won't help this one — I never saw which fields it touches or what values belong in them, so there is nothing for me to check against."}
+          </p>
+          {teachError && <p className="mt-1 text-xs text-danger">{teachError}</p>}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                setTeachError(null);
+                try {
+                  const workflow = await useLearnedWorkflows
+                    .getState()
+                    .startFor(item.candidate, item.candidate.owner_user_id);
+                  useNavigation.getState().openConfigure(workflow.workflow_id);
+                } catch (e) {
+                  // WITHOUT THIS the rejection vanished and the button looked
+                  // inert — indistinguishable from not being there at all, which
+                  // is exactly how a real failure went unnoticed on device.
+                  setTeachError(
+                    e instanceof Error ? e.message : "I could not start teaching that workflow.",
+                  );
+                }
+              }}
+            >
+              Type it in
+            </Button>
+            {/* THE OTHER WAY TO TEACH IT, offered where the gap is admitted.
+              Demonstrating used to be a tab, which meant the user had to know it
+              existed, go there, and re-establish which workflow they meant. Both
+              routes close the same gap, so both belong on the card that names
+              it: type the fields in, or do the work once and let Maman watch. */}
+            <Button variant="secondary" onClick={() => useNavigation.getState().openTeach()}>
+              Or show me — I&apos;ll watch once
+            </Button>
+          </div>
+        </div>
+      )}
 
       <button className="mt-2 text-xs text-primary" onClick={onToggleExpand}>
         {expanded ? "Hide details" : "Why isn't this a suggestion yet?"}
@@ -379,10 +461,16 @@ function SuggestionCard({
   const proposed = describeProposedHelper(rec.required_capabilities);
   const settings = useSettings((s) => s.settings);
   /** Replay numbers are only shown once enough runs exist for them to mean something. */
-  const replayProven =
-    v.runs_tested >= settings.verify_min_runs &&
-    v.runs_tested > 0 &&
-    v.runs_matched / v.runs_tested >= settings.verify_min_match_pct;
+  // ONE gate, shared with the engine and the store — never a second local
+  // re-derivation that could disagree (a local ratio check is exactly how a
+  // zero-step vacuous match previously earned a "verified" badge).
+  const verification = evaluateVerification(v, {
+    min_runs: settings.verify_min_runs,
+    min_match_pct: settings.verify_min_match_pct,
+  });
+  const replayProven = verification.verified;
+  /** Usable runs = tested minus those with nothing meaningful to compare. */
+  const usableRuns = v.runs_tested - v.runs_insufficient;
   const title = item.entry.custom_title ?? rec.title;
   // The observed step chain, in prose. Null when the tokens carry nothing worth
   // stating — better to omit the line than to pad the card.
@@ -433,13 +521,17 @@ function SuggestionCard({
           </button>
         )}
         {/* A template match is its own honest claim: recognized, counted — not
-            "verified". The verified pill needs a replay score with enough runs
-            behind it to mean something; at small N the verifier is
-            self-referential and 2/2 would be noise dressed as proof. */}
-        {rec.template && !replayProven ? (
+            "verified". The verified pill requires the FULL engine gate: real
+            executable steps, independent (held-out) runs, a nonzero alignment,
+            and no unresolved capability or input. Anything less says
+            "not checked yet" — the pill is never the default branch, because
+            when it was, a vacuous zero-step match wore it. */}
+        {replayProven ? (
+          <StatusPill tone="success">verified</StatusPill>
+        ) : rec.template ? (
           <StatusPill tone="primary">known workflow</StatusPill>
         ) : (
-          <StatusPill tone="success">verified</StatusPill>
+          <StatusPill tone="muted">not checked yet</StatusPill>
         )}
       </div>
 
@@ -465,18 +557,30 @@ function SuggestionCard({
           </p>
           {replayProven && (
             <p className="mt-1 text-sm text-ink">
-              I also tested it against your last{" "}
-              <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+              I also checked it against{" "}
+              <span className="font-semibold tabular-nums">{usableRuns}</span> of your runs it had
+              not learned from, and matched{" "}
               <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
             </p>
           )}
         </>
-      ) : (
-        /* The proof — every number here is a real replayed run. */
+      ) : replayProven ? (
+        /* The proof. "Runs it had not learned from" is the load-bearing part:
+           every run here was held out, and each comparison had real executable
+           steps on both sides. */
         <p className="mt-1 text-sm text-ink">
-          I can do this for you — I tested it against your last{" "}
-          <span className="font-semibold tabular-nums">{v.runs_tested}</span> runs and matched{" "}
+          I can do this for you — I checked it against{" "}
+          <span className="font-semibold tabular-nums">{usableRuns}</span> of your runs it had not
+          learned from, and matched{" "}
           <span className="font-semibold tabular-nums">{v.runs_matched}</span>.
+        </p>
+      ) : (
+        /* NOT verified. Say so, and say why, rather than showing a score that
+           looks like proof. */
+        <p className="mt-1 text-sm text-ink">
+          I think I could do this for you, but{" "}
+          <span className="font-semibold">I have not been able to check it yet</span>
+          {verification.reason ? ` — ${verification.reason}` : ""}.
         </p>
       )}
       <Muted>
@@ -509,6 +613,32 @@ function SuggestionCard({
 
       {expanded && (
         <div className="mt-2 space-y-2">
+          {/* HOW the check was done, not just its score. A reader cannot judge
+              "matched 21 of 21" without knowing whether those runs were held
+              out and whether anything executable was compared at all. */}
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+            <dt className="text-muted">How I checked</dt>
+            <dd className="text-right text-ink">
+              {v.validation_method === "leave_one_out"
+                ? "each run checked against the others"
+                : v.validation_method === "holdout"
+                  ? "checked against runs held back"
+                  : "checked against the runs it learned from (proves nothing)"}
+            </dd>
+            <dt className="text-muted">Steps it can actually check</dt>
+            <dd className="text-right tabular-nums text-ink">{v.meaningful_expected_steps}</dd>
+            <dt className="text-muted">Runs usable for checking</dt>
+            <dd className="text-right tabular-nums text-ink">
+              {usableRuns} of {v.runs_tested}
+            </dd>
+            <dt className="text-muted">Best step alignment</dt>
+            <dd className="text-right tabular-nums text-ink">
+              {Math.max(0, ...v.results.map((r) => r.aligned_steps))}
+            </dd>
+          </dl>
+          {!replayProven && verification.reason && (
+            <Muted>Not verified: {verification.reason}.</Muted>
+          )}
           {/* The most recent runs, plus EVERY divergence — the imperfections are
               the honest part of the score and never hide behind "show more". */}
           <ul className="space-y-0.5 text-xs">
@@ -523,7 +653,9 @@ function SuggestionCard({
                   <span className="text-right text-muted">
                     {r.verdict === "match"
                       ? "matched"
-                      : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
+                      : r.verdict === "insufficient_evidence"
+                        ? (r.insufficiency_reason ?? "nothing checkable in this run")
+                        : `diverged at step ${r.divergence_step}: you did “${r.observed ?? "something else"}” instead of “${r.expected}”`}
                   </span>
                 </li>
               );
@@ -559,21 +691,46 @@ function SuggestionCard({
           <Button
             onClick={async () => {
               setDraftError(null);
+              // The pattern's own derived intent selects the compiler recipe.
+              // The old `?? "reconcile_account_list"` fallback here was
+              // rule-11 in miniature: an intent-less record silently became a
+              // generic Salesforce reconciliation agent. An absent intent is
+              // now an honest refusal, never a substitution.
+              if (!rec.generalized_intent) {
+                setDraftError(
+                  "This suggestion has no derived intent, so I can't choose a safe recipe for it.",
+                );
+                return;
+              }
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
-              // The pattern's own derived intent selects the compiler recipe;
-              // the legacy reconciliation intent stays the fallback.
-              const created = await useAgents.getState().createDraft(
+              // THE WHOLE VERB, not the first third of it. This used to stop at
+              // a persisted draft; it now compiles, validates against the local
+              // runtime, registers, installs the trigger, and shadow-runs — and
+              // only claims success once registration succeeded.
+              const created = await createAgentAndActivate(
                 item.candidate,
-                rec.generalized_intent ?? "reconcile_account_list",
+                rec.generalized_intent,
                 rec.summary,
                 title, // the exact workflow name on the card
               );
               await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
               if (created.ok) {
                 await act(item.signature, { type: "accepted" });
-              } else {
-                setDraftError(created.message);
+                return;
               }
+              // NEEDS TEACHING, NOT A DEAD END. When the refusal is that
+              // observation never captured the specifics — which field, which
+              // value — the useful next step is to ask, not to print an error
+              // the user can do nothing about. Anything else (a policy block,
+              // an unavailable runtime) is a real refusal and is shown verbatim.
+              if (created.missing_configuration && created.missing_configuration.length > 0) {
+                const workflow = await useLearnedWorkflows
+                  .getState()
+                  .startFor(item.candidate, item.candidate.owner_user_id);
+                useNavigation.getState().openConfigure(workflow.workflow_id);
+                return;
+              }
+              setDraftError(created.message);
             }}
           >
             Try it
@@ -593,10 +750,11 @@ function SuggestionCard({
         </div>
       )}
       {draftError && <p className="mt-2 text-xs text-danger">{draftError}</p>}
+      <CreationProgressView />
       {item.entry.status === "accepted" && (
         <p className="mt-3 text-xs text-success">
-          Draft agent created — inspect its full plan in the Agents tab. It drafts and stages only;
-          every step needs your approval until its record says otherwise.
+          Agent created and registered — its trigger is installed and a shadow test ran. Inspect the
+          result in the Agents tab; every write still needs your approval.
         </p>
       )}
     </Card>

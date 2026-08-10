@@ -210,13 +210,36 @@ export const DEMO_SF_ACCOUNTS: SfAccount[] = [
   },
 ];
 
+/**
+ * One field-level change in a proposed diff — the artifact a user's approval is
+ * bound to (see `diffSha256`).
+ *
+ * `field` is a plain string rather than the four Salesforce columns it started
+ * as, because the same diff shape now carries browser form fills, where the
+ * field is a control's accessible name ("Phone", "Billing City"). The Salesforce
+ * consumers no longer LEAN on the union: they validate the field is one they own
+ * before indexing an account with it, which is stricter than the implicit trust
+ * the union provided.
+ *
+ * The `account_*` names are historical — read them as "the record this change
+ * belongs to" and "its human label". Renaming them would touch the worker, the
+ * API and every persisted receipt, so the cost is not yet worth paying.
+ */
 export type ProposedFieldChange = {
   account_id: string;
   account_name: string;
-  field: "owner" | "employee_count" | "website" | "segment";
+  field: string;
   old_value: string;
   new_value: string;
 };
+
+/** Salesforce columns the reconciliation may write. A change naming anything
+ * else is not a Salesforce change and must not be applied as one. */
+export const SF_WRITABLE_FIELDS = ["owner", "employee_count", "website", "segment"] as const;
+export type SfWritableField = (typeof SF_WRITABLE_FIELDS)[number];
+export function isSfWritableField(field: string): field is SfWritableField {
+  return (SF_WRITABLE_FIELDS as readonly string[]).includes(field);
+}
 
 /** Fields the reconciliation compares (spec journey: owner, employees, website, segment). */
 export const COMPARED_FIELDS = ["owner", "employee_count", "website", "segment"] as const;

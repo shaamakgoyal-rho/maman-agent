@@ -4,7 +4,7 @@ import {
   type CapabilityContext,
   type ProposedDiff,
 } from "@maman/agent-runtime";
-import type { CsvAccountRow, SfAccount } from "@maman/demo-fixtures";
+import { isSfWritableField, type CsvAccountRow, type SfAccount } from "@maman/demo-fixtures";
 import type { HttpResponse, HttpTransport } from "./http.js";
 import {
   throwForStatus,
@@ -179,6 +179,12 @@ export function salesforceCapabilities(
       // Group changes by account so each record is one PATCH.
       const byAccount = new Map<string, Record<string, unknown>>();
       for (const change of approvedDiff.changes) {
+        // A change naming a field Salesforce does not have is NOT a Salesforce
+        // change. The previous chain fell through to `map.segment`, so an
+        // unrecognised field would have been written to Segment — plausible when
+        // the type guaranteed four values, and a silent wrong-column write now
+        // that the same diff shape also carries browser form fills.
+        if (!isSfWritableField(change.field)) continue;
         const body = byAccount.get(change.account_id) ?? {};
         const apiField =
           change.field === "employee_count"
@@ -227,6 +233,9 @@ export function salesforceCapabilities(
       );
       let confirmed = 0;
       for (const change of changes) {
+        // Same guard as the write path: verification must only claim to confirm
+        // fields this adapter actually owns.
+        if (!isSfWritableField(change.field)) continue;
         const account = byId.get(change.account_id);
         if (account && sfString(account[change.field]) === change.new_value) confirmed++;
       }

@@ -9,13 +9,46 @@ import {
 } from "@maman/contracts";
 import {
   compileAgentSpec,
+  demoAdapterRegistry,
+  DemoSalesforceWorld,
   renderPlainLanguagePlan,
+  runtimeFromRegistry,
   stateAfterMaterialEdit,
   validateAgentSpec,
+  type MissingCapability,
+  type MissingConfiguration,
 } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DemoModelProvider } from "@maman/model-provider";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
+import { browserAdapters } from "@maman/agent-runtime";
+import { tauriAgentBrowserHost } from "./agentBrowser.js";
+import { browserActuationOrigins, mintAuthorization } from "./browserRun.js";
+import { useSettings } from "../state/settings.js";
+
+/**
+ * Everything this device could execute, for the COMPILE-TIME capability check
+ * only. Execution never uses this union: the agent service registers against a
+ * real-only registry, and the demo arcs keep their own in runs.ts.
+ */
+function compileCheckRegistry() {
+  const registry = demoAdapterRegistry(new DemoSalesforceWorld());
+  const origins = browserActuationOrigins(
+    useSettings.getState().settings.browser_actuation_origins ?? [],
+  );
+  if (origins.length === 0) return registry;
+  for (const [id, adapter] of browserAdapters({
+    host: tauriAgentBrowserHost(origins),
+    allowedOrigins: origins,
+    userPresent: () => true, // presence is a RUN gate, not a compile gate
+    allowSupervisedBrowserWrites: true,
+    newRequestId: () => uuidv7(),
+    mintAuthorization,
+  })) {
+    registry.set(id, adapter);
+  }
+  return registry;
+}
 
 /**
  * Local agent store (demo/local mode; server persistence joins at M7).
@@ -29,6 +62,13 @@ const versionSchema = z
     version_number: z.number().int().positive(),
     spec: agentSpecSchema,
     plain_language_plan: z.array(z.string()),
+    /**
+     * The intent-derived plan: what this agent does on the real surface, in
+     * the user's terms. Defaulted rather than required so agents written by an
+     * earlier build still load — an empty plan renders nothing, which is the
+     * correct treatment for an agent whose steps no intent claimed.
+     */
+    intent_plan: z.array(z.string()).default([]),
     created_at: z.string(),
     created_by: z.enum(["user", "compiler"]),
   })
@@ -62,6 +102,9 @@ const agentRecordSchema = z
     // explicit grant changes anything. Never auto-promoted.
     approved_runs: z.number().int().nonnegative().default(0),
     draft_autonomy: z.boolean().default(false),
+    /** Runtime history, persisted so a restart can say when it last acted. */
+    last_triggered_at: z.string().nullable().default(null),
+    last_run_at: z.string().nullable().default(null),
     // The REAL detected candidate this agent was compiled from, so reruns
     // recompile from the same evidence. Older records lack it and fall back
     // to a minimal stand-in (Agents.tsx candidateFor).
@@ -91,12 +134,110 @@ async function saveRaw(json: string): Promise<void> {
   localStorage.setItem("maman-agents", json);
 }
 
+/**
+ * What reading the agents file actually produced.
+ *
+ * `absent` and `unreadable` used to be the same thing. Hydration was:
+ *
+ *     try {
+ *       const raw = await loadRaw();
+ *       if (raw) { ...if (parsed.success) { set(...); return; } }
+ *     } catch { }             // "defaults"
+ *     set({ agents: [], hydrated: true });
+ *
+ * A read that threw, a file that was not JSON, and a file whose SHAPE no longer
+ * matched the schema all arrived at the same line: an empty agent list,
+ * `hydrated: true`, indistinguishable from a first run. The six mutations below
+ * then write the in-memory array back with `saveRaw`, so the user's agents were
+ * not merely hidden — the next action destroyed them on disk.
+ *
+ * The third case is the realistic one. Any schema change that is not
+ * backward-compatible wipes every existing user's agents on upgrade. This
+ * session added `intent_plan` to `versionSchema` with `.default([])`, which
+ * kept old files loadable — but nothing enforced that care, and nothing would
+ * have reported it if the care had been missing.
+ */
+/** Thrown instead of writing over a file whose contents we never understood. */
+export class AgentsNotLoadedError extends Error {
+  constructor(detail: string) {
+    super(
+      `I could not read your saved agents (${detail}), so I will not save over that file — doing so would replace it with an empty list. The file is untouched.`,
+    );
+    this.name = "AgentsNotLoadedError";
+  }
+}
+
+export type AgentsLoad =
+  | { kind: "absent" }
+  | { kind: "unreadable"; detail: string }
+  | { kind: "loaded"; agents: AgentRecord[]; discarded: number };
+
+/**
+ * Parses the file, salvaging what it can.
+ *
+ * Per-record salvage mirrors `parseWorkflowsFile`: one agent whose shape has
+ * drifted must not cost the user the rest. The count is returned rather than
+ * swallowed, because "you have 3 agents" and "you have 3 agents and I dropped
+ * 2" are different statements.
+ */
+export function parseAgentsFile(raw: string | null): AgentsLoad {
+  if (raw === null || raw.trim() === "") return { kind: "absent" };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    // NOT `absent`. There are bytes here that we could not understand, and
+    // treating them as "no agents yet" is what licensed overwriting them.
+    return { kind: "unreadable", detail: e instanceof Error ? e.message : "not valid JSON" };
+  }
+
+  const whole = agentsFileSchema.safeParse(parsed);
+  if (whole.success) return { kind: "loaded", agents: whole.data.agents, discarded: 0 };
+
+  const list = (parsed as { agents?: unknown }).agents;
+  if (!Array.isArray(list)) {
+    return { kind: "unreadable", detail: "the file has no agents list" };
+  }
+  const agents: AgentRecord[] = [];
+  let discarded = 0;
+  for (const item of list) {
+    const one = agentRecordSchema.safeParse(item);
+    if (one.success) agents.push(one.data);
+    else discarded += 1;
+  }
+  return { kind: "loaded", agents, discarded };
+}
+
 export type CreateDraftResult =
-  { ok: true; agent: AgentRecord; policy_summary: string } | { ok: false; message: string };
+  | { ok: true; agent: AgentRecord; policy_summary: string }
+  | {
+      ok: false;
+      message: string;
+      /**
+       * Present when the refusal was a runtime gap rather than an unknown
+       * workflow — the UI can then tell the user what to connect or install
+       * instead of asking them to describe the workflow differently.
+       */
+      missing_capabilities?: MissingCapability[];
+      /**
+       * Present when the workflow needs to be TAUGHT: the typed list of what
+       * observation could not learn (data source, field mapping, …).
+       */
+      missing_configuration?: MissingConfiguration[];
+    };
 
 type AgentsStore = {
   agents: AgentRecord[];
   hydrated: boolean;
+  /**
+   * Set when the file existed but could not be understood. While this is set
+   * the store REFUSES to write, because saving the (empty) in-memory list would
+   * replace whatever is on disk with nothing.
+   */
+  loadFailure: string | null;
+  /** Agents whose shape no longer parses. Reported, never silently dropped. */
+  discarded: number;
   hydrate: () => Promise<void>;
   createDraft: (
     candidate: PatternCandidate,
@@ -121,6 +262,17 @@ type AgentsStore = {
   ) => Promise<{ ok: true; server_agent_id: string } | { ok: false; message: string }>;
   /** Records one approved, completed supervised run (the autonomy meter). */
   recordApprovedRun: (agentId: string) => Promise<void>;
+  /** Installs the derived trigger and moves the agent out of draft. */
+  finalizeCreation: (
+    agentId: string,
+    trigger: AgentSpec["trigger"],
+    state: AgentRecord["state"],
+  ) => Promise<AgentSpec | null>;
+  /** Persists runtime history (last triggered / last ran). */
+  recordRuntimeActivity: (
+    agentId: string,
+    activity: { last_triggered_at?: string; last_run_at?: string },
+  ) => Promise<void>;
   /**
    * WORKER-granted draft autonomy. Only enabled once approved_runs reaches the
    * settings threshold; a match record never auto-promotes anything.
@@ -128,24 +280,56 @@ type AgentsStore = {
   grantDraftAutonomy: (agentId: string) => Promise<void>;
 };
 
+/**
+ * The single write path, so the refusal cannot be forgotten at one of six
+ * call sites. Each of those previously inlined
+ * `saveRaw(JSON.stringify(agentsFileSchema.parse(...)))`, and any one of them
+ * reached after a failed load would have overwritten the file.
+ */
+async function persist(agents: AgentRecord[]): Promise<void> {
+  const failure = useAgents.getState().loadFailure;
+  if (failure !== null) throw new AgentsNotLoadedError(failure);
+  await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+}
+
 export const useAgents = create<AgentsStore>((set, get) => ({
   agents: [],
   hydrated: false,
+  loadFailure: null,
+  discarded: 0,
 
   hydrate: async () => {
+    let raw: string | null;
     try {
-      const raw = await loadRaw();
-      if (raw) {
-        const parsed = agentsFileSchema.safeParse(JSON.parse(raw));
-        if (parsed.success) {
-          set({ agents: parsed.data.agents, hydrated: true });
-          return;
-        }
-      }
-    } catch {
-      // defaults
+      raw = await loadRaw();
+    } catch (e) {
+      // The read itself failed — the file may be perfectly intact and simply
+      // unreachable. Reporting zero agents here is what made the next save
+      // destroy them.
+      set({
+        agents: [],
+        hydrated: true,
+        loadFailure: e instanceof Error ? e.message : "could not read the agents file",
+        discarded: 0,
+      });
+      return;
     }
-    set({ agents: [], hydrated: true });
+
+    const load = parseAgentsFile(raw);
+    if (load.kind === "unreadable") {
+      set({ agents: [], hydrated: true, loadFailure: load.detail, discarded: 0 });
+      return;
+    }
+    if (load.kind === "absent") {
+      set({ agents: [], hydrated: true, loadFailure: null, discarded: 0 });
+      return;
+    }
+    set({
+      agents: load.agents,
+      hydrated: true,
+      loadFailure: null,
+      discarded: load.discarded,
+    });
   },
 
   createDraft: async (candidate, generalizedIntent, desiredOutcome, displayName) => {
@@ -170,18 +354,45 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       policy_version_id: uuidv7(),
       now: () => new Date(),
       model: new DemoModelProvider(),
+      // Compile against the UNION of what this device could execute — the real
+      // browser adapters (from the settings allowlist) plus the demo world.
+      // This gate answers "can anything here run these steps?"; WHICH
+      // environment actually runs them is decided at registration, where the
+      // agent service holds a REAL-only registry and a demo-only agent is
+      // labelled as such rather than silently blended. Compiling against demo
+      // alone (the previous behaviour) refused every live browser workflow the
+      // moment it reached this check.
+      runtime: runtimeFromRegistry("local-any", compileCheckRegistry()),
     });
 
-    if (result.status === "blocked") {
+    // `needs_runtime` is a DIFFERENT answer from `blocked`: the workflow is
+    // understood, but this runtime has no adapter (or an unmet prerequisite) for
+    // one of its steps. Registering it anyway is what let a spec containing
+    // browser.supervised_form_fill — which no registry implements — reach the
+    // run engine as an `undefined` adapter.
+    if (result.status !== "valid") {
+      const message =
+        result.status === "needs_runtime"
+          ? `${result.message}. I won't create a helper that can't run.`
+          : result.message;
       await emitAppEvent({
         type: "status_beat",
         beat: {
           kind: "agent_failed",
           title: displayName ?? "a new helper",
-          message: result.message,
+          message,
         },
       });
-      return { ok: false, message: result.message };
+      return {
+        ok: false,
+        message,
+        ...(result.status === "needs_runtime" ? { missing_capabilities: result.missing } : {}),
+        // Typed teach-me list: what observation could not learn. The Teach
+        // flow (Phase 2) consumes this; until then the card shows the details.
+        ...(result.status === "needs_configuration"
+          ? { missing_configuration: result.missing }
+          : {}),
+      };
     }
 
     const agent: AgentRecord = {
@@ -196,6 +407,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
           version_number: 1,
           spec: result.spec,
           plain_language_plan: result.plain_language_plan,
+          intent_plan: result.intent_plan,
           created_at: result.spec.created_at,
           created_by: "compiler",
         },
@@ -207,9 +419,11 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       desired_outcome: desiredOutcome,
       approved_runs: 0,
       draft_autonomy: false,
+      last_triggered_at: null,
+      last_run_at: null,
     };
     const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
     await emitAppEvent({
       type: "status_beat",
@@ -245,20 +459,63 @@ export const useAgents = create<AgentsStore>((set, get) => ({
         version_number: latest.version_number + 1,
         spec: validation.spec,
         plain_language_plan: renderPlainLanguagePlan(validation.spec),
+        // Editing the description does not change a step, so the plan of what
+        // the agent does carries forward untouched. Re-deriving it here would
+        // be wrong in the other direction: it would silently overwrite what
+        // the user was shown when they approved.
+        intent_plan: latest.intent_plan,
         created_at: new Date().toISOString(),
         created_by: "user",
       },
     ];
     // Material edit returns the agent to shadow.
     agent.state = stateAfterMaterialEdit(agent.state);
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
     return true;
   },
 
   setState: async (agentId, state) => {
     const agents = get().agents.map((a) => (a.agent_id === agentId ? { ...a, state } : a));
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
+    set({ agents });
+  },
+
+  /**
+   * Completes creation: the derived trigger lands on the spec, the state leaves
+   * `draft`, and the whole thing is re-validated before persisting — a trigger
+   * is part of the spec the validator vouched for, so it does not get to skip
+   * the validator on its way in.
+   */
+  finalizeCreation: async (agentId, trigger, state) => {
+    const agents = [...get().agents];
+    const agent = agents.find((a) => a.agent_id === agentId);
+    if (!agent) return null;
+    const latest = agent.versions[agent.versions.length - 1]!;
+    const spec: AgentSpec = { ...latest.spec, trigger, state };
+    const validation = validateAgentSpec(spec);
+    if (!validation.valid) return null;
+    latest.spec = validation.spec;
+    agent.state = state;
+    await persist(agents);
+    set({ agents });
+    return validation.spec;
+  },
+
+  /** Persists when the runtime last triggered or ran this agent. */
+  recordRuntimeActivity: async (agentId, activity) => {
+    const agents = get().agents.map((a) =>
+      a.agent_id === agentId
+        ? {
+            ...a,
+            ...(activity.last_triggered_at !== undefined
+              ? { last_triggered_at: activity.last_triggered_at }
+              : {}),
+            ...(activity.last_run_at !== undefined ? { last_run_at: activity.last_run_at } : {}),
+          }
+        : a,
+    );
+    await persist(agents);
     set({ agents });
   },
 
@@ -266,7 +523,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = get().agents.map((a) =>
       a.agent_id === agentId ? { ...a, approved_runs: a.approved_runs + 1 } : a,
     );
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
   },
 
@@ -274,7 +531,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
     const agents = get().agents.map((a) =>
       a.agent_id === agentId ? { ...a, draft_autonomy: true } : a,
     );
-    await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+    await persist(agents);
     set({ agents });
   },
 
@@ -315,7 +572,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       const agents = get().agents.map((a) =>
         a.agent_id === agentId ? { ...a, server_agent_id: created.agent_id } : a,
       );
-      await saveRaw(JSON.stringify(agentsFileSchema.parse({ schema_version: 1, agents })));
+      await persist(agents);
       set({ agents });
       return { ok: true, server_agent_id: created.agent_id };
     } catch (e) {
