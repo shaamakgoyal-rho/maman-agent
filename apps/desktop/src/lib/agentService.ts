@@ -192,6 +192,9 @@ export async function bootAgentService(): Promise<void> {
 export function __resetAgentServiceForTests(): void {
   runtime = null;
   booted = false;
+  shadowQueue.length = 0;
+  shadowInFlight.clear();
+  shadowWorkers = 0;
   useAgentService.setState({ creation: [], staged: [] });
 }
 
@@ -219,19 +222,7 @@ async function stageFiring(agentId: string, agentName: string, at: string): Prom
   });
 
   if (record?.draft_autonomy) {
-    const outcome = await runAgentShadow(agentId);
-    pushStaged({
-      staged_id: uuidv7(),
-      agent_id: agentId,
-      agent_name: agentName,
-      at,
-      outcome:
-        outcome.status === "shadow_complete"
-          ? { kind: "shadow", diff: outcome.diff, steps_run: outcome.steps_run }
-          : outcome.status === "needs_input"
-            ? { kind: "needs_input", detail: outcome.detail }
-            : { kind: "failed", detail: outcome.detail },
-    });
+    enqueueAutonomousShadow(agentId, agentName, at);
   } else {
     pushStaged({
       staged_id: uuidv7(),
@@ -240,6 +231,66 @@ async function stageFiring(agentId: string, agentName: string, at: string): Prom
       at,
       outcome: { kind: "suggested" },
     });
+  }
+}
+
+/**
+ * Autonomous shadow runs go through a small worker pool. Shadow runs share one
+ * browser surface (and one machine), so a burst of simultaneous firings — many
+ * agents, one context — must queue rather than all dispatch at once. An agent
+ * already queued or running is not queued again: the run it gets will read the
+ * same live page state its duplicate would have.
+ */
+const MAX_CONCURRENT_SHADOWS = 2;
+const shadowQueue: Array<{ agent_id: string; agent_name: string; at: string }> = [];
+const shadowInFlight = new Set<string>();
+let shadowWorkers = 0;
+
+function enqueueAutonomousShadow(agentId: string, agentName: string, at: string): void {
+  if (shadowInFlight.has(agentId)) return;
+  shadowInFlight.add(agentId);
+  shadowQueue.push({ agent_id: agentId, agent_name: agentName, at });
+  pumpShadowQueue();
+}
+
+function pumpShadowQueue(): void {
+  while (shadowWorkers < MAX_CONCURRENT_SHADOWS && shadowQueue.length > 0) {
+    const job = shadowQueue.shift()!;
+    shadowWorkers += 1;
+    void runAgentShadow(job.agent_id)
+      .then((outcome) => {
+        pushStaged({
+          staged_id: uuidv7(),
+          agent_id: job.agent_id,
+          agent_name: job.agent_name,
+          at: job.at,
+          outcome:
+            outcome.status === "shadow_complete"
+              ? { kind: "shadow", diff: outcome.diff, steps_run: outcome.steps_run }
+              : outcome.status === "needs_input"
+                ? { kind: "needs_input", detail: outcome.detail }
+                : { kind: "failed", detail: outcome.detail },
+        });
+      })
+      .catch((error: unknown) => {
+        // A crashed shadow still reports itself — a queue must not turn a
+        // failure into silence.
+        pushStaged({
+          staged_id: uuidv7(),
+          agent_id: job.agent_id,
+          agent_name: job.agent_name,
+          at: job.at,
+          outcome: {
+            kind: "failed",
+            detail: error instanceof Error ? error.message : "shadow run failed",
+          },
+        });
+      })
+      .finally(() => {
+        shadowWorkers -= 1;
+        shadowInFlight.delete(job.agent_id);
+        pumpShadowQueue();
+      });
   }
 }
 

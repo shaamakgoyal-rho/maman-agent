@@ -172,7 +172,7 @@ async fn store_guard<'a, R: Runtime>(
 }
 
 /// Settings snapshot the gating logic needs (parsed from the settings JSON).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct GateSettings {
     observation_paused: bool,
     private_apps: Vec<String>,
@@ -191,7 +191,32 @@ struct GateSettings {
     teach_mode_enabled: bool,
 }
 
+/// Cached gate settings. `ingest_observer_value` runs once per observer event,
+/// and under AX event bursts re-reading and re-parsing settings.json from disk
+/// for every event was measurable lag. The cache is invalidated on every
+/// `settings_save`, which is the only writer, so a stale read is impossible.
+#[derive(Default)]
+struct GateSettingsCache(std::sync::Mutex<Option<GateSettings>>);
+
 fn load_gate_settings<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
+    // try_state: unit paths without a managed cache just read the disk.
+    if let Some(cache) = app.try_state::<GateSettingsCache>() {
+        if let Ok(guard) = cache.0.lock() {
+            if let Some(cached) = guard.as_ref() {
+                return cached.clone();
+            }
+        }
+    }
+    let loaded = load_gate_settings_from_disk(app);
+    if let Some(cache) = app.try_state::<GateSettingsCache>() {
+        if let Ok(mut guard) = cache.0.lock() {
+            *guard = Some(loaded.clone());
+        }
+    }
+    loaded
+}
+
+fn load_gate_settings_from_disk<R: Runtime>(app: &AppHandle<R>) -> GateSettings {
     let Ok(path) = config_path(app, SETTINGS_FILE) else {
         return GateSettings { observation_paused: true, ..Default::default() };
     };
@@ -375,6 +400,13 @@ fn settings_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), Stri
     }
     let path = config_path(&app, SETTINGS_FILE)?;
     fs::write(&path, json).map_err(|e| format!("settings write failed: {e}"))?;
+    // The ingest hot path reads settings through a cache; a save is the only
+    // way the file changes, so this is the one invalidation point.
+    if let Some(cache) = app.try_state::<GateSettingsCache>() {
+        if let Ok(mut guard) = cache.0.lock() {
+            *guard = None;
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1030,32 +1062,119 @@ fn week_start_iso() -> String {
     store::iso_from_unix_ms(monday * 86_400_000)[..10].to_string()
 }
 
-fn record_observation_stats<R: Runtime>(app: &AppHandle<R>, result: &IngestResult) {
-    let Ok(path) = config_path(app, STATS_FILE) else { return };
-    let week = week_start_iso();
-    let mut stats: serde_json::Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if stats.get("week_start").and_then(|v| v.as_str()) != Some(week.as_str()) {
+/// Pending observation-stat deltas, buffered so the ingest hot path does not
+/// read-modify-write a JSON file once per observer event. Flushed to disk at
+/// most every `STATS_FLUSH_INTERVAL`, and always before the counters are read.
+#[derive(Default)]
+struct PendingStats {
+    stored: u64,
+    dropped_paused: u64,
+    dropped_denied: u64,
+    dropped_not_allowlisted: u64,
+    boundary_events: u64,
+    rejected_forbidden: u64,
+    last_flush: Option<std::time::Instant>,
+}
+
+impl PendingStats {
+    fn is_empty(&self) -> bool {
+        self.stored == 0
+            && self.dropped_paused == 0
+            && self.dropped_denied == 0
+            && self.dropped_not_allowlisted == 0
+            && self.boundary_events == 0
+            && self.rejected_forbidden == 0
+    }
+}
+
+#[derive(Default)]
+struct ObservationStatsBuffer(std::sync::Mutex<PendingStats>);
+
+const STATS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Merges pending deltas into the persisted weekly counters. Pure, so the
+/// week-rollover rule stays unit-testable.
+fn merge_observation_stats(
+    existing: Option<serde_json::Value>,
+    week: &str,
+    pending: &PendingStats,
+) -> serde_json::Value {
+    let mut stats = existing.unwrap_or_else(|| serde_json::json!({}));
+    if stats.get("week_start").and_then(|v| v.as_str()) != Some(week) {
         stats = serde_json::json!({ "week_start": week });
     }
-    let mut bump = |key: &str, by: u32| {
+    let mut bump = |key: &str, by: u64| {
         let cur = stats.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
-        stats[key] = serde_json::json!(cur + by as u64);
+        stats[key] = serde_json::json!(cur + by);
     };
-    bump("stored", result.stored);
-    bump("dropped_paused", result.dropped_paused);
-    bump("dropped_denied", result.dropped_denied);
-    bump("dropped_not_allowlisted", result.dropped_not_allowlisted);
-    bump("boundary_events", result.boundary_events);
-    bump("rejected_forbidden", result.rejected_forbidden);
+    bump("stored", pending.stored);
+    bump("dropped_paused", pending.dropped_paused);
+    bump("dropped_denied", pending.dropped_denied);
+    bump("dropped_not_allowlisted", pending.dropped_not_allowlisted);
+    bump("boundary_events", pending.boundary_events);
+    bump("rejected_forbidden", pending.rejected_forbidden);
+    stats
+}
+
+/// Writes buffered deltas to observation-stats.json. Holding the lock across
+/// the file I/O is deliberate: it keeps concurrent flushes from interleaving
+/// read-modify-write, and the file is tiny.
+fn flush_observation_stats<R: Runtime>(app: &AppHandle<R>) {
+    let Some(buffer) = app.try_state::<ObservationStatsBuffer>() else { return };
+    let Ok(mut pending) = buffer.0.lock() else { return };
+    if pending.is_empty() {
+        pending.last_flush = Some(std::time::Instant::now());
+        return;
+    }
+    let Ok(path) = config_path(app, STATS_FILE) else { return };
+    let existing = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
+    let stats = merge_observation_stats(existing, &week_start_iso(), &pending);
     let _ = fs::write(&path, stats.to_string());
+    *pending = PendingStats { last_flush: Some(std::time::Instant::now()), ..Default::default() };
+}
+
+fn record_observation_stats<R: Runtime>(app: &AppHandle<R>, result: &IngestResult) {
+    let Some(buffer) = app.try_state::<ObservationStatsBuffer>() else {
+        // No managed buffer (bare unit paths): fall back to a direct write.
+        let Ok(path) = config_path(app, STATS_FILE) else { return };
+        let existing = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok());
+        let pending = PendingStats {
+            stored: result.stored as u64,
+            dropped_paused: result.dropped_paused as u64,
+            dropped_denied: result.dropped_denied as u64,
+            dropped_not_allowlisted: result.dropped_not_allowlisted as u64,
+            boundary_events: result.boundary_events as u64,
+            rejected_forbidden: result.rejected_forbidden as u64,
+            last_flush: None,
+        };
+        let stats = merge_observation_stats(existing, &week_start_iso(), &pending);
+        let _ = fs::write(&path, stats.to_string());
+        return;
+    };
+    let due = {
+        let Ok(mut pending) = buffer.0.lock() else { return };
+        pending.stored += result.stored as u64;
+        pending.dropped_paused += result.dropped_paused as u64;
+        pending.dropped_denied += result.dropped_denied as u64;
+        pending.dropped_not_allowlisted += result.dropped_not_allowlisted as u64;
+        pending.boundary_events += result.boundary_events as u64;
+        pending.rejected_forbidden += result.rejected_forbidden as u64;
+        match pending.last_flush {
+            Some(at) => at.elapsed() >= STATS_FLUSH_INTERVAL,
+            None => true,
+        }
+    };
+    if due {
+        flush_observation_stats(app);
+    }
 }
 
 /// This week's observation counters (what was stored vs deliberately dropped).
 #[tauri::command]
 fn observation_stats<R: Runtime>(app: AppHandle<R>) -> serde_json::Value {
+    // The recorder is write-behind; whoever asks for the counters gets the
+    // buffered deltas included, never a stale file.
+    flush_observation_stats(&app);
     let empty = serde_json::json!({
         "week_start": week_start_iso(),
         "stored": 0, "dropped_paused": 0, "dropped_denied": 0,
@@ -2768,6 +2887,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(StoreState(Mutex::new(None)))
+        .manage(GateSettingsCache::default())
+        .manage(ObservationStatsBuffer::default())
         .manage(trigger_service::TriggerServiceState::default())
         .manage(KeyAcquireState(store::GuardedKeyAcquire::new()))
         .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
@@ -3093,10 +3214,38 @@ mod csp_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_to_edges;
+    use super::{merge_observation_stats, snap_to_edges, PendingStats};
 
     const BOUNDS: (i32, i32, u32, u32) = (0, 0, 1920, 1080);
     const SIZE: (u32, u32) = (112, 128);
+
+    #[test]
+    fn stats_merge_accumulates_onto_the_same_week() {
+        let existing = serde_json::json!({ "week_start": "2026-08-10", "stored": 5 });
+        let pending = PendingStats { stored: 3, dropped_paused: 1, ..Default::default() };
+        let merged = merge_observation_stats(Some(existing), "2026-08-10", &pending);
+        assert_eq!(merged["stored"], 8);
+        assert_eq!(merged["dropped_paused"], 1);
+        assert_eq!(merged["week_start"], "2026-08-10");
+    }
+
+    #[test]
+    fn stats_merge_resets_counters_on_week_rollover() {
+        // Buffering deltas must not smear last week's counters into this week.
+        let existing = serde_json::json!({ "week_start": "2026-08-03", "stored": 999 });
+        let pending = PendingStats { stored: 2, ..Default::default() };
+        let merged = merge_observation_stats(Some(existing), "2026-08-10", &pending);
+        assert_eq!(merged["stored"], 2);
+        assert_eq!(merged["week_start"], "2026-08-10");
+    }
+
+    #[test]
+    fn stats_merge_starts_from_zero_with_no_file() {
+        let pending = PendingStats { rejected_forbidden: 4, ..Default::default() };
+        let merged = merge_observation_stats(None, "2026-08-10", &pending);
+        assert_eq!(merged["rejected_forbidden"], 4);
+        assert_eq!(merged.get("stored").and_then(|v| v.as_u64()).unwrap_or(0), 0);
+    }
 
     #[test]
     fn snaps_to_left_edge_within_threshold() {
