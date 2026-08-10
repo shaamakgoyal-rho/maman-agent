@@ -124,6 +124,30 @@ export function describeGap(resolved: ResolvedIntent): string {
 }
 
 /**
+ * The question to put in front of the user for one unanswered slot.
+ *
+ * Deliberately narrower than `describeGap`, which explains a situation. This is
+ * a label above an input box, so it names the thing being asked about and
+ * nothing else. It uses what discovery already resolved — by the time anyone is
+ * asked for a value, the agent usually knows the field, and "What should
+ * “Phone” say?" is a question a person can answer without first working out
+ * which field is meant.
+ */
+export function describeQuestion(resolved: ResolvedIntent, slot: UnfilledSlot): string {
+  const field = resolved.filled.find((f) => f.kind === "field");
+  if (slot.kind === "value") {
+    return field ? `What should ${quoted(field.value)} say?` : "What should the field say?";
+  }
+  if (slot.kind === "record_locator") return "Which site does this happen on?";
+  if (slot.kind === "commit_control") return "Which control saves this?";
+  // A field slot only reaches a question when looking could not settle it, so
+  // the honest ask names the difficulty rather than pretending it is routine.
+  return slot.reason === "ambiguous_controls"
+    ? "Which of those fields did you mean?"
+    : "Which field should I change?";
+}
+
+/**
  * The per-step plan the user approves, in the same concrete terms.
  *
  * Each line names a real control, so a reader can hold it against the page in

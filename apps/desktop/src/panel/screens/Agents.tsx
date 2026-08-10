@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { describeAgentSpec } from "@maman/agent-runtime";
 import { uuidv7, type PatternCandidate } from "@maman/contracts";
 import { useAgents, type AgentRecord } from "../../lib/agents.js";
-import { useRuns } from "../../lib/runs.js";
+import { useRuns, type RunQuestion } from "../../lib/runs.js";
 import { browserActuationOrigins } from "../../lib/browserRun.js";
 import { useServerRuns } from "../../lib/serverRuns.js";
 import { isTauri } from "../../lib/bridge.js";
@@ -35,6 +35,93 @@ function candidateFor(agent: AgentRecord): PatternCandidate {
     opportunity_score: 0.72,
     status: "eligible",
   };
+}
+
+/**
+ * The one thing the agent could not find out by looking.
+ *
+ * It gets its own gate rather than a settings field, because the answer belongs
+ * to THIS run: the agent has already opened the page, found the control, and
+ * needs the single fact no page carries. Storing it would turn a one-off answer
+ * into a standing instruction to write that value every time.
+ *
+ * The plan is shown above the box on purpose. A bare input asks someone to
+ * supply a value without saying what it is for; with the plan they can see the
+ * field it will go into and that exactly one line writes.
+ */
+function AnswerForm({
+  questions,
+  plan,
+  error,
+  onAnswer,
+  onCancel,
+}: {
+  questions: RunQuestion[];
+  plan: string[];
+  error: string | null;
+  onAnswer: (answers: Record<string, string>) => void;
+  onCancel: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const complete = questions.every((q) => (values[q.slot] ?? "").trim() !== "");
+
+  return (
+    <div className="mt-2 card border-primary/40 bg-primary/5 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium text-ink">
+          I found the field. I need one thing from you.
+        </p>
+        <StatusPill tone="primary">nothing written yet</StatusPill>
+      </div>
+
+      {plan.length > 0 && (
+        <ol className="mt-2 space-y-0.5 text-[11px] text-muted list-none">
+          {plan.map((line, i) => (
+            <li key={i}>{line}</li>
+          ))}
+        </ol>
+      )}
+
+      <form
+        className="mt-2 space-y-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (complete) onAnswer(values);
+        }}
+      >
+        {questions.map((q) => (
+          <div key={q.slot}>
+            <label className="text-xs font-medium text-ink" htmlFor={`answer-${q.slot}`}>
+              {q.prompt}
+            </label>
+            <p className="text-[11px] text-muted">{q.detail}</p>
+            <input
+              id={`answer-${q.slot}`}
+              // Never `type="password"` and never a stored credential field:
+              // this value is typed into a page, so a secret must not be
+              // encouraged here. `checkAnswer` refuses one that arrives anyway.
+              type="text"
+              autoComplete="off"
+              value={values[q.slot] ?? ""}
+              onChange={(e) => setValues((v) => ({ ...v, [q.slot]: e.target.value }))}
+              className="mt-1 w-full rounded-lg border border-line bg-panel px-2 py-1 text-sm"
+            />
+          </div>
+        ))}
+
+        {error && <p className="text-xs text-danger">{error}</p>}
+
+        <div className="flex gap-2">
+          <Button type="submit" disabled={!complete}>
+            Use this and continue
+          </Button>
+          <Button variant="secondary" type="button" onClick={onCancel}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 /** Agents: state, plain-language plan, immutable versions, budgets, controls. */
@@ -333,6 +420,19 @@ function RunPanel({ agent }: { agent: AgentRecord }) {
             </ul>
           </div>
         )}
+
+      {/* THE ONE QUESTION. Reached only after the agent has looked at the page
+          and resolved everything it could for itself, so this asks for the
+          single fact no page carries — not for the field, which it found. */}
+      {runs.phase === "needs_input" && "questions" in runs && runs.questions.length > 0 && (
+        <AnswerForm
+          questions={runs.questions}
+          plan={runs.questionPlan}
+          error={runs.error}
+          onAnswer={(answers) => void runs.answer(answers)}
+          onCancel={() => runs.reset()}
+        />
+      )}
 
       {/* DOMAIN POLICY hold: the compliance beat. Not an approval the worker can
           pass — policy says this agent may not do this at all (SoD) or needs a

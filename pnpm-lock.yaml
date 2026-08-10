@@ -142,6 +142,9 @@ importers:
       '@maman/domain-packs':
         specifier: workspace:*
         version: link:../../packages/domain-packs
+      '@maman/intent-layer':
+        specifier: workspace:*
+        version: link:../../packages/intent-layer
       '@maman/model-provider':
         specifier: workspace:*
         version: link:../../packages/model-provider

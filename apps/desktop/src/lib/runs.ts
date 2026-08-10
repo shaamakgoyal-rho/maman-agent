@@ -27,6 +27,12 @@ import { SHIPPED_PACKS } from "@maman/domain-packs";
 import { DemoModelProvider } from "@maman/model-provider";
 import { computeReceiptRoi } from "@maman/roi-engine";
 import {
+  describeIntentPlanSteps,
+  describeQuestion,
+  outstandingQuestions,
+} from "@maman/intent-layer";
+import {
+  looksLikeSecret,
   petReceiptSummary,
   uuidv7,
   type AgentSpec,
@@ -58,6 +64,12 @@ import {
 
 export type RunPhase =
   | "idle"
+  /**
+   * The agent looked at the page, resolved everything it could, and needs an
+   * answer only a person has. Distinct from `failed` on purpose: nothing went
+   * wrong, and the run continues the moment the question is answered.
+   */
+  | "needs_input"
   | "running_read"
   | "preparing_diff"
   | "waiting_approval"
@@ -69,6 +81,23 @@ export type RunPhase =
   | "failed";
 
 export type PendingApproval = { step_id: string; diff: ProposedDiff; diff_sha256: string };
+
+/**
+ * One thing the agent could not find out by looking, put to the user.
+ *
+ * Only slots the intent layer marks `needs_you_to_supply_it` become questions.
+ * A gap the agent could close itself — a page it has not opened yet, a field it
+ * failed to match — is not the user's to answer, and asking would move work
+ * onto them that the agent is supposed to do.
+ */
+export type RunQuestion = {
+  /** Slot name, used to key the answer back into resolution. */
+  slot: string;
+  /** The label above the box: "What should “Phone” say?" */
+  prompt: string;
+  /** The fuller explanation, for when the short question is not enough. */
+  detail: string;
+};
 
 /**
  * Which lane the write will actually use.
@@ -125,6 +154,13 @@ type RunsStore = {
   revertable: BrowserLaneResult["revertable"];
   /** Set when domain policy blocked the run before execution. */
   policyHold: PolicyHold | null;
+  /**
+   * What the agent needs answered before it can run, with the plan it would
+   * carry out once answered — so the user is agreeing to something specific,
+   * not filling in a box for an unnamed purpose.
+   */
+  questions: RunQuestion[];
+  questionPlan: string[];
   receipt: ExecutionReceipt | null;
   receiptSummary: string | null;
   error: string | null;
@@ -152,6 +188,8 @@ type RunsStore = {
   ) => Promise<void>;
   approve: () => Promise<void>;
   reject: () => Promise<void>;
+  /** Supplies what only the user could answer, then runs again from the top. */
+  answer: (answers: Record<string, string>) => Promise<void>;
   reset: () => void;
 };
 
@@ -427,6 +465,55 @@ function ctx(mode: "shadow" | "supervised"): CapabilityContext {
  *   values — and the write gate is untouched: the user still approves a diff,
  *   and the write still refuses if the field moved.
  */
+/**
+ * Answers the user has given for this run, by slot name.
+ *
+ * Held only for as long as the run needs them, and never written to disk. What
+ * a person types here goes into a page, so it is treated as the transient thing
+ * it is rather than as a saved setting they would have to remember to clear.
+ */
+let pendingAnswers: Record<string, string> = {};
+
+/** Enough context to start the run again once the question is answered. */
+type ResumeContext = {
+  candidate: PatternCandidate;
+  generalizedIntent: string;
+  desiredOutcome: string;
+  agentName: string | undefined;
+  mode: "shadow" | "supervised";
+};
+let resumeContext: ResumeContext | null = null;
+
+function rememberForResume(context: ResumeContext): void {
+  resumeContext = context;
+}
+
+/**
+ * What the user typed, checked before it can reach a page.
+ *
+ * A credential typed into this box would be written into a field, relayed over
+ * the native channel, and recorded on the receipt — three places secret material
+ * is never allowed. The contract would reject it at `set_value`, but that
+ * arrives as an opaque mid-run refusal; catching it here says why, at the moment
+ * they can do something about it.
+ */
+export function checkAnswer(value: string): { ok: true } | { ok: false; reason: string } {
+  const trimmed = value.trim();
+  if (trimmed === "") return { ok: false, reason: "This can't be empty." };
+  if (trimmed.length > 512) return { ok: false, reason: "That's longer than a field can hold." };
+  if (looksLikeSecret(trimmed)) {
+    return {
+      ok: false,
+      reason: "That looks like a password or key. Maman never types secrets into pages.",
+    };
+  }
+  return { ok: true };
+}
+
+type DiscoveryOutcome =
+  | { ok: true; inputs: Record<string, unknown> }
+  | { ok: false; questions: RunQuestion[]; plan: string[] };
+
 async function discoverInputsFor(
   spec: AgentSpec,
   candidate: PatternCandidate,
@@ -438,9 +525,9 @@ async function discoverInputsFor(
    * with something invented.
    */
   supplied: Readonly<Record<string, string>> = {},
-): Promise<Record<string, unknown>> {
+): Promise<DiscoveryOutcome> {
   const needed = spec.inputs.filter((i) => i.source === "discovered_on_surface");
-  if (needed.length === 0) return {};
+  if (needed.length === 0) return { ok: true, inputs: {} };
 
   const intent = intentFittingSteps(candidate.canonical_sequence, spec.steps);
   if (!intent) {
@@ -471,12 +558,31 @@ async function discoverInputsFor(
     observedSemantics: observedSemantics(candidate.canonical_sequence),
   });
 
-  if (resolution.status !== "ready") {
-    // Both remaining cases stop the run and say why in the user's own terms:
-    // "I could not look at the page" and "I looked and here is what I still
-    // need" are different problems with different fixes, and the message the
-    // intent layer produces distinguishes them.
+  if (resolution.status === "could_not_look") {
+    // Not a question: the user cannot answer "your browser window is not open"
+    // by typing into a box. It is an error with a fix they perform elsewhere.
     throw new Error(resolution.message);
+  }
+
+  if (resolution.status === "needs_you") {
+    const askable = outstandingQuestions(resolution.resolved);
+    if (askable.length === 0) {
+      // The gap is real but nothing in it is the user's to answer — a field the
+      // agent looked for and could not match, say. Putting a box in front of
+      // them would be moving the agent's job onto them.
+      throw new Error(resolution.message);
+    }
+    return {
+      ok: false,
+      questions: askable.map((q) => ({
+        slot: q.name,
+        prompt: describeQuestion(resolution.resolved, q),
+        detail: q.detail,
+      })),
+      // What answering would actually authorise. A box with no plan attached
+      // asks someone to supply a value without telling them what it is for.
+      plan: describeIntentPlanSteps(resolution.resolved),
+    };
   }
 
   // The discovered control and the supplied value, joined only now that both
@@ -484,10 +590,13 @@ async function discoverInputsFor(
   // value never reaches this line, because resolution refused above.
   const value = resolution.resolved.filled.find((f) => f.kind === "value");
   return {
-    [DISCOVERED_FIELDS_INPUT]: resolution.fields,
-    ...(value
-      ? { [FIELD_VALUES_INPUT]: resolution.fields.map((f) => ({ ...f, value: value.value })) }
-      : {}),
+    ok: true,
+    inputs: {
+      [DISCOVERED_FIELDS_INPUT]: resolution.fields,
+      ...(value
+        ? { [FIELD_VALUES_INPUT]: resolution.fields.map((f) => ({ ...f, value: value.value })) }
+        : {}),
+    },
   };
 }
 
@@ -512,6 +621,8 @@ export const useRuns = create<RunsStore>((set) => ({
   browserPlanRefusal: null,
   revertable: [],
   policyHold: null,
+  questions: [],
+  questionPlan: [],
   receipt: null,
   receiptSummary: null,
   error: null,
@@ -523,7 +634,17 @@ export const useRuns = create<RunsStore>((set) => ({
     agentName,
   ) => {
     activeAgentName = agentName ?? "your helper";
-    set({ phase: "running_read", mode: "shadow", diff: null, receipt: null, error: null });
+    set({
+      phase: "running_read",
+      mode: "shadow",
+      diff: null,
+      // Cleared on every start: a question left on screen from the last attempt
+      // would sit above a run that has moved past it.
+      questions: [],
+      questionPlan: [],
+      receipt: null,
+      error: null,
+    });
     await emitAppEvent({ type: "simulate_pet_event", event: "RUN_STARTED" });
     await beat({ kind: "running", title: activeAgentName, phase: "reading" });
     try {
@@ -545,7 +666,19 @@ export const useRuns = create<RunsStore>((set) => ({
       // same reason the capability check is here: a run that gets part-way and
       // then finds it does not know what to act on is worse than one that never
       // started.
-      activeInputs = await discoverInputsFor(activeSpec, candidate, "shadow");
+      const discovery = await discoverInputsFor(activeSpec, candidate, "shadow", pendingAnswers);
+      if (!discovery.ok) {
+        rememberForResume({
+          candidate,
+          generalizedIntent,
+          desiredOutcome,
+          agentName,
+          mode: "shadow",
+        });
+        set({ phase: "needs_input", questions: discovery.questions, questionPlan: discovery.plan });
+        return;
+      }
+      activeInputs = discovery.inputs;
       let diff: ProposedDiff | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") continue; // shadow: stop before writes
@@ -614,6 +747,8 @@ export const useRuns = create<RunsStore>((set) => ({
       diff: null,
       pending: null,
       policyHold: null,
+      questions: [],
+      questionPlan: [],
       receipt: null,
       error: null,
     });
@@ -625,7 +760,24 @@ export const useRuns = create<RunsStore>((set) => ({
       activeState = { outputs: {} };
       activeRunId = uuidv7();
       const registry = registryFor(activeWorld, useRuns.getState().browserOrigins);
-      activeInputs = await discoverInputsFor(activeSpec, candidate, "supervised");
+      const discovery = await discoverInputsFor(
+        activeSpec,
+        candidate,
+        "supervised",
+        pendingAnswers,
+      );
+      if (!discovery.ok) {
+        rememberForResume({
+          candidate,
+          generalizedIntent,
+          desiredOutcome,
+          agentName,
+          mode: "supervised",
+        });
+        set({ phase: "needs_input", questions: discovery.questions, questionPlan: discovery.plan });
+        return;
+      }
+      activeInputs = discovery.inputs;
       let pending: PendingApproval | null = null;
       for (const step of activeSpec.steps) {
         if (step.mode === "write") break; // pause at the approval gate
@@ -902,8 +1054,44 @@ export const useRuns = create<RunsStore>((set) => ({
     set({ phase: "cancelled", pending: null });
   },
 
+  /**
+   * Takes the user's answers and starts the run again from the top.
+   *
+   * A full restart rather than a resume, deliberately. Nothing was written —
+   * discovery only looks — so there is no partial state to reconcile, and
+   * re-running discovery re-reads the page, which is right: it may have changed
+   * while the box was open, and acting on the surface as it was when the
+   * question appeared is how a stale target gets written to.
+   */
+  answer: async (answers) => {
+    const context = resumeContext;
+    if (!context) return;
+    for (const [slot, value] of Object.entries(answers)) {
+      const check = checkAnswer(value);
+      if (!check.ok) {
+        // Refused before it can reach a page, and before the run restarts.
+        set({ phase: "needs_input", error: check.reason });
+        return;
+      }
+      pendingAnswers[slot] = value.trim();
+    }
+    set({ error: null });
+    const { candidate, generalizedIntent, desiredOutcome, agentName, mode } = context;
+    if (mode === "shadow") {
+      await useRuns.getState().startShadow(candidate, generalizedIntent, desiredOutcome, agentName);
+    } else {
+      await useRuns
+        .getState()
+        .startSupervised(candidate, generalizedIntent, desiredOutcome, agentName);
+    }
+  },
+
   reset: () => {
     activeBrowserPlan = null;
+    // The answers go with the run they were given for. Carrying them into the
+    // next one would write a value the user supplied for something else.
+    pendingAnswers = {};
+    resumeContext = null;
     set({
       phase: "idle",
       diff: null,
@@ -912,6 +1100,8 @@ export const useRuns = create<RunsStore>((set) => ({
       browserPlanRefusal: null,
       revertable: [],
       policyHold: null,
+      questions: [],
+      questionPlan: [],
       receipt: null,
       receiptSummary: null,
       error: null,

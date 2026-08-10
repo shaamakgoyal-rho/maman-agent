@@ -5,6 +5,7 @@ import {
   describeIntentPlan,
   describeIntentPlanSteps,
   describeProvenance,
+  describeQuestion,
   describeResolvedIntent,
   describeResolvedSteps,
   missingCapabilities,
@@ -367,5 +368,52 @@ describe("an intent is never offered where it cannot execute", () => {
     expect(READ_FIELDS_ON_OPEN_RECORD.requires_capabilities).toEqual([
       "browser.extract_structured_fields",
     ]);
+  });
+});
+
+describe("the question put in front of the user", () => {
+  it("names the field discovery already found", () => {
+    // By the time anyone is asked for a value, the agent usually knows the
+    // field. Asking "what should the field say?" would make the user work out
+    // which field is meant before they can answer.
+    const resolved = resolveIntent(UPDATE_FIELD_ON_OPEN_RECORD, {
+      origin: ORIGIN,
+      surface: surface([{ name: "Phone", role: "textbox" }]),
+      observed_semantics: ["phone"],
+    });
+    const question = outstandingQuestions(resolved)[0]!;
+    expect(describeQuestion(resolved, question)).toBe("What should “Phone” say?");
+  });
+
+  it("falls back to a general ask when the field is not known", () => {
+    const resolved = resolveIntent(UPDATE_FIELD_ON_OPEN_RECORD, {});
+    const value = resolved.unfilled.find((u) => u.kind === "value")!;
+    expect(describeQuestion(resolved, value)).toBe("What should the field say?");
+  });
+
+  it("asks which one, when looking found several", () => {
+    const resolved = resolveIntent(UPDATE_FIELD_ON_OPEN_RECORD, {
+      origin: ORIGIN,
+      surface: surface([
+        { name: "Phone", role: "textbox" },
+        { name: "Phone", role: "textbox" },
+      ]),
+      observed_semantics: ["phone"],
+      supplied: { new_value: "555-0199" },
+    });
+    const field = resolved.unfilled.find((u) => u.kind === "field")!;
+    expect(describeQuestion(resolved, field)).toBe("Which of those fields did you mean?");
+  });
+
+  it("is a label, not an explanation", () => {
+    // `describeGap` explains the situation; this goes above an input box, so it
+    // must not repeat the reasoning.
+    const resolved = resolveIntent(UPDATE_FIELD_ON_OPEN_RECORD, {
+      origin: ORIGIN,
+      surface: surface([{ name: "Phone", role: "textbox" }]),
+    });
+    const question = describeQuestion(resolved, outstandingQuestions(resolved)[0]!);
+    expect(question.length).toBeLessThan(60);
+    expect(question).not.toContain("you'll need to tell me");
   });
 });

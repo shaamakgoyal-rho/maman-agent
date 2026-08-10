@@ -112,11 +112,37 @@ name resolve to nothing, an unopened window reports "I could not look" rather
 than "nothing found", and a missing value stops the run at a question instead of
 writing something invented.
 
-Not yet built: the UI that asks for that value. A read-only browser agent runs
-end to end today; a write agent stops at _"What the field should say — I can't
-find this by looking; you'll need to tell me."_ That is the correct refusal, but
-there is no form to answer it in, so supervised browser writes are reachable
-from tests and not yet from the app.
+### The one question (`needs_input`)
+
+The gate that asks for what looking cannot reveal. It is a run PHASE, not an
+error: `failed` would put a red message in front of someone when nothing went
+wrong — the agent did its half and is waiting on theirs.
+
+| Component          | Status   | Evidence                                                                                                                                                                                                                                                                                   |
+| ------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `describeQuestion` | complete | Built from the resolved intent, so it names the control discovery already found: **"What should “Phone” say?"**, not "What should the field say?". 4 tests, including that it stays a label (<60 chars) rather than repeating `describeGap`'s explanation.                                 |
+| `AnswerForm`       | complete | Shows the per-step plan above the box, so the answer is given for a stated purpose rather than into an unnamed field. `type="text"`, `autoComplete="off"` — never a password input, because this value is typed into a page.                                                               |
+| `checkAnswer`      | complete | Refuses a credential BEFORE the run restarts and before anything is dispatched: this value would be written to a field, relayed over the native channel, and recorded on the receipt. The contract rejects it at `set_value` too, but that arrives as an opaque mid-run refusal.           |
+| `answer()`         | complete | A full restart, not a resume. Nothing was written, so there is no partial state — and re-running discovery re-reads the page, which matters: the box may have been open for minutes, and acting on the surface as it was when the question appeared is how a stale target gets written to. |
+| answer lifetime    | complete | Held in memory for the run that asked, cleared by `reset()`, never persisted. An answer given once is not a standing instruction to write that value every time.                                                                                                                           |
+
+`answer-form.test.ts` (11 tests) drives the real store through the real page
+script: the question names the discovered field and never asks about the field
+itself, only `list_controls` is dispatched while it waits, a credential answer
+is refused without touching the page, and answering carries the run to
+`completed` with a diff of `Phone: 555-0100 → 555-0199`.
+
+That last assertion caught a defect I introduced. It first read
+`expect(phase).not.toBe("needs_input")`, which passes on a failed run — and the
+run WAS failing, with "No fields were configured to read. Teach the workflow
+which fields matter first." The verify step (the independent readback) had no
+`fields` binding, so the readback that proves a write landed took the whole run
+down. Fixed by binding the same discovered fields, and the assertion now pins
+`completed` plus the diff.
+
+Verified in the panel preview: the Agents screen renders with no console errors.
+The form itself was not eyeballed — reaching it needs the Tauri host, which the
+web preview does not have — so its behaviour rests on the tests above.
 
 ## Known limitations
 

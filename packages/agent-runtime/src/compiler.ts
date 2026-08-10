@@ -529,6 +529,11 @@ const BROWSER_WORKFLOW_RECIPE: Recipe = {
           "read",
           {
             page: { source: "literal", value: "current_page" },
+            // The SAME discovered fields step one read. The verification is
+            // only a verification if it re-reads the control that was written;
+            // leaving this unbound made the readback throw "no fields were
+            // configured" and take the whole run down with it.
+            fields: { source: "agent_input", ref: DISCOVERED_FIELDS_INPUT },
             after: { source: "step_output", ref: "fill_result" },
           },
           "verification_fields",
