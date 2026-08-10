@@ -1,5 +1,10 @@
 import type { AgentSpec, AgentTrigger, WorkflowContext } from "@maman/contracts";
-import type { CapabilityAdapter, CapabilityContext, ProposedDiff } from "./adapters.js";
+import {
+  diffSha256,
+  type CapabilityAdapter,
+  type CapabilityContext,
+  type ProposedDiff,
+} from "./adapters.js";
 import { executeStep, type RunState } from "./run-engine.js";
 import {
   requireAdapter,
@@ -59,6 +64,29 @@ export type ShadowOutcome =
       readiness?: Extract<InputReadiness, { ready: false }>;
       detail: string;
     }
+  | { status: "failed"; detail: string };
+
+export type ApprovedOutcome =
+  | {
+      status: "completed";
+      diff: ProposedDiff;
+      /** The adapter's independent readback confirmed every change landed. */
+      verified: boolean;
+      verify_detail: string;
+    }
+  | {
+      /**
+       * The surface changed between approval and execution: re-proposing
+       * against the live page produced a DIFFERENT diff than the one the user
+       * approved, so nothing was written. Not a failure — the protection
+       * working. The caller shows the fresh diff and asks again.
+       */
+      status: "aborted_stale";
+      approved_sha: string;
+      fresh_sha: string;
+      fresh_diff: ProposedDiff | null;
+    }
+  | { status: "needs_input"; detail: string }
   | { status: "failed"; detail: string };
 
 /** One agent as the runtime holds it: the spec, its switch, and its history. */
@@ -289,5 +317,100 @@ export class LocalAgentRuntime {
     agent.last_run_at = this.now().toISOString();
     this.deps.onAgentChanged?.(agent);
     return { status: "shadow_complete", diff, steps_run: stepsRun, records_read: recordsRead };
+  }
+
+  /**
+   * Executes the agent's FULL plan, writes included, against a diff the user
+   * approved — propose → approve → execute → readback, with the stale-page
+   * abort the mandate requires.
+   *
+   * The reads and the propose re-run FRESH, and the re-proposed diff's hash
+   * must equal the approved hash. If the page moved on since the user looked —
+   * someone else edited the record, the form re-rendered differently — the
+   * hashes differ and NOTHING is written: modifying a different value because
+   * the approved one no longer exists is the exact outcome this refuses.
+   * `executeStep` then binds the write to the same hash a second time, and the
+   * browser adapter re-checks each field's expect_current against the live DOM
+   * at the instant of the write — three layers, because a stale write cannot
+   * be retracted.
+   */
+  async runApproved(
+    agentId: string,
+    agentInputs: Record<string, unknown>,
+    ctx: Omit<CapabilityContext, "mode">,
+    approvedDiffSha: string,
+  ): Promise<ApprovedOutcome> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return { status: "failed", detail: `no agent ${agentId} is registered` };
+
+    const inputs = validateAgentInputs(agent.spec, agentInputs);
+    if (!inputs.ready) {
+      return { status: "needs_input", detail: inputs.missing.map((m) => m.label).join(", ") };
+    }
+
+    const state: RunState = { outputs: {} };
+    const runCtx: CapabilityContext = { ...ctx, mode: "supervised" };
+    let freshDiff: ProposedDiff | null = null;
+    let freshSha = "";
+    let written: { verified: boolean; verify_detail: string } | null = null;
+
+    try {
+      for (const step of [...agent.spec.steps].sort((a, b) => a.order - b.order)) {
+        if (step.mode === "write") {
+          if (freshDiff === null || freshSha !== approvedDiffSha) {
+            return {
+              status: "aborted_stale",
+              approved_sha: approvedDiffSha,
+              fresh_sha: freshSha,
+              fresh_diff: freshDiff,
+            };
+          }
+          const result = await executeStep({
+            spec: agent.spec,
+            step,
+            state,
+            agentInputs,
+            ctx: runCtx,
+            adapter: requireAdapter(this.deps.registry, step, this.deps.runtime_id),
+            approvedDiff: freshDiff,
+            approvedDiffSha,
+          });
+          if (result.kind !== "written") {
+            return { status: "failed", detail: `the write step returned ${result.kind}` };
+          }
+          written = { verified: result.verified, verify_detail: result.verify_detail };
+          // NOT returning here: the spec's own trailing steps (the verify-read)
+          // still run, so the plan the user approved is the plan that executes.
+          continue;
+        }
+
+        const result = await executeStep({
+          spec: agent.spec,
+          step,
+          state,
+          agentInputs,
+          ctx: runCtx,
+          adapter: requireAdapter(this.deps.registry, step, this.deps.runtime_id),
+        });
+        if (result.kind === "proposed") {
+          freshDiff = result.diff;
+          freshSha = diffSha256(result.diff);
+        }
+      }
+    } catch (e) {
+      return { status: "failed", detail: e instanceof Error ? e.message : String(e) };
+    }
+
+    if (written === null || freshDiff === null) {
+      return { status: "failed", detail: "this agent has no write step to approve" };
+    }
+    agent.last_run_at = this.now().toISOString();
+    this.deps.onAgentChanged?.(agent);
+    return {
+      status: "completed",
+      diff: freshDiff,
+      verified: written.verified,
+      verify_detail: written.verify_detail,
+    };
   }
 }

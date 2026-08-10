@@ -354,6 +354,28 @@ actuator's presence gate would refuse an unwatched write anyway. Both
 evaluators can be alive at once, so `pushStaged` dedupes per agent per cooldown
 window. 6 Rust unit tests + 2 desktop tests.
 
+### The acceptance test — one continuous chain
+
+`acceptance.test.ts` runs the mandate's required end-to-end proof as ONE test,
+with every cloud key deleted first: four repetitions → the REAL pattern engine
+detects and derives the intent (nothing hand-picked) → `createAgentAndActivate`
+(the function the button calls) → registered, trigger installed, state
+`shadow` → matching context stages the agent proactively → the user supplies
+the one value looking cannot reveal → `proposeForApproval` returns the exact
+diff and its hash → `executeApproved` re-proposes FRESH, requires the hash to
+match, writes through the real in-page protocol, and the adapter's independent
+readback verifies → the page value actually changed → the same context inside
+the cooldown stages nothing. A second test proves the stale abort: page changes
+after approval → `aborted_stale`, nothing written, the intruding edit untouched.
+`runApproved` continues past the write so the spec's own verify-read executes —
+the plan the user approved is the plan that runs. The presence gate stays REAL
+in the test (jsdom document, not a mocked `userPresent`).
+
+The one repetition-bar note: the test lowers the tunable VOLUME knobs
+(occurrences 3, opportunity 0.4 — the same knobs the demo tuning screen
+exposes). The untunable safety bars pass at their real values: similarity 1,
+feasibility 1, risk 0.5.
+
 Honest gaps, mandate items still open:
 
 - `schedule` triggers are carried but nothing ticks them locally yet.

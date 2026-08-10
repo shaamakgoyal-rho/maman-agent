@@ -7,6 +7,8 @@ import {
   resolveIntentOnSurface,
   DISCOVERED_FIELDS_INPUT,
   FIELD_VALUES_INPUT,
+  diffSha256,
+  type ApprovedOutcome,
   type MissingConfiguration,
   type ProposedDiff,
   type RegisteredAgent,
@@ -286,6 +288,7 @@ export async function runAgentShadow(agentId: string): Promise<ShadowOutcome> {
 async function resolveShadowInputs(
   spec: AgentSpec,
   candidate: PatternCandidate | undefined,
+  supplied: Readonly<Record<string, string>> = {},
 ): Promise<
   | { ok: true; values: Record<string, unknown> }
   | { ok: false; needs_input: boolean; detail: string }
@@ -324,6 +327,7 @@ async function resolveShadowInputs(
       owner_user_id: spec.owner_user_id,
       mode: "shadow",
     },
+    supplied,
     observedSemantics: observedSemantics(candidate.canonical_sequence),
   });
   if (resolution.status !== "ready") {
@@ -343,6 +347,64 @@ async function resolveShadowInputs(
         : {}),
     },
   };
+}
+
+// ---- the write leg: propose → approve → execute → readback ----
+
+/**
+ * Resolves inputs (discovery + the user's answers) and produces the exact diff
+ * the user is asked to approve, with its hash. Nothing is written here.
+ */
+export async function proposeForApproval(
+  agentId: string,
+  answers: Readonly<Record<string, string>> = {},
+): Promise<{ ok: true; diff: ProposedDiff; sha: string } | { ok: false; detail: string }> {
+  const registered = agentRuntime().get(agentId);
+  if (!registered) return { ok: false, detail: `agent ${agentId} is not registered` };
+  const record = useAgents.getState().agents.find((a) => a.agent_id === agentId);
+  const inputs = await resolveShadowInputs(registered.spec, record?.source_candidate, answers);
+  if (!inputs.ok) return { ok: false, detail: inputs.detail };
+
+  const shadow = await agentRuntime().runShadow(agentId, inputs.values, {
+    run_id: uuidv7(),
+    organization_id: registered.spec.organization_id,
+    owner_user_id: registered.spec.owner_user_id,
+  });
+  if (shadow.status !== "shadow_complete" || !shadow.diff) {
+    return {
+      ok: false,
+      detail: shadow.status === "shadow_complete" ? "nothing to change" : shadow.detail,
+    };
+  }
+  return { ok: true, diff: shadow.diff, sha: diffSha256(shadow.diff) };
+}
+
+/**
+ * Executes what the user approved, bound to the hash they saw. The runtime
+ * re-proposes fresh and ABORTS if the page has moved on — see
+ * `LocalAgentRuntime.runApproved` for the three layers of that protection.
+ */
+export async function executeApproved(
+  agentId: string,
+  answers: Readonly<Record<string, string>>,
+  approvedSha: string,
+): Promise<ApprovedOutcome> {
+  const registered = agentRuntime().get(agentId);
+  if (!registered) return { status: "failed", detail: `agent ${agentId} is not registered` };
+  const record = useAgents.getState().agents.find((a) => a.agent_id === agentId);
+  const inputs = await resolveShadowInputs(registered.spec, record?.source_candidate, answers);
+  if (!inputs.ok) return { status: "failed", detail: inputs.detail };
+
+  return agentRuntime().runApproved(
+    agentId,
+    inputs.values,
+    {
+      run_id: uuidv7(),
+      organization_id: registered.spec.organization_id,
+      owner_user_id: registered.spec.owner_user_id,
+    },
+    approvedSha,
+  );
 }
 
 // ---- Create Agent, the whole verb ----
