@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { learnedWorkflowSchema, workflowReadiness, type PatternCandidate } from "@maman/contracts";
 
 /** Stands in for the Rust persistence commands, so the DESKTOP path is what
@@ -206,14 +206,26 @@ describe("reading the persisted file", () => {
       at,
     );
 
+  /** Narrows to the loaded case, failing loudly rather than silently passing. */
+  function loaded(raw: string) {
+    const parsed = parseWorkflowsFile(raw);
+    if (parsed.kind !== "loaded") throw new Error(`expected loaded, got ${parsed.kind}`);
+    return parsed;
+  }
+
   it("reads back what was written", () => {
     const raw = JSON.stringify({ schema_version: 1, workflows: [good()] });
-    expect(parseWorkflowsFile(raw).workflows).toHaveLength(1);
+    expect(loaded(raw).workflows).toHaveLength(1);
   });
 
-  it("returns nothing for an absent or unreadable file, without throwing", () => {
-    expect(parseWorkflowsFile(null).workflows).toEqual([]);
-    expect(parseWorkflowsFile("not json").workflows).toEqual([]);
+  it("DISTINGUISHES an absent file from one it could not read", () => {
+    // This test previously asserted the opposite — that both returned an empty
+    // list — which is the conflation that licensed overwriting a file whose
+    // contents were never understood.
+    expect(parseWorkflowsFile(null)).toEqual({ kind: "absent" });
+    expect(parseWorkflowsFile("")).toEqual({ kind: "absent" });
+    expect(parseWorkflowsFile("not json").kind).toBe("unreadable");
+    expect(parseWorkflowsFile('{"no":"workflows list"}').kind).toBe("unreadable");
   });
 
   it("SALVAGES the good records when one is corrupt, and counts the loss", () => {
@@ -222,7 +234,7 @@ describe("reading the persisted file", () => {
       schema_version: 1,
       workflows: [good(), { workflow_id: "not-a-uuid", nonsense: true }],
     });
-    const parsed = parseWorkflowsFile(raw);
+    const parsed = loaded(raw);
     expect(parsed.workflows).toHaveLength(1);
     expect(parsed.discarded).toBe(1);
   });
@@ -234,9 +246,47 @@ describe("reading the persisted file", () => {
       schema_version: 1,
       workflows: [{ ...good(), steps: [{ step_id: "x", order: 1 }] }],
     });
-    const parsed = parseWorkflowsFile(raw);
+    const parsed = loaded(raw);
     expect(parsed.workflows).toHaveLength(0);
     expect(parsed.discarded).toBe(1);
+  });
+
+  // These two drive the real store, so they must hand it back clean — a
+  // lingering `loadFailure` would make every later test's save silently refuse.
+  afterEach(async () => {
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    useLearnedWorkflows.setState({
+      workflows: [],
+      hydrated: false,
+      discarded: 0,
+      loadFailure: null,
+    });
+    storedJson = null;
+    commandsUsed.length = 0;
+  });
+
+  it("REFUSES to save over a file it could not read", async () => {
+    // The whole point: a salvageable file stays writable, an unreadable one
+    // does not, and the bytes survive either way.
+    const { useLearnedWorkflows, WorkflowsNotLoadedError } =
+      await import("../src/lib/learnedWorkflows.js");
+    storedJson = "{corrupted beyond parsing";
+    await useLearnedWorkflows.getState().hydrate();
+    expect(useLearnedWorkflows.getState().loadFailure).not.toBeNull();
+
+    await expect(useLearnedWorkflows.getState().remove("any-id")).rejects.toThrow(
+      WorkflowsNotLoadedError,
+    );
+    expect(storedJson).toBe("{corrupted beyond parsing");
+  });
+
+  it("saves normally when the file was understood", async () => {
+    const { useLearnedWorkflows } = await import("../src/lib/learnedWorkflows.js");
+    storedJson = JSON.stringify({ schema_version: 1, workflows: [good()] });
+    await useLearnedWorkflows.getState().hydrate();
+    expect(useLearnedWorkflows.getState().loadFailure).toBeNull();
+
+    await expect(useLearnedWorkflows.getState().remove("any-id")).resolves.not.toThrow();
   });
 });
 

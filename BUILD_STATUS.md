@@ -273,9 +273,13 @@ care and nothing would have reported its absence.
 9 tests in `agents-load-failure.test.ts`, driving the real Tauri persistence path
 via a bridge mock rather than the web-preview localStorage fallback.
 
-Not done: `learnedWorkflows.ts` has the same shape — `parseWorkflowsFile`
-returns `{workflows: [], discarded: 0}` for unparseable JSON, conflating it with
-an empty file, and its saves are unguarded. Same fix, not yet applied.
+`learnedWorkflows.ts` now carries the same fix. `parseWorkflowsFile` returns the
+same three-way outcome, the three saves go through one guarded `persist`, and
+`Configure` no longer says "Workflow not found" when the file simply could not
+be read — that wording invited the user to teach it again, which is the write
+that would have destroyed the original. Its hydrate branch previously _claimed_
+to report the failure (`console.error`) while still setting an empty list the
+next save would overwrite; a console line the user never sees is not a report.
 
 ## Nothing secret-shaped reaches a model prompt (Phase 9)
 

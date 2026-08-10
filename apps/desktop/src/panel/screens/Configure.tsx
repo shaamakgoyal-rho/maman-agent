@@ -35,10 +35,26 @@ const ROLE_CHOICES: Array<{ value: NonNullable<LearnedStep["target"]>["role"]; l
 ];
 
 export function Configure({ workflowId, onDone }: { workflowId: string; onDone: () => void }) {
-  const { workflows, update } = useLearnedWorkflows();
+  const { workflows, update, loadFailure } = useLearnedWorkflows();
   const settings = useSettings((s) => s.settings);
   const workflow = workflows.find((w) => w.workflow_id === workflowId);
   const [error, setError] = useState<string | null>(null);
+
+  // "Not found" would be a lie when the file could not be read: the workflow is
+  // very likely still there, and telling the user it was removed invites them
+  // to teach it again — which is the write that would destroy the original.
+  if (loadFailure !== null) {
+    return (
+      <div className="card border-danger/40 bg-danger/5 p-3">
+        <p className="text-sm font-medium text-ink">I could not read your taught workflows</p>
+        <p className="mt-1 text-xs text-muted">{loadFailure}</p>
+        <p className="mt-2 text-xs text-muted">
+          The file has been left exactly as it is and I will not save over it. What you taught is
+          most likely still there — this is a reading problem, not a missing workflow.
+        </p>
+      </div>
+    );
+  }
 
   if (!workflow) {
     return <EmptyState title="Workflow not found" body="It may have been removed." />;
