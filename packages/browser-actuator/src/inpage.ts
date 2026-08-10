@@ -37,6 +37,121 @@ import {
  * needs a live document.
  */
 
+/**
+ * THE ACCESSIBLE-NAME RUNG ORDER — one definition, two lanes.
+ *
+ * A control's accessible name is the ONLY handle an agent has on it: plans name
+ * targets, `confirm_name` re-states them, and `list_controls`-style discovery
+ * hands the agent back a string it will later send as a target. So the name has
+ * to be a property of the PAGE, not of whichever lane happens to be driving —
+ * a name discovered in Maman's own window must resolve in the extension, and
+ * the reverse.
+ *
+ * The two lanes cannot share code: this one is ES5 source evaluated inside a
+ * hostile document, the other is TypeScript against a live `Element`. So the
+ * behaviour is pinned by a table instead —
+ * `domain/accessible-name-conformance.json`, asserted by BOTH suites. That
+ * fixture is the specification; this source and
+ * `extensions/chrome/src/lib/dom-adapter.ts` are two implementations of it.
+ *
+ * The rungs, in order, each used only when it yields non-empty text:
+ *
+ *   1. `aria-labelledby` — every id, in order, joined; missing ids skipped
+ *   2. `aria-label`
+ *   3. `label[for]`
+ *   4. wrapping `<label>`
+ *   5. `value`, on `input[type=submit|button|reset]` only
+ *   6. `placeholder`
+ *   7. `title`
+ *   8. `textContent`
+ *   9. `name` — last resort
+ *
+ * Two of those placements are the resolution of a real divergence and are load
+ * bearing:
+ *
+ * - `name` is NOT an accessible name in any spec; it is a form-submission key,
+ *   often a machine token (`Opportunity.CloseDate__c`). It stays because an
+ *   otherwise-unnamed input is unaddressable without it, and an agent that gets
+ *   the token back from discovery can use it verbatim. It goes LAST because it
+ *   must never outrank text a human can see: this lane used to name
+ *   `<button name="save">Save and close</button>` "save" while the extension
+ *   named it "Save and close", and a `confirm_name` written against one lane
+ *   then refused in the other.
+ * - `value` moves ABOVE `title`, because for a submit input the value attribute
+ *   IS the native label; `title` is a tooltip about it.
+ *
+ * Whitespace is collapsed (NBSP included) rather than merely trimmed. The
+ * extension's names are re-normalised downstream by `normalizeName`, but this
+ * lane compares `confirm_name` with exact string equality against a live
+ * document, so a label wrapped across two source lines has to produce the same
+ * string here as it does there.
+ */
+export const ACCESSIBLE_NAME_SOURCE = String.raw`function (el) {
+  var norm = function (s) {
+    return String(s == null ? "" : s)
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+  var attr = function (n) {
+    return el.getAttribute ? norm(el.getAttribute(n)) : "";
+  };
+  var doc = el.ownerDocument || document;
+
+  var labelledBy = attr("aria-labelledby");
+  if (labelledBy) {
+    var ids = labelledBy.split(" ");
+    var parts = [];
+    for (var i = 0; i < ids.length; i++) {
+      var ref = ids[i] ? doc.getElementById(ids[i]) : null;
+      if (ref) parts.push(norm(ref.textContent));
+    }
+    var joined = norm(parts.join(" "));
+    if (joined) return joined;
+  }
+
+  var ariaLabel = attr("aria-label");
+  if (ariaLabel) return ariaLabel;
+
+  if (el.id) {
+    var forLabel = null;
+    try {
+      forLabel = doc.querySelector('label[for="' + String(el.id).replace(/["\\]/g, "\\$&") + '"]');
+    } catch (e) {
+      forLabel = null;
+    }
+    if (forLabel) {
+      var forText = norm(forLabel.textContent);
+      if (forText) return forText;
+    }
+  }
+
+  var wrap = el.closest ? el.closest("label") : null;
+  if (wrap) {
+    var wrapText = norm(wrap.textContent);
+    if (wrapText) return wrapText;
+  }
+
+  if (String(el.tagName).toLowerCase() === "input") {
+    var type = attr("type").toLowerCase();
+    if (type === "submit" || type === "button" || type === "reset") {
+      var buttonValue = norm(el.value);
+      if (buttonValue) return buttonValue;
+    }
+  }
+
+  var placeholder = attr("placeholder");
+  if (placeholder) return placeholder;
+
+  var title = attr("title");
+  if (title) return title;
+
+  var text = norm(el.textContent);
+  if (text) return text;
+
+  return attr("name");
+}`;
+
 /** Keys the page returns. Deliberately flat and small — easy to validate. */
 export interface AgentPageEnvelope {
   /** Echoed so a stale answer to a previous action can never be accepted. */
@@ -119,27 +234,11 @@ export const AGENT_PAGE_SCRIPT = String.raw`(function (requestJson) {
     return s.length > MAX_VALUE ? s.slice(0, MAX_VALUE) : s;
   };
 
-  // ---- accessible name, computed the same way the adapter does ----
-  var nameOf = function (el) {
-    var aria = el.getAttribute && el.getAttribute("aria-label");
-    if (aria) return aria.trim();
-    var labelledBy = el.getAttribute && el.getAttribute("aria-labelledby");
-    if (labelledBy) {
-      var byId = document.getElementById(labelledBy);
-      if (byId && byId.textContent) return byId.textContent.trim();
-    }
-    if (el.id) {
-      var lbl = document.querySelector('label[for="' + el.id.replace(/"/g, '\\"') + '"]');
-      if (lbl && lbl.textContent) return lbl.textContent.trim();
-    }
-    var wrap = el.closest && el.closest("label");
-    if (wrap && wrap.textContent) return wrap.textContent.trim();
-    if (el.getAttribute && el.getAttribute("placeholder")) {
-      return el.getAttribute("placeholder").trim();
-    }
-    if (el.getAttribute && el.getAttribute("name")) return el.getAttribute("name").trim();
-    return (el.textContent || "").trim();
-  };
+  // ---- accessible name ----
+  // Interpolated from ACCESSIBLE_NAME_SOURCE so this lane and the extension
+  // adapter cannot drift apart unnoticed: both are pinned to
+  // domain/accessible-name-conformance.json. See the note on that constant.
+  var nameOf = ${ACCESSIBLE_NAME_SOURCE};
 
   // A field is SECURE unless it can be proven otherwise. Same rule as the
   // extension adapter: refusing a legitimate field costs a message; the other
