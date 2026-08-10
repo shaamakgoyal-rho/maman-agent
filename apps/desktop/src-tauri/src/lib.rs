@@ -12,6 +12,7 @@ pub mod observer;
 pub mod redaction;
 pub mod store;
 pub mod sync;
+pub mod trigger_service;
 pub mod vision;
 
 use std::collections::HashMap;
@@ -1185,7 +1186,10 @@ fn agents_save<R: Runtime>(app: AppHandle<R>, json: String) -> Result<(), String
         return Err("payload too large".into());
     }
     let path = config_path(&app, "agents.json")?;
-    fs::write(&path, json).map_err(|e| format!("write failed: {e}"))?;
+    fs::write(&path, json.clone()).map_err(|e| format!("write failed: {e}"))?;
+    // The daemon's records come from this file; a save IS a trigger reload, so
+    // a newly created agent is proactive the moment its record exists.
+    trigger_service::reload(&app, Some(&json));
     Ok(())
 }
 
@@ -2409,7 +2413,10 @@ fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
 /// panel's agent service listens on. Canonical-token fields only, never content
 /// — field-for-field what `contextOf` emits for the JS ingest paths, so live
 /// and simulated events wake triggers identically.
-fn emit_workflow_context<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
+fn emit_workflow_context<R: Runtime>(
+    app: &AppHandle<R>,
+    event: &serde_json::Value,
+) -> Option<serde_json::Value> {
     let s = |path: &[&str]| -> Option<String> {
         let mut v = event;
         for key in path {
@@ -2423,7 +2430,7 @@ fn emit_workflow_context<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Val
         s(&["occurred_at"]),
         s(&["app", "display_name"]),
     ) else {
-        return;
+        return None;
     };
     let domain = s(&["app", "domain"]);
     let context = serde_json::json!({
@@ -2445,6 +2452,7 @@ fn emit_workflow_context<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Val
         "maman-app-events",
         serde_json::json!({ "type": "workflow_context", "context": context }),
     );
+    Some(context)
 }
 
 async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_json::Value) {
@@ -2474,7 +2482,11 @@ async fn ingest_observer_value<R: Runtime>(app: &AppHandle<R>, event: &serde_jso
                         // channel cannot carry content. Without it, live relay
                         // work was invisible to JS and agents could only be
                         // proactive about simulated events.
-                        emit_workflow_context(app, event);
+                        if let Some(context) = emit_workflow_context(app, event) {
+                            // The DAEMON half: evaluated in Rust so a firing
+                            // happens with every webview closed.
+                            trigger_service::evaluate(app, &context);
+                        }
                     }
                     Err(store::StoreError::ForbiddenField(_)) => deltas.rejected_forbidden += 1,
                     Err(_) => {}
@@ -2756,6 +2768,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(StoreState(Mutex::new(None)))
+        .manage(trigger_service::TriggerServiceState::default())
         .manage(KeyAcquireState(store::GuardedKeyAcquire::new()))
         .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
         .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
@@ -2767,6 +2780,7 @@ pub fn run() {
             hide_panel,
             quit_app,
             events_ingest,
+            trigger_service::staged_runs_drain,
             events_timeline,
             events_pattern_features,
             suggestions_load,
@@ -2831,6 +2845,15 @@ pub fn run() {
             setup_statusbar(&app.handle().clone());
             restore_pet_position(&app.handle().clone());
             start_bridge_listener(app.handle().clone());
+            // The daemon loads persisted agents at startup, so triggers from a
+            // previous session are live before any webview asks for anything.
+            {
+                let handle = app.handle().clone();
+                let agents = config_path(&handle, "agents.json")
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p).ok());
+                trigger_service::reload(&handle, agents.as_deref());
+            }
             start_sync_loop(app.handle().clone());
             start_observer_supervisor(app.handle().clone());
 

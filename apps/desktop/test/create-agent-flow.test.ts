@@ -246,6 +246,50 @@ describe("the agent is proactive without any screen", () => {
   });
 });
 
+describe("the Rust daemon's firings reach the same staging path", () => {
+  it("stages a firing the daemon evaluated, without local re-evaluation", async () => {
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+
+    // What Rust emits after evaluating a LIVE event — the panel was not
+    // involved in the match at all.
+    await emitAppEvent({
+      type: "agent_trigger_fired",
+      firing: {
+        agent_id: created.agent_id,
+        agent_name: "phone helper",
+        at: new Date().toISOString(),
+        context: matchingContext().context,
+      },
+    });
+    await settled();
+    expect(useAgentService.getState().staged).toHaveLength(1);
+    expect(useAgentService.getState().staged[0]!.agent_id).toBe(created.agent_id);
+  });
+
+  it("collapses double delivery when both evaluators announce the same firing", async () => {
+    // The daemon and the panel runtime hold separate cooldown maps, so one
+    // live event can arrive twice: once as workflow_context (panel evaluates)
+    // and once as agent_trigger_fired (daemon evaluated). One staged entry.
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+    const at = new Date().toISOString();
+
+    await emitAppEvent(matchingContext());
+    await emitAppEvent({
+      type: "agent_trigger_fired",
+      firing: {
+        agent_id: created.agent_id,
+        agent_name: "phone helper",
+        at,
+        context: matchingContext().context,
+      },
+    });
+    await settled();
+    expect(useAgentService.getState().staged).toHaveLength(1);
+  });
+});
+
 describe("restart: the agent and its trigger come back", () => {
   it("reboots from the persisted file and fires on the next matching context", async () => {
     const created = await createOne();

@@ -35,7 +35,17 @@ export type AppEvent =
    * JS paths and by the Rust observer ingest for live events, so the agent
    * trigger service hears about work regardless of which screen is mounted.
    */
-  | { type: "workflow_context"; context: WorkflowContext };
+  | { type: "workflow_context"; context: WorkflowContext }
+  /**
+   * A trigger firing evaluated by the RUST daemon — the evaluator that works
+   * with every webview closed. The panel stages it through the same autonomy
+   * logic as its own evaluations; `pushStaged` dedupes the overlap when both
+   * evaluators are alive.
+   */
+  | {
+      type: "agent_trigger_fired";
+      firing: { agent_id: string; agent_name: string; at: string; context: WorkflowContext };
+    };
 
 type Listener = (event: AppEvent) => void;
 

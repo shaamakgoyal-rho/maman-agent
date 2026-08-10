@@ -337,11 +337,25 @@ matter first" to a user who had just done exactly that.
 
 18 new tests (`local-runtime.test.ts`, `create-agent-flow.test.ts`).
 
+### The Rust trigger daemon
+
+Trigger evaluation no longer needs a webview. `trigger_service.rs` parses
+agents.json into trigger records (per-record tolerant: one unreadable agent
+cannot silence the rest; `draft`/`paused`/`archived` never fire), matches live
+events' redacted context in `ingest_observer_value`, applies per-agent
+cooldowns, and on a firing: emits `agent_trigger_fired` (the status bar — its
+own window — shows the beat with no panel open) and appends to a capped
+staged_runs.json. The panel drains that file on boot, so "it noticed while you
+were away" is literally true. Records reload on every `agents_save` and at app
+setup; cooldown history survives reloads so a re-save cannot unleash a burst.
+The daemon MATCHES and ANNOUNCES; it never executes — execution needs
+discovery, inputs, and approvals, which the panel's runtime owns, and the
+actuator's presence gate would refuse an unwatched write anyway. Both
+evaluators can be alive at once, so `pushStaged` dedupes per agent per cooldown
+window. 6 Rust unit tests + 2 desktop tests.
+
 Honest gaps, mandate items still open:
 
-- The trigger service lives in the panel webview (module scope), so it runs for
-  the app's lifetime but NOT if every window is closed. A Rust-side daemon
-  evaluating triggers without a webview is the remaining step for "durable".
 - `schedule` triggers are carried but nothing ticks them locally yet.
 - The end-to-end browser WRITE (propose → approve → execute → readback) exists
   in the runs store; the trigger-staged path stops at shadow + suggestion and

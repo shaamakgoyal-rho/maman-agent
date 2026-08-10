@@ -18,7 +18,7 @@ import {
   type PatternCandidate,
   type WorkflowContext,
 } from "@maman/contracts";
-import { emitAppEvent, onAppEvent } from "./bridge.js";
+import { emitAppEvent, invokeCommand, isTauri, onAppEvent } from "./bridge.js";
 import { tauriAgentBrowserHost } from "./agentBrowser.js";
 import { mintAuthorization } from "./browserRun.js";
 import { useAgents } from "./agents.js";
@@ -152,7 +152,38 @@ export async function bootAgentService(): Promise<void> {
 
   await onAppEvent((event) => {
     if (event.type === "workflow_context") void handleContext(event.context);
+    // Firings the Rust daemon evaluated (live events; works with the panel
+    // closed). Staged through the SAME autonomy logic as local evaluations.
+    if (event.type === "agent_trigger_fired") {
+      void stageFiring(event.firing.agent_id, event.firing.agent_name, event.firing.at);
+    }
   });
+
+  // Triggers that fired while no panel existed: the daemon persisted them, and
+  // draining here is what makes "it noticed while you were away" true.
+  if (isTauri()) {
+    try {
+      const raw = await invokeCommand<string>("staged_runs_drain");
+      const parsed = JSON.parse(raw) as Array<{
+        agent_id?: string;
+        agent_name?: string;
+        at?: string;
+      }>;
+      for (const firing of Array.isArray(parsed) ? parsed.reverse() : []) {
+        if (firing.agent_id && firing.agent_name && firing.at) {
+          pushStaged({
+            staged_id: uuidv7(),
+            agent_id: firing.agent_id,
+            agent_name: firing.agent_name,
+            at: firing.at,
+            outcome: { kind: "suggested" },
+          });
+        }
+      }
+    } catch {
+      // A drain failure loses nothing durable — the file stays for next boot.
+    }
+  }
 }
 
 /** Test seam: reset the module singleton between simulated restarts. */
@@ -165,48 +196,65 @@ export function __resetAgentServiceForTests(): void {
 // ---- trigger handling (the proactive half) ----
 
 async function handleContext(context: WorkflowContext): Promise<void> {
-  const firings = agentRuntime().handleContext(context);
-  for (const firing of firings) {
-    const record = useAgents.getState().agents.find((a) => a.agent_id === firing.agent_id);
-    const stagedId = uuidv7();
-    await emitAppEvent({
-      type: "status_beat",
-      beat: { kind: "running", title: firing.agent_name, phase: "reading" },
-    });
+  for (const firing of agentRuntime().handleContext(context)) {
+    await stageFiring(firing.agent_id, firing.agent_name, context.occurred_at);
+  }
+}
 
-    // AUTONOMY, consumed rather than stored: draft_autonomy is the worker-granted
-    // grant that exists today. With it, the firing stages an automatic SHADOW —
-    // never a write; writes always pass the approval gate. Without it, the
-    // firing is a suggestion the user can act on. That is Level 2 vs Level 1,
-    // using the setting the product already has.
-    if (record?.draft_autonomy) {
-      const outcome = await runAgentShadow(firing.agent_id);
-      pushStaged({
-        staged_id: stagedId,
-        agent_id: firing.agent_id,
-        agent_name: firing.agent_name,
-        at: context.occurred_at,
-        outcome:
-          outcome.status === "shadow_complete"
-            ? { kind: "shadow", diff: outcome.diff, steps_run: outcome.steps_run }
-            : outcome.status === "needs_input"
-              ? { kind: "needs_input", detail: outcome.detail }
-              : { kind: "failed", detail: outcome.detail },
-      });
-    } else {
-      pushStaged({
-        staged_id: stagedId,
-        agent_id: firing.agent_id,
-        agent_name: firing.agent_name,
-        at: context.occurred_at,
-        outcome: { kind: "suggested" },
-      });
-    }
+/**
+ * Stages one firing, whichever evaluator produced it, applying autonomy.
+ *
+ * AUTONOMY, consumed rather than stored: `draft_autonomy` is the worker-granted
+ * grant that exists today. With it, a firing stages an automatic SHADOW — never
+ * a write; writes always pass the approval gate. Without it, the firing is a
+ * suggestion the user can act on. Level 2 vs Level 1, on the product's own knob.
+ */
+async function stageFiring(agentId: string, agentName: string, at: string): Promise<void> {
+  const record = useAgents.getState().agents.find((a) => a.agent_id === agentId);
+  await emitAppEvent({
+    type: "status_beat",
+    beat: { kind: "running", title: agentName, phase: "reading" },
+  });
+
+  if (record?.draft_autonomy) {
+    const outcome = await runAgentShadow(agentId);
+    pushStaged({
+      staged_id: uuidv7(),
+      agent_id: agentId,
+      agent_name: agentName,
+      at,
+      outcome:
+        outcome.status === "shadow_complete"
+          ? { kind: "shadow", diff: outcome.diff, steps_run: outcome.steps_run }
+          : outcome.status === "needs_input"
+            ? { kind: "needs_input", detail: outcome.detail }
+            : { kind: "failed", detail: outcome.detail },
+    });
+  } else {
+    pushStaged({
+      staged_id: uuidv7(),
+      agent_id: agentId,
+      agent_name: agentName,
+      at,
+      outcome: { kind: "suggested" },
+    });
   }
 }
 
 function pushStaged(run: StagedRun): void {
-  useAgentService.setState((s) => ({ staged: [run, ...s.staged].slice(0, 20) }));
+  useAgentService.setState((s) => {
+    // BOTH evaluators can be alive (Rust daemon + panel runtime), and each
+    // holds its own cooldown map — the same firing may arrive twice. One
+    // staged entry per agent per cooldown window, whoever announced it first.
+    const trigger = agentRuntime().get(run.agent_id)?.spec.trigger;
+    const cooldownMs = (trigger?.type === "context" ? trigger.cooldown_seconds : 300) * 1000;
+    const duplicate = s.staged.some(
+      (r) =>
+        r.agent_id === run.agent_id && Math.abs(Date.parse(run.at) - Date.parse(r.at)) < cooldownMs,
+    );
+    if (duplicate) return s;
+    return { staged: [run, ...s.staged].slice(0, 20) };
+  });
 }
 
 /**
