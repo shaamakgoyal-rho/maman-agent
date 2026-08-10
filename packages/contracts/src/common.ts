@@ -47,6 +47,7 @@ export const appCategory = z.enum([
   "email",
   "calendar",
   "research",
+  "messaging",
   "browser",
   "other",
 ]);

@@ -42,11 +42,12 @@ export function getMemoryRawEvents(): WorkflowEvent[] {
 
 /** The JS mirror of the Rust domain→category mapping, for preview + emission. */
 export function appCategoryOf(e: WorkflowEvent): string {
-  return e.app.domain?.includes("force.com")
-    ? "crm"
-    : e.app.domain?.includes("docs.google")
-      ? "spreadsheet"
-      : "browser";
+  const domain = e.app.domain ?? "";
+  if (domain.includes("force.com") || domain.includes("salesforce.com")) return "crm";
+  if (domain.includes("docs.google")) return "spreadsheet";
+  if (domain.includes("linkedin.com")) return "research";
+  if (domain.includes("slack.com") || domain.includes("teams.microsoft.com")) return "messaging";
+  return "browser";
 }
 
 /**

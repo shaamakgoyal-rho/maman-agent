@@ -76,7 +76,7 @@ describe("deterministic naming branches", () => {
    * nothing, and its object is whatever mostCommonObject defaulted to. They now
    * pin the replacement — a title built from the steps that were observed.
    */
-  it("describes a cross-app read as the shared object in both apps", () => {
+  it("names a cross-app workflow as the chain of hops", () => {
     const naming = deterministicName(
       candidate([
         "chrome:email:navigation:-:inbox:thread",
@@ -84,9 +84,9 @@ describe("deterministic naming branches", () => {
       ]),
       [episodeWith(["email", "calendar"])],
     );
-    // `thread` is the object BOTH steps carry, so it is the honest common noun;
-    // naming both apps avoids attributing the calendar's "event" to Gmail.
-    expect(naming.title).toBe("Open threads in Gmail and Calendar");
+    // Each hop names its app and what the visit was for — the chain says which
+    // habit this is where a single-app sentence would hide half the work.
+    expect(naming.title).toBe("Gmail lookup → Calendar search");
     expect(naming.title).not.toMatch(/^Automate your/);
   });
 
