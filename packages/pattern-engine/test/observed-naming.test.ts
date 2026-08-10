@@ -65,6 +65,19 @@ describe("titles name the work, not the fact that it repeats", () => {
     expect(describeObserved([t("erp", "table_read", "-", "tax")], [])).toContain("taxes");
   });
 
+  it("leaves an already-plural noun alone instead of double-pluralizing", () => {
+    // "account fieldses" was live on the Suggestions screen: the observed
+    // semantic type was already plural, and the pluralizer stacked another -es.
+    const title = describeObserved([t("crm", "table_read", "account_fields", "-")], []);
+    expect(title).toContain("account fields");
+    expect(title).not.toContain("fieldses");
+    // Sibilant singulars keep their -es; "already plural" must not eat them.
+    expect(describeObserved([t("crm", "table_read", "-", "boss")], [])).toContain("bosses");
+    expect(describeObserved([t("crm", "element_activated", "-", "search")], [])).toContain(
+      "searches",
+    );
+  });
+
   it("falls back to the target ROLE before admitting defeat", () => {
     // No semantic or object noun — but the role is observed evidence, and
     // "Review table rows" tells the reader which habit this is where
