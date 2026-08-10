@@ -10,6 +10,7 @@ import {
 import { useRecommendations } from "../../lib/recommendations.js";
 import { capabilitySnapshot, type CapabilityLine } from "../../lib/capabilities.js";
 import { useSettings, pauseUntil } from "../../state/settings.js";
+import { setSubtitleBarVisible } from "../../lib/statusbar.js";
 import { Button, Card, EmptyState, Muted, SectionTitle, StatusPill } from "../ui.js";
 import { PET_STATE_DESCRIPTIONS } from "../../pet/renderer.js";
 import type { PetStateName } from "../../pet/machine.js";
@@ -38,6 +39,7 @@ export function Home({ petState }: { petState: PetStateName }) {
   const [monthEndRepCount, setMonthEndRepCount] = useState(0);
   const [renewalRepCount, setRenewalRepCount] = useState(0);
   const [capabilities, setCapabilities] = useState<CapabilityLine[]>([]);
+  const [barError, setBarError] = useState<string | null>(null);
 
   useEffect(() => {
     void capabilitySnapshot(settings).then(setCapabilities);
@@ -236,6 +238,37 @@ export function Home({ petState }: { petState: PetStateName }) {
             </>
           )}
         </div>
+
+        {/* THE SUBTITLE BAR, TURNED OFF FROM HERE.
+            It was only reachable through Settings, which is the wrong place for
+            it: the bar is the thing sitting on top of the user's screen right
+            now, so the decision to have it belongs next to what it is
+            narrating. The same Tauri command runs either way, so the two
+            controls cannot disagree about whether it is showing. */}
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
+          <div>
+            <p className="text-sm">Subtitle bar</p>
+            <Muted>
+              {settings.statusbar_enabled
+                ? "Showing what Maman is doing, on top of your other windows."
+                : "Hidden. Maman keeps observing — this only affects whether you see the bar."}
+            </Muted>
+          </div>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              void setSubtitleBarVisible(!settings.statusbar_enabled, update).then((r) => {
+                // Stated, not swallowed. If the window would not obey, the
+                // preference has already been rolled back and the user needs to
+                // know why the bar is still there.
+                setBarError(r.ok ? null : r.detail);
+              });
+            }}
+          >
+            {settings.statusbar_enabled ? "Hide it" : "Show it"}
+          </Button>
+        </div>
+        {barError && <p className="mt-1 text-xs text-danger">{barError}</p>}
       </Card>
 
       <Card>
