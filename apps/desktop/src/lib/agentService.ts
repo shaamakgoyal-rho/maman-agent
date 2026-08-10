@@ -280,7 +280,10 @@ function pumpShadowQueue(): void {
           agent_id: job.agent_id,
           agent_name: job.agent_name,
           at: job.at,
-          outcome: { kind: "failed", detail: error instanceof Error ? error.message : "shadow run failed" },
+          outcome: {
+            kind: "failed",
+            detail: error instanceof Error ? error.message : "shadow run failed",
+          },
         });
       })
       .finally(() => {
