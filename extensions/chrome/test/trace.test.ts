@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseLocalActionTrace, traceReadiness } from "@maman/contracts";
-import { assembleTrace, pathTemplate, stepFrom, type TraceObservation } from "../src/lib/trace.js";
+import {
+  assembleTrace,
+  MAX_SESSION_OBSERVATIONS,
+  pathTemplate,
+  stepFrom,
+  TraceSession,
+  type TraceObservation,
+} from "../src/lib/trace.js";
 
 /**
  * CAPTURE MUST BE REPLAYABLE AND STILL REFUSE THE SAME THINGS.
@@ -208,5 +215,41 @@ describe("what capture produces is what the contract accepts", () => {
       { trace_id: "018f0000-0000-7000-8000-000000000102", apps: APPS },
     );
     expect(trace).toBeNull();
+  });
+});
+
+describe("a session buffers until the caller flushes", () => {
+  const newId = () => "018f0000-0000-7000-8000-000000000abc";
+
+  it("assembles what it buffered and empties itself", () => {
+    const session = new TraceSession(newId);
+    expect(session.push(obs({ kind: "copy", role: "textbox", accessibleName: "Domain" }))).toBe(
+      false,
+    );
+    session.push(obs({ kind: "paste", role: "textbox", accessibleName: "Website" }));
+    expect(session.size).toBe(2);
+
+    const trace = session.flush(APPS)!;
+    expect(trace.steps).toHaveLength(2);
+    expect(trace.steps[1]!.value_binding.kind).toBe("from_step");
+    // Flushing clears, so the next session cannot re-send the same work.
+    expect(session.size).toBe(0);
+    expect(session.flush(APPS)).toBeNull();
+  });
+
+  it("asks the caller to flush at the cap instead of growing forever", () => {
+    const session = new TraceSession(newId);
+    let asked = false;
+    for (let i = 0; i < MAX_SESSION_OBSERVATIONS + 10; i += 1) {
+      asked = session.push(obs({ kind: "click" })) || asked;
+    }
+    expect(asked).toBe(true);
+    expect(session.size).toBe(MAX_SESSION_OBSERVATIONS);
+  });
+
+  it("produces nothing from a session that was entirely refused", () => {
+    const session = new TraceSession(newId);
+    session.push(obs({ kind: "commit", field: { tag: "input", type: "password" } as never }));
+    expect(session.flush(APPS)).toBeNull();
   });
 });

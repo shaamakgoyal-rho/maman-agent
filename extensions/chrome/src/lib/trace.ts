@@ -233,3 +233,55 @@ export function assembleTrace(
     local_only: true,
   };
 }
+
+/**
+ * A WORK SESSION, buffered until it is worth sending.
+ *
+ * A content script's life is one page, but a routine crosses pages and apps, so
+ * observations accumulate here and flush on a boundary the caller decides
+ * (idle, page hide, or a cap). Keeping this out of content.ts is deliberate:
+ * the DOM glue stays untestable-but-trivial, and every rule that decides what
+ * leaves the page is exercised by tests.
+ *
+ * The cap is a safety valve, not a tuning knob — an unbounded buffer in a page
+ * that never navigates is a memory leak with the user's work in it.
+ */
+export const MAX_SESSION_OBSERVATIONS = 200;
+
+export class TraceSession {
+  private observations: TraceObservation[] = [];
+
+  constructor(private readonly newTraceId: () => string) {}
+
+  /** Whether anything worth flushing has accumulated. */
+  get size(): number {
+    return this.observations.length;
+  }
+
+  /**
+   * Records one observation. Returns true when the caller should flush now
+   * because the cap is reached — the session never flushes itself, so a caller
+   * cannot be surprised by network activity inside a DOM handler.
+   */
+  push(observation: TraceObservation): boolean {
+    if (this.observations.length >= MAX_SESSION_OBSERVATIONS) {
+      // Drop the OLDEST, not the newest: the recent steps are the ones a
+      // routine is most likely still building toward.
+      this.observations.shift();
+    }
+    this.observations.push(observation);
+    return this.observations.length >= MAX_SESSION_OBSERVATIONS;
+  }
+
+  /**
+   * Assembles and clears. Returns null when nothing survived capture — a
+   * session of nothing but refused fields produces no trace at all, rather than
+   * an empty shell that would read as "Maman watched and saw nothing happen".
+   */
+  flush(apps: LocalActionTrace["apps"]): LocalActionTrace | null {
+    if (this.observations.length === 0) return null;
+    const trace = assembleTrace(this.observations, { trace_id: this.newTraceId(), apps });
+    this.observations = [];
+    return trace;
+  }
+}
