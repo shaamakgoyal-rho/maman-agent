@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   browserAdapters,
+  type BrowserAdapterDeps,
   compileTraceToAgentSpec,
   intentFittingSteps,
   LocalAgentRuntime,
@@ -23,8 +24,7 @@ import {
   type WorkflowContext,
 } from "@maman/contracts";
 import { emitAppEvent, invokeCommand, isTauri, onAppEvent } from "./bridge.js";
-import { tauriAgentBrowserHost } from "./agentBrowser.js";
-import { mintAuthorization } from "./browserRun.js";
+import { browserActuationOrigins, browserDispatchDeps } from "./browserRun.js";
 import { useAgents } from "./agents.js";
 import { useSettings } from "../state/settings.js";
 import { userIsPresent } from "./presence.js";
@@ -40,7 +40,7 @@ import { userIsPresent } from "./presence.js";
  * context subscription live for the life of the webview.
  *
  * ENVIRONMENT: REAL, structurally. The runtime this service builds holds ONLY
- * the browser adapters over Maman's own window. `DemoSalesforceWorld`,
+ * the browser adapters over the signed Chrome relay. `DemoSalesforceWorld`,
  * `demoAdapterRegistry` and `local.parse_csv` are not imported by this module,
  * so no code path from a trigger can reach fixture data — an agent whose spec
  * wants a demo capability fails REGISTRATION with the capability named, which
@@ -101,17 +101,28 @@ function progress(phase: CreationPhase, detail: string): void {
 let runtime: LocalAgentRuntime | null = null;
 let booted = false;
 
-/** The REAL registry: browser adapters over Maman's own window. Nothing else. */
-function realRegistry() {
-  const origins = useSettings.getState().settings.browser_actuation_origins ?? [];
-  return browserAdapters({
-    host: tauriAgentBrowserHost(origins),
+/** The browser transport Create Agent uses: the paired Chrome extension relay. */
+function chromeRelayDeps(allowSupervisedBrowserWrites: boolean): BrowserAdapterDeps | null {
+  const origins = browserActuationOrigins(
+    useSettings.getState().settings.browser_actuation_origins ?? [],
+  );
+  if (origins.length === 0) return null;
+  const relay = browserDispatchDeps();
+  return {
+    dispatch: relay.dispatch,
     allowedOrigins: origins,
     userPresent: userIsPresent,
-    allowSupervisedBrowserWrites: true,
-    newRequestId: () => uuidv7(),
-    mintAuthorization,
-  });
+    allowSupervisedBrowserWrites,
+    newRequestId: relay.newRequestId,
+    mintAuthorization: relay.mintAuthorization,
+    now: relay.now,
+  };
+}
+
+/** The REAL registry: Chrome relay adapters only. Nothing demo or fixture-backed. */
+function realRegistry() {
+  const deps = chromeRelayDeps(true);
+  return deps ? browserAdapters(deps) : new Map();
 }
 
 function persistAgentChange(agent: RegisteredAgent): void {
@@ -119,6 +130,25 @@ function persistAgentChange(agent: RegisteredAgent): void {
     ...(agent.last_triggered_at ? { last_triggered_at: agent.last_triggered_at } : {}),
     ...(agent.last_run_at ? { last_run_at: agent.last_run_at } : {}),
   });
+}
+
+async function chromeRelayReady(): Promise<{ ok: true } | { ok: false; detail: string }> {
+  if (!isTauri()) {
+    return { ok: false, detail: "Chrome automation needs the desktop app." };
+  }
+  try {
+    const status = await invokeCommand<{ connected?: boolean }>("browser_relay_status");
+    if (status?.connected) return { ok: true };
+    return {
+      ok: false,
+      detail: "Chrome Browser Relay is not connected. Pair the extension and enable this site.",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: error instanceof Error ? error.message : "Chrome Browser Relay is unavailable.",
+    };
+  }
 }
 
 export function agentRuntime(): LocalAgentRuntime {
@@ -371,17 +401,17 @@ async function resolveShadowInputs(
       detail: "no catalogued intent says what to look for on the page",
     };
   }
-  const origins = useSettings.getState().settings.browser_actuation_origins ?? [];
+  const deps = chromeRelayDeps(false);
+  if (!deps) {
+    return {
+      ok: false,
+      needs_input: false,
+      detail: "Choose at least one Chrome actuation origin before this agent can look at the page.",
+    };
+  }
   const resolution = await resolveIntentOnSurface({
     intent,
-    deps: {
-      host: tauriAgentBrowserHost(origins),
-      allowedOrigins: origins,
-      userPresent: userIsPresent,
-      allowSupervisedBrowserWrites: false, // discovery only looks
-      newRequestId: () => uuidv7(),
-      mintAuthorization,
-    },
+    deps,
     ctx: {
       run_id: uuidv7(),
       organization_id: spec.organization_id,
@@ -633,6 +663,13 @@ export async function createAgentAndActivate(
   }
 
   progress("checking_runtime", "Checking this device can run it…");
+  const relay = await chromeRelayReady();
+  if (!relay.ok) {
+    await useAgents.getState().setState(agentId, "draft");
+    progress("failed", relay.detail);
+    return { ok: false, message: relay.detail };
+  }
+
   progress("registering", "Registering with the local runtime…");
   const registered = agentRuntime().registerAgent(spec);
   if (!registered.ok) {

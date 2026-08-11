@@ -20,8 +20,7 @@ import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
 import { DeterministicModelProvider } from "@maman/model-provider";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 import { browserAdapters } from "@maman/agent-runtime";
-import { tauriAgentBrowserHost } from "./agentBrowser.js";
-import { browserActuationOrigins, mintAuthorization } from "./browserRun.js";
+import { browserActuationOrigins, browserDispatchDeps } from "./browserRun.js";
 import { useSettings } from "../state/settings.js";
 
 /**
@@ -48,13 +47,15 @@ function compileCheckRegistry() {
     useSettings.getState().settings.browser_actuation_origins ?? [],
   );
   if (origins.length === 0) return registry;
+  const relay = browserDispatchDeps();
   for (const [id, adapter] of browserAdapters({
-    host: tauriAgentBrowserHost(origins),
+    dispatch: relay.dispatch,
     allowedOrigins: origins,
     userPresent: () => true, // presence is a RUN gate, not a compile gate
     allowSupervisedBrowserWrites: true,
-    newRequestId: () => uuidv7(),
-    mintAuthorization,
+    newRequestId: relay.newRequestId,
+    mintAuthorization: relay.mintAuthorization,
+    now: relay.now,
   })) {
     registry.set(id, adapter);
   }

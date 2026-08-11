@@ -35,6 +35,7 @@ export function Mother({ petState }: { petState: PetStateName }) {
   const agents = useAgents((s) => s.agents);
   const [busy, setBusy] = useState(false);
   const [why, setWhy] = useState(false);
+  const [demo, setDemo] = useState<{ steps: DemoStep[]; active: number } | null>(null);
   const [barError, setBarError] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -76,6 +77,10 @@ export function Mother({ petState }: { petState: PetStateName }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const showDemo = (item: RecommendationWithState) => {
+    setDemo({ steps: demoSteps(item), active: 0 });
   };
 
   return (
@@ -143,6 +148,9 @@ export function Mother({ petState }: { petState: PetStateName }) {
             <Button onClick={() => void create(top)} disabled={busy}>
               {busy ? "Creating…" : "Create agent"}
             </Button>
+            <Button variant="secondary" onClick={() => showDemo(top)} disabled={busy}>
+              Demo run
+            </Button>
             <Button
               variant="secondary"
               onClick={() => void act(top.signature, { type: "snoozed", option: "1w" })}
@@ -158,6 +166,14 @@ export function Mother({ petState }: { petState: PetStateName }) {
               Never suggest this
             </Button>
           </div>
+          {demo && (
+            <AutomationDemo
+              steps={demo.steps}
+              active={demo.active}
+              onStep={(active) => setDemo((current) => (current ? { ...current, active } : null))}
+              onClose={() => setDemo(null)}
+            />
+          )}
           {/* Evidence is auditable but not in the way — the technical case for
               the suggestion, only for someone who asks for it. */}
           <button
@@ -232,6 +248,139 @@ export function Mother({ petState }: { petState: PetStateName }) {
           </Muted>
         </Card>
       )}
+    </div>
+  );
+}
+
+type DemoStep = {
+  label: string;
+  detail: string;
+  action: "focus" | "fill" | "click" | "read";
+};
+
+function demoSteps(item: RecommendationWithState): DemoStep[] {
+  const fromSequence = item.candidate.canonical_sequence
+    .map((token) => {
+      const [, category, event, role, semantic, object] = token.split(":");
+      const target = [semantic, role].filter((v) => v && v !== "-").join(" ");
+      const context = [category, object].filter((v) => v && v !== "-").join(" / ");
+      if (event?.includes("value_committed")) {
+        return { label: `Fill ${target || "field"}`, detail: context, action: "fill" as const };
+      }
+      if (event?.includes("click") || event?.includes("press") || event?.includes("submit")) {
+        return { label: `Click ${target || "control"}`, detail: context, action: "click" as const };
+      }
+      if (event?.includes("focused") || event?.includes("focus")) {
+        return { label: `Focus ${target || "field"}`, detail: context, action: "focus" as const };
+      }
+      return { label: `Read ${target || "page"}`, detail: context, action: "read" as const };
+    })
+    .filter((step) => step.detail || step.label);
+
+  if (fromSequence.length > 0) return fromSequence.slice(0, 6);
+
+  return item.recommendation.evidence.redacted_steps.slice(0, 6).map((step) => ({
+    label: step.action,
+    detail: step.app,
+    action: step.action.toLowerCase().includes("click") ? "click" : "read",
+  }));
+}
+
+export function __demoStepsForTests(item: RecommendationWithState): DemoStep[] {
+  return demoSteps(item);
+}
+
+function AutomationDemo({
+  steps,
+  active,
+  onStep,
+  onClose,
+}: {
+  steps: DemoStep[];
+  active: number;
+  onStep: (step: number) => void;
+  onClose: () => void;
+}) {
+  // The walkthrough plays itself: the cursor advances a step at a time until
+  // the last one, and clicking a step jumps there (playback continues from
+  // it). Reduced motion turns autoplay off — the steps are still clickable,
+  // and nothing depends on the animation to be understood.
+  useEffect(() => {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    if (active >= steps.length - 1) return;
+    const timer = setTimeout(() => onStep(active + 1), 1600);
+    return () => clearTimeout(timer);
+  }, [active, steps.length, onStep]);
+
+  const current = steps[active] ?? steps[0];
+  const points = [
+    { left: "26%", top: "38%" },
+    { left: "70%", top: "40%" },
+    { left: "68%", top: "68%" },
+    { left: "36%", top: "66%" },
+    { left: "78%", top: "76%" },
+    { left: "48%", top: "48%" },
+  ];
+  const point = points[active % points.length]!;
+
+  return (
+    <div className="mt-3 rounded-lg border border-line bg-bg-soft p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold">Demo run</p>
+          <p className="text-xs text-muted">
+            A dry preview of what the agent will target. Nothing touches your browser.
+          </p>
+        </div>
+        <Button variant="secondary" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-[1.2fr_0.8fr]">
+        <div className="relative h-44 overflow-hidden rounded-lg border border-line bg-white">
+          <div className="flex h-7 items-center gap-1 border-b border-line bg-bg-soft px-2">
+            <span className="h-2 w-2 rounded-full bg-danger" />
+            <span className="h-2 w-2 rounded-full bg-warning" />
+            <span className="h-2 w-2 rounded-full bg-success" />
+            <span className="ml-2 h-3 flex-1 rounded bg-line" />
+          </div>
+          <div className="grid grid-cols-2 gap-3 p-4">
+            <div className="h-8 rounded border border-line bg-bg-soft" />
+            <div className="h-8 rounded border border-line bg-bg-soft" />
+            <div className="h-8 rounded border border-line bg-bg-soft" />
+            <div className="h-8 rounded border border-primary bg-primary/10" />
+            <div className="col-span-2 h-8 rounded border border-line bg-bg-soft" />
+            <div className="h-8 rounded bg-primary/80" />
+          </div>
+          <div
+            className="absolute h-5 w-5 transition-all duration-300"
+            style={{ left: point.left, top: point.top }}
+            aria-hidden="true"
+          >
+            <div className="h-0 w-0 border-l-[10px] border-r-[4px] border-t-[18px] border-l-ink border-r-transparent border-t-transparent drop-shadow" />
+            {current?.action === "click" && (
+              <span className="absolute -left-2 -top-2 h-7 w-7 rounded-full border border-primary" />
+            )}
+          </div>
+        </div>
+        <ol className="space-y-1.5">
+          {steps.map((step, index) => (
+            <li key={`${step.label}-${index}`}>
+              <button
+                className={`w-full rounded-md border px-2 py-1.5 text-left text-xs ${
+                  index === active ? "border-primary bg-primary/10" : "border-line bg-bg"
+                }`}
+                onClick={() => onStep(index)}
+              >
+                <span className="font-medium">
+                  {index + 1}. {step.label}
+                </span>
+                {step.detail && <span className="block text-muted">{step.detail}</span>}
+              </button>
+            </li>
+          ))}
+        </ol>
+      </div>
     </div>
   );
 }
