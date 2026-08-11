@@ -8,6 +8,8 @@
  */
 import { buildSemanticEvent, type FieldDescriptor } from "./lib/semantic.js";
 import { executeBrowserAction, type ActuationContext } from "./lib/actuate.js";
+import { accessibleName, roleOf } from "./lib/dom-adapter.js";
+import { TraceSession, type TraceObservation } from "./lib/trace.js";
 
 function describeField(el: Element): FieldDescriptor {
   const input = el as HTMLInputElement;
@@ -23,7 +25,62 @@ function describeField(el: Element): FieldDescriptor {
   };
 }
 
+/**
+ * THE REPLAYABLE LAYER, buffered here and flushed on a boundary.
+ *
+ * Private browsing is refused up front rather than per field: in an incognito
+ * context every observation becomes a hole, so `flush` yields nothing and no
+ * trace ever leaves the page.
+ */
+const incognito = chrome.extension?.inIncognitoContext === true;
+const session = new TraceSession(() => crypto.randomUUID());
+let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Records one interaction for the trace. Never reads a value. */
+function observe(kind: TraceObservation["kind"], el?: Element) {
+  const observation: TraceObservation = {
+    at: new Date().toISOString(),
+    kind,
+    pageUrl: location.href,
+    ...(incognito ? { refused: "private_browsing" as const } : {}),
+    ...(el && isFieldLike(el) ? { field: describeField(el) } : {}),
+    ...(el ? { role: roleOf(el) ?? el.tagName.toLowerCase() } : {}),
+    // A LABEL, not the data inside the control: `accessibleName` reads
+    // aria-label / <label> / button text, never `value`.
+    ...(el && accessibleName(el) ? { accessibleName: accessibleName(el).slice(0, 120) } : {}),
+    ...(el?.id ? { identifier: el.id } : {}),
+  };
+  if (session.push(observation)) void flushTrace();
+  else scheduleFlush();
+}
+
+/**
+ * A routine is finished when the user stops for a while. Idle is the boundary
+ * rather than a fixed window, because a workflow's length is the user's, not
+ * ours.
+ */
+const IDLE_FLUSH_MS = 20_000;
+function scheduleFlush() {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => void flushTrace(), IDLE_FLUSH_MS);
+}
+
+async function flushTrace() {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = undefined;
+  const trace = session.flush([{ category: "browser", origin: location.origin }]);
+  if (!trace) return; // nothing survived capture — say nothing
+  try {
+    await chrome.runtime.sendMessage({ type: "action_trace", trace });
+  } catch {
+    // Service worker asleep and the message lost. The trace is dropped rather
+    // than retried: a routine Maman half-remembers is worse than one it missed,
+    // and the next repetition produces another.
+  }
+}
+
 async function send(kind: "click" | "commit" | "navigation" | "copy" | "paste", el?: Element) {
+  observe(kind, el);
   const shape = await buildSemanticEvent({
     kind,
     ...(el && (kind === "commit" || kind === "click") && isFieldLike(el)
@@ -96,3 +153,7 @@ chrome.runtime.onMessage.addListener(
     return false; // answered synchronously
   },
 );
+
+// The page is going away: flush what the session has rather than losing a
+// routine to a navigation. `pagehide` fires where `unload` is unreliable.
+window.addEventListener("pagehide", () => void flushTrace(), { capture: true });

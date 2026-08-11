@@ -60,6 +60,48 @@ async function pair(token: string): Promise<{ ok: boolean; error?: string }> {
   }
 }
 
+/**
+ * Forwards a LocalActionTrace over the SAME signed channel as semantic events,
+ * with the same gates: not paired, no send; domain not enabled by the user, no
+ * send. The trace is the richer layer, so it never gets a looser rule than the
+ * shape — the origin is checked against the enabled list before anything
+ * leaves the browser.
+ */
+async function forwardTrace(trace: { apps?: { origin?: string }[] }): Promise<void> {
+  const state = await getState();
+  if (!state.shared_secret || !state.installation_id) return; // not paired yet
+  const enabled = state.enabled_domains ?? [];
+  const origins = (trace.apps ?? []).map((a) => a.origin).filter((o): o is string => Boolean(o));
+  const hostnames = origins.map((o) => {
+    try {
+      return new URL(o).hostname;
+    } catch {
+      return o;
+    }
+  });
+  // EVERY app in the trace must be enabled. One disabled surface in a
+  // cross-app routine means the trace describes work the user did not allow
+  // Maman to keep, so the whole trace stays here.
+  if (hostnames.length === 0) return;
+  if (!hostnames.every((h) => enabled.some((d) => h === d || h.endsWith(`.${d}`)))) return;
+
+  const envelope = await signEnvelope(
+    {
+      message_id: crypto.randomUUID(),
+      installation_id: state.installation_id,
+      timestamp: new Date().toISOString(),
+      nonce: newNonce(),
+      payload: { type: "action_trace", trace },
+    },
+    state.shared_secret,
+  );
+  try {
+    await chrome.runtime.sendNativeMessage(NATIVE_HOST, envelope);
+  } catch {
+    // Desktop offline: dropped, like a lost shape. The next repetition traces.
+  }
+}
+
 async function forwardEvent(shape: SemanticEventShape): Promise<void> {
   const state = await getState();
   if (!state.shared_secret || !state.installation_id) return; // not paired yet
@@ -273,6 +315,11 @@ chrome.runtime.onMessage.addListener(
   (message: { type: string; [k: string]: unknown }, sender, sendResponse) => {
     void (async () => {
       switch (message.type) {
+        case "action_trace": {
+          if (!sender.tab || !sender.url) return sendResponse({ ok: false });
+          await forwardTrace(message["trace"] as { apps?: { origin?: string }[] });
+          return sendResponse({ ok: true });
+        }
         case "semantic_event": {
           // Only accept events from our own content scripts on real tabs.
           if (!sender.tab || !sender.url) return sendResponse({ ok: false });

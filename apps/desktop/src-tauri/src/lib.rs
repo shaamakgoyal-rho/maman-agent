@@ -1791,6 +1791,56 @@ fn handle_bridge_request<R: Runtime>(
                 return serde_json::json!({"ok": true, "delivered": delivered});
             }
 
+            // THE REPLAYABLE LAYER. Same signed envelope, same gate, but its
+            // own persistence: a trace is not a WorkflowEvent and must never be
+            // projected into one.
+            if payload.get("type").and_then(|v| v.as_str()) == Some("action_trace") {
+                let Some(trace) = payload.get("trace") else {
+                    return serde_json::json!({"ok": false, "error": "missing trace"});
+                };
+                // The observation gate decides for traces exactly as it does
+                // for events: paused, hard-denied, user-private and
+                // not-allowlisted all refuse here, so a trace can never be
+                // stored from a surface whose EVENTS would have been dropped.
+                let settings = load_gate_settings(app);
+                let origin = trace
+                    .get("apps")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|a| a.get("origin"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let host = origin.trim_start_matches("https://").trim_start_matches("http://");
+                let probe = serde_json::json!({
+                    "source": "chrome",
+                    "app": { "display_name": host, "domain": host },
+                    "event_type": "value_committed",
+                });
+                if let Ok(Some(reason)) = gate_event(&settings, &probe) {
+                    return serde_json::json!({"ok": false, "error": reason});
+                }
+                let app2 = app.clone();
+                let trace2 = trace.clone();
+                let host2 = host.to_string();
+                let result: Result<String, String> = tauri::async_runtime::block_on(async move {
+                    let state = app2.state::<StoreState>();
+                    let guard = store_guard(&app2, &state).await?;
+                    guard
+                        .as_ref()
+                        .expect("initialized")
+                        .insert_action_trace(&trace2, &host2, store::EVENT_RETENTION_DAYS_DEFAULT)
+                        .await
+                        .map_err(|e| e.to_string())
+                });
+                return match result {
+                    Ok(id) => serde_json::json!({"ok": true, "trace_id": id}),
+                    // A refusal is REPORTED, not swallowed: a trace carrying
+                    // forbidden material means capture has a bug, and silence
+                    // would hide it.
+                    Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+                };
+            }
+
             if payload.get("type").and_then(|v| v.as_str()) != Some("semantic_event") {
                 return serde_json::json!({"ok": false, "error": "unsupported payload"});
             }
