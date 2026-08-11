@@ -518,3 +518,19 @@ store projection round-trip through the encrypted payload), Swift runner ALL
 CHECKS PASSED (stamped-order assembly incl. gaps and mixed numbering; wire
 names for the stamp). `pnpm lint / typecheck / test / build / format:check`
 all green.
+
+## 2026-08-11 — drained daemon firings dispatch through autonomy
+
+The daemon's staged firings stop dying as bare suggestions. Live firings
+already routed through autonomy (`draft_autonomy` → autonomous shadow via the
+worker pool); firings drained from `staged_runs.json` at boot were hardcoded
+to `{kind:"suggested"}` — the grant was ignored exactly when the daemon was
+the only thing awake. Drained firings now go through the same `stageFiring`
+routing (quiet: no status beat for history), so an autonomy-granted agent's
+shadow runs at boot and the user returns to the run's real outcome. The
+daemon's own invariant is unchanged: it matches and announces, never executes;
+a shadow is a proposal, never a write, and it re-resolves against the live
+page, failing closed when the moment has passed.
+
+Evidence: desktop 345 (2 new: drained firing + grant → the shadow's honest
+`needs_input`; without the grant → still `suggested`). Gate green.

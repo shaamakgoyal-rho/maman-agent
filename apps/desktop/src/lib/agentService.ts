@@ -164,7 +164,14 @@ export async function bootAgentService(): Promise<void> {
   });
 
   // Triggers that fired while no panel existed: the daemon persisted them, and
-  // draining here is what makes "it noticed while you were away" true.
+  // draining here is what makes "it noticed while you were away" true. Each
+  // drained firing goes through the SAME autonomy routing as a live one —
+  // an agent granted draft_autonomy gets its shadow dispatched now, so the
+  // user returns to a ready proposal instead of a suggestion that the daemon
+  // could have acted on. The shadow re-resolves against the live page and
+  // fails closed if the moment has passed; that is the run's honest answer,
+  // not a reason to downgrade the firing. `quiet` skips the status beat: a
+  // drained firing is history, not something running at this instant.
   if (isTauri()) {
     try {
       const raw = await invokeCommand<string>("staged_runs_drain");
@@ -175,13 +182,7 @@ export async function bootAgentService(): Promise<void> {
       }>;
       for (const firing of Array.isArray(parsed) ? parsed.reverse() : []) {
         if (firing.agent_id && firing.agent_name && firing.at) {
-          pushStaged({
-            staged_id: uuidv7(),
-            agent_id: firing.agent_id,
-            agent_name: firing.agent_name,
-            at: firing.at,
-            outcome: { kind: "suggested" },
-          });
+          await stageFiring(firing.agent_id, firing.agent_name, firing.at, { quiet: true });
         }
       }
     } catch {
@@ -216,12 +217,19 @@ async function handleContext(context: WorkflowContext): Promise<void> {
  * a write; writes always pass the approval gate. Without it, the firing is a
  * suggestion the user can act on. Level 2 vs Level 1, on the product's own knob.
  */
-async function stageFiring(agentId: string, agentName: string, at: string): Promise<void> {
+async function stageFiring(
+  agentId: string,
+  agentName: string,
+  at: string,
+  opts: { quiet?: boolean } = {},
+): Promise<void> {
   const record = useAgents.getState().agents.find((a) => a.agent_id === agentId);
-  await emitAppEvent({
-    type: "status_beat",
-    beat: { kind: "running", title: agentName, phase: "reading" },
-  });
+  if (!opts.quiet) {
+    await emitAppEvent({
+      type: "status_beat",
+      beat: { kind: "running", title: agentName, phase: "reading" },
+    });
+  }
 
   if (record?.draft_autonomy) {
     enqueueAutonomousShadow(agentId, agentName, at);
