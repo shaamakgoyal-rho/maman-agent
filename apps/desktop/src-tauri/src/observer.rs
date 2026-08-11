@@ -65,6 +65,10 @@ pub enum ObserverLine {
     /// `source: "macos_ax"` and all required fields).
     Event(Value),
     Boundary { reason: String },
+    /// One replayable LocalActionTrace assembled by the observer. Persisted into
+    /// the local-only action_traces table — never projected into a
+    /// WorkflowEvent, never enqueued for sync.
+    ActionTrace(Value),
     Heartbeat { events_emitted: i64 },
     Error { code: String, fatal: bool },
     /// Geometry of the window being monitored, for docking the subtitle bar.
@@ -105,6 +109,10 @@ pub fn parse_observer_line(line: &str) -> ObserverLine {
         },
         Some("event") => match v.get("event") {
             Some(ev) if ev.is_object() => ObserverLine::Event(ev.clone()),
+            _ => ObserverLine::Ignored,
+        },
+        Some("action_trace") => match v.get("trace") {
+            Some(trace) if trace.is_object() => ObserverLine::ActionTrace(trace.clone()),
             _ => ObserverLine::Ignored,
         },
         Some("boundary") => ObserverLine::Boundary {
@@ -220,6 +228,27 @@ impl RestartPolicy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_an_action_trace_line_and_refuses_a_shapeless_one() {
+        let line = r#"{"type":"action_trace","trace":{"trace_id":"t-1","local_only":true,"steps":[]}}"#;
+        match parse_observer_line(line) {
+            ObserverLine::ActionTrace(trace) => {
+                assert_eq!(trace.get("trace_id").and_then(|v| v.as_str()), Some("t-1"));
+            }
+            other => panic!("expected an action trace, got {other:?}"),
+        }
+        // A trace key that is not an object is ignored rather than half-read:
+        // the store re-validates, but a malformed line must not reach it.
+        assert!(matches!(
+            parse_observer_line(r#"{"type":"action_trace","trace":"nope"}"#),
+            ObserverLine::Ignored
+        ));
+        assert!(matches!(
+            parse_observer_line(r#"{"type":"action_trace"}"#),
+            ObserverLine::Ignored
+        ));
+    }
+
     use super::*;
 
     #[test]

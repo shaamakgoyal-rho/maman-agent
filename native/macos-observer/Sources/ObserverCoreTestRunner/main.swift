@@ -475,6 +475,26 @@ do {
     }
 }
 
+// The action_trace message must ride the same line protocol the Rust core reads.
+do {
+    if let trace = ActionTrace.assemble(
+        observations: [
+            ActionTrace.Observation(
+                at: "2026-08-10T09:00:00.000Z", operation: "commit",
+                bundleId: "com.apple.Numbers", role: "AXTextField", label: "Phone")
+        ],
+        traceId: "018f0000-0000-7000-8000-0000000000dd", appCategory: "spreadsheet",
+        allowlistBundles: ["com.apple.Numbers"], privateApps: [], paused: false),
+        let line = try? ObserverMessage.actionTrace(trace).jsonLine()
+    {
+        check(line.contains("\"type\":\"action_trace\""), "the trace message names its wire type")
+        check(line.contains("\"trace\":"), "the trace rides under the trace key")
+        check(!line.contains("\n"), "one JSON object per line")
+    } else {
+        check(false, "an action_trace message encodes to a JSON line")
+    }
+}
+
 // The summary MUST stay at the very end of this file: it exits the process, so
 // any check written below it never runs (that silently disabled the
 // label-pattern and date checks until 2026-08-03).

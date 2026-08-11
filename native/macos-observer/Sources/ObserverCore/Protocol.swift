@@ -23,6 +23,11 @@ public enum ObserverMessage: Encodable, Sendable {
     /// Session lifecycle + per-frame refusals, so the UI can say honestly why
     /// nothing is being learned. Carries a reason string, never content.
     case teachStatus(sessionId: String, state: String, detail: String?, occurredAt: String)
+    /// ONE REPLAYABLE ROUTINE, assembled by ActionTrace. Rides the same stdout
+    /// line protocol as everything else, and the Rust core persists it into the
+    /// LOCAL-ONLY action_traces table — never into workflow_events, and never
+    /// into the sync outbox.
+    case actionTrace(ActionTrace.Trace)
 
     /// Logical points, top-left origin — the same convention as AX and as Tauri's
     /// logical coordinates, so no conversion happens anywhere in between.
@@ -79,7 +84,7 @@ public enum ObserverMessage: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case type, observerVersion = "observer_version", capabilities, pid, event, reason,
             occurredAt = "occurred_at", eventsEmitted = "events_emitted", code, message, fatal,
-            frame, jpegBase64 = "jpeg_b64", sessionId = "session_id", state, detail
+            frame, jpegBase64 = "jpeg_b64", sessionId = "session_id", state, detail, trace
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -112,6 +117,9 @@ public enum ObserverMessage: Encodable, Sendable {
             // Explicit null rather than an omitted key: "monitoring stopped" is a
             // real state the core must act on, not an absence to be guessed at.
             try c.encode(frame, forKey: .frame)
+        case let .actionTrace(trace):
+            try c.encode("action_trace", forKey: .type)
+            try c.encode(trace, forKey: .trace)
         case let .teachFrame(meta, jpegBase64):
             try c.encode("teach_frame", forKey: .type)
             try c.encode(meta, forKey: .frame)
