@@ -194,9 +194,13 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
       }
       stepInputs["value"] = { source: "agent_input", ref: binding.input_id };
     } else if (binding.kind === "from_step") {
+      // The ref must name the producing step's OUTPUT KEY, not its step_id —
+      // the validator resolves step_output references against output_key, and
+      // the seeding smoke test caught exactly this mismatch (V-REF-2) after a
+      // unit test had only asserted the binding's source.
       stepInputs["value"] = {
         source: "step_output",
-        ref: `${trace.trace_id.slice(0, 8)}-s${binding.step}`,
+        ref: `step_${binding.step}`,
       };
     } else if (binding.kind === "local_constant") {
       // The encrypted reference travels; the VALUE stays in the store. Nothing

@@ -184,7 +184,15 @@ describe("a missing fact becomes one question, not a form", () => {
     };
     const result = compile(t);
     if (!result.ok) throw new Error(result.detail);
-    expect(result.spec.steps[1]!.inputs["value"]).toMatchObject({ source: "step_output" });
+    // Not just the source — the REF must resolve to the producing step's
+    // output_key, and the whole spec must pass the validator. The weaker
+    // assertion here let a V-REF-2 mismatch reach main.
+    expect(result.spec.steps[1]!.inputs["value"]).toEqual({
+      source: "step_output",
+      ref: "step_1",
+    });
+    const validation = validateAgentSpec(result.spec);
+    expect(validation.valid, JSON.stringify(validation)).toBe(true);
   });
 
   it("never inlines an encrypted constant's value", () => {
