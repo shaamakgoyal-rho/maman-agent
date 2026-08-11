@@ -51,7 +51,7 @@ const BROWSER_OPERATIONS: Record<
   read_field: { capability: "browser.extract_structured_fields", mode: "read" },
   list_controls: { capability: "browser.extract_structured_fields", mode: "read" },
   set_value: { capability: "browser.propose_form_fill", mode: "propose_write" },
-  press: { capability: "browser.propose_form_fill", mode: "propose_write" },
+  press: { capability: "browser.press_control", mode: "propose_write" },
 };
 
 export type TraceCompileRequest = {
@@ -202,6 +202,10 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
         source: "step_output",
         ref: `step_${binding.step}`,
       };
+      // The read step's output is an object of every field it read; this names
+      // the one this value actually came from. Discovered by shadow-testing:
+      // without it the binding validated and then failed at run time.
+      stepInputs["value_field"] = { source: "literal", value: binding.output };
     } else if (binding.kind === "local_constant") {
       // The encrypted reference travels; the VALUE stays in the store. Nothing
       // here can decrypt it, so a constant cannot leak into a spec.

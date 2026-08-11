@@ -314,6 +314,68 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
    * halts on the first failure rather than pressing on, so a partial application
    * is reported as partial instead of retried into an unknown state.
    */
+  /**
+   * PRESS: a click as a first-class, previewable write.
+   *
+   * The shadow proposal names the exact control; nothing is clicked until the
+   * user approves that proposal, and the write dispatches click_control with
+   * confirm_name so the page-side executor re-checks it is pressing the control
+   * the user saw.
+   */
+  registry.set("browser.press_control", {
+    id: "browser.press_control",
+    proposeWrite: async (inputs, _ctx): Promise<ProposedDiff> => {
+      const targets = fieldsFromTargetBinding(inputs);
+      const name = targets[0]?.name;
+      if (!name) throw new Error("No control is bound, so there is nothing to press.");
+      const origin = await requireOrigin(d);
+      return {
+        summary: {
+          input_rows: 0,
+          confident_matches: 0,
+          ambiguous_skipped: 0,
+          missing: 0,
+          change_count: 1,
+          accounts_affected: 1,
+        },
+        changes: [
+          {
+            account_id: origin,
+            account_name: origin,
+            field: name,
+            old_value: "not pressed",
+            new_value: `press “${name}”`,
+          },
+        ],
+      };
+    },
+    write: async (_inputs, approvedDiff, ctx) => {
+      if (approvedDiff.changes.length === 0) return { applied: 0, results: [] };
+      const steps: PlanStep[] = approvedDiff.changes.map((change, i) => ({
+        step_id: `press-${i + 1}-${change.field}`,
+        action: {
+          kind: "click_control",
+          target: { role: "button", name: change.field },
+          confirm_name: change.field,
+        } satisfies BrowserAction,
+        preview: `Press “${change.field}”`,
+        change_index: i,
+        write: true,
+      }));
+      const outcome = await executeBrowserPlan(
+        steps,
+        executeContext(d, ctx, { allowed: d.allowSupervisedBrowserWrites, approved: true }),
+        deps(d),
+      );
+      const applied = outcome.steps.filter((step) => step.status === "applied").length;
+      return {
+        applied,
+        halted: outcome.steps.length < approvedDiff.changes.length,
+        results: outcome.steps.map((step) => ({ step_id: step.step_id, status: step.status })),
+      };
+    },
+  });
+
   registry.set("browser.supervised_form_fill", {
     id: "browser.supervised_form_fill",
     // A propose implementation is required for a write capability (the validator
@@ -424,7 +486,22 @@ function fieldsFromTargetBinding(
   const name = (parsed as { name?: unknown }).name;
   if (typeof name !== "string" || name.length === 0) return [];
   const nth = (parsed as { nth?: unknown }).nth;
-  const value = inputs["value"];
+  let value = inputs["value"];
+  // A step_output binding delivers the READ step's whole output
+  // ({origin, values, unread}), not a scalar. `value_field` — emitted by the
+  // trace compiler from the from_step binding's `output` — names which read
+  // field the value came from. Without this, a dataflow agent validated
+  // cleanly and then failed at run time with "no field values configured".
+  const valueField = inputs["value_field"];
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    typeof valueField === "string" &&
+    typeof (value as { values?: Record<string, unknown> }).values === "object"
+  ) {
+    const picked = (value as { values: Record<string, unknown> }).values[valueField];
+    value = typeof picked === "string" ? picked : undefined;
+  }
   return [
     {
       name,
