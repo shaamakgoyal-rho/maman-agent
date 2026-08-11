@@ -1,5 +1,6 @@
 export * from "./common.js";
 export * from "./workflow-event.js";
+export * from "./action-trace.js";
 export * from "./pattern.js";
 export * from "./recommendation.js";
 export * from "./agent-spec.js";

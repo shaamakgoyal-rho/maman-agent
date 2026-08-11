@@ -36,6 +36,20 @@ export const patternFeatureEventSchema = z
     domain_object: packIdentifier.optional(),
     domain_action: packIdentifier.optional(),
     classifier_confidence: z.number().min(0).max(1).optional(),
+    /**
+     * Pointer to the encrypted local action trace that can actually REPLAY this
+     * moment (see action-trace.ts). Detection keeps running on this lossy
+     * projection; the compiler follows the pointer when it needs the locators
+     * and dataflow the projection deliberately throws away.
+     *
+     * A trace id is an opaque local UUID — not content, not identity, and
+     * meaningless off the device, so it does not widen this projection's privacy
+     * class. The reference points ONE WAY: events name a trace, and nothing from
+     * the trace is copied back in here.
+     */
+    trace_ref: uuid.optional(),
+    /** Which step of that trace this event corresponds to. */
+    trace_step_order: z.number().int().positive().optional(),
   })
   .strict();
 
