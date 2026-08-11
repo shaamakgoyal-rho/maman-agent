@@ -24,6 +24,8 @@ const ORIGIN = "https://acme.example";
 
 /** In-memory stand-ins for the Rust commands, plus a local app-event bus. */
 let agentsJson: string | null = null;
+/** The representative trace the store would return, or null (legacy path). */
+let storedTrace: string | null = null;
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
@@ -36,6 +38,7 @@ vi.mock("../src/lib/bridge.js", () => ({
       agentsJson = (args?.json as string) ?? null;
       return undefined;
     }
+    if (cmd === "action_trace_lookup") return storedTrace;
     if (cmd === "agent_browser_origin") return ORIGIN;
     if (cmd === "agent_browser_evaluate") {
       const expression = args?.expression as string;
@@ -143,6 +146,7 @@ function matchingContext() {
 
 beforeEach(async () => {
   agentsJson = null;
+  storedTrace = null;
   listeners.length = 0;
   __resetAgentServiceForTests();
   useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
@@ -305,5 +309,83 @@ describe("restart: the agent and its trigger come back", () => {
     await emitAppEvent(matchingContext());
     await settled();
     expect(useAgentService.getState().staged).toHaveLength(1);
+  });
+});
+
+describe("Create Agent compiles from the trace when one exists", () => {
+  const TRACE = {
+    schema_version: 1,
+    trace_id: "018f0000-0000-7000-8000-00000000t1aa".replace("t1", "b1"),
+    started_at: "2026-08-10T09:00:00.000Z",
+    ended_at: "2026-08-10T09:02:00.000Z",
+    apps: [{ category: "browser", origin: ORIGIN }],
+    steps: [
+      {
+        order: 1,
+        surface: "browser_dom",
+        origin: ORIGIN,
+        operation: "read_field",
+        target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+        value_binding: { kind: "none" },
+        preconditions: { requires_foreground: false, requires_user_presence: false },
+      },
+      {
+        order: 2,
+        surface: "browser_dom",
+        origin: ORIGIN,
+        operation: "press",
+        target: { role: "button", accessible_name: "Save", ancestry: [], menu_path: [] },
+        value_binding: { kind: "none" },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "record_updated", readback: "reread_target" },
+      },
+    ],
+    protected_segments: [],
+    pattern_event_refs: [],
+    local_only: true,
+  };
+
+  it("produces a spec with trace provenance, registers it, and shadows", async () => {
+    storedTrace = JSON.stringify(TRACE);
+    const result = await createOne();
+    if (!result.ok) throw new Error(`create failed: ${result.message}`);
+
+    const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
+    const spec = record.versions[record.versions.length - 1]!.spec;
+    // Compiled FROM THE EVIDENCE: provenance recorded, honest compiler identity,
+    // and the trigger comes from the trace's own origin.
+    expect(spec.compiler).toBe("deterministic-local");
+    expect(spec.source_trace_id).toBe(TRACE.trace_id);
+    expect(spec.trigger).toMatchObject({ type: "context", origin: ORIGIN });
+    // Registered and past draft — the click is still the whole verb.
+    expect(record.state).toBe("shadow");
+    expect(agentRuntime().get(result.agent_id)).toBeDefined();
+    // And it is NOT the recipe path's output.
+    expect(JSON.stringify(spec).toLowerCase()).not.toContain("reconcil");
+  });
+
+  it("refuses with the typed question when the trace cannot compile — no recipe fallback", async () => {
+    storedTrace = JSON.stringify({
+      ...TRACE,
+      steps: [{ ...TRACE.steps[0], operation: "drag_and_drop" }],
+    });
+    const result = await createOne();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // The refusal names what was watched; nothing fell back to compile-learned.
+    expect(result.message).toContain("drag and drop");
+    expect(result.missing_configuration?.[0]?.kind).toBe("workflow_definition");
+    expect(useAgents.getState().agents.filter((a) => a.state === "shadow")).toHaveLength(0);
+  });
+
+  it("falls back to the legacy pattern path when no trace exists", async () => {
+    storedTrace = null;
+    const result = await createOne();
+    if (!result.ok) throw new Error(`create failed: ${result.message}`);
+    const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
+    const spec = record.versions[record.versions.length - 1]!.spec;
+    // Legacy candidates predate capture; they keep working, without provenance.
+    expect(spec.source_trace_id).toBeUndefined();
+    expect(record.state).toBe("shadow");
   });
 });

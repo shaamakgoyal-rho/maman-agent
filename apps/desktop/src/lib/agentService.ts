@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   browserAdapters,
+  compileTraceToAgentSpec,
   intentFittingSteps,
   LocalAgentRuntime,
   observedSemantics,
@@ -9,14 +10,15 @@ import {
   FIELD_VALUES_INPUT,
   diffSha256,
   type ApprovedOutcome,
-  type MissingConfiguration,
   type ProposedDiff,
   type RegisteredAgent,
   type ShadowOutcome,
 } from "@maman/agent-runtime";
 import {
+  parseLocalActionTrace,
   uuidv7,
   type AgentSpec,
+  type MissingConfigurationItem,
   type PatternCandidate,
   type WorkflowContext,
 } from "@maman/contracts";
@@ -486,7 +488,7 @@ export type CreateAgentOutcome =
       ok: false;
       message: string;
       /** Typed through from the compiler so the UI can route to Teach. */
-      missing_configuration?: MissingConfiguration[];
+      missing_configuration?: MissingConfigurationItem[];
     };
 
 /**
@@ -499,6 +501,59 @@ export type CreateAgentOutcome =
  * but could not register reports the exact gap and the record stays a draft —
  * visibly incomplete rather than dressed as an agent.
  */
+type TraceCompileAttempt =
+  | { kind: "compiled"; agent_id: string; trigger: AgentSpec["trigger"] }
+  | { kind: "refused"; message: string; missing_configuration: MissingConfigurationItem[] }
+  | { kind: "no_trace" };
+
+/**
+ * Finds the representative trace for this candidate's origin and compiles it.
+ *
+ * "Newest trace for the origin" is the representative until trace_ref stamping
+ * joins candidates to their exact traces — stated here so nobody mistakes the
+ * heuristic for the join. No trace at all is a normal answer (candidates that
+ * predate capture) and falls through to the legacy pattern path.
+ */
+async function compileFromRepresentativeTrace(
+  candidate: PatternCandidate,
+  displayName?: string,
+): Promise<TraceCompileAttempt> {
+  if (!isTauri()) return { kind: "no_trace" };
+  const derived = deriveTrigger(candidate);
+  const origin = derived.type === "context" ? derived.origin : undefined;
+  if (!origin) return { kind: "no_trace" };
+  const host = origin.replace(/^https?:\/\//, "").split("/")[0]!;
+
+  let raw: string | null = null;
+  try {
+    raw = await invokeCommand<string | null>("action_trace_lookup", { host });
+  } catch {
+    return { kind: "no_trace" }; // lookup unavailable ≠ refusal
+  }
+  if (!raw) return { kind: "no_trace" };
+
+  const parsed = parseLocalActionTrace(JSON.parse(raw));
+  if (!parsed.ok) return { kind: "no_trace" }; // an unusable stored trace is not the user's problem to answer for
+
+  const result = compileTraceToAgentSpec({
+    trace: parsed.trace,
+    pattern_id: candidate.pattern_id,
+    owner_user_id: "00000000-0000-7000-8000-000000000001",
+    organization_id: "00000000-0000-7000-8000-000000000002",
+    name: displayName ?? "A workflow I watched you repeat",
+    availableCapabilities: new Set(realRegistry().keys()),
+  });
+  if (!result.ok) {
+    return {
+      kind: "refused",
+      message: result.missing_configuration[0]?.detail ?? result.detail,
+      missing_configuration: result.missing_configuration,
+    };
+  }
+  await useAgents.getState().createFromSpec(result.spec, candidate, displayName);
+  return { kind: "compiled", agent_id: result.spec.agent_id, trigger: result.spec.trigger };
+}
+
 export async function createAgentAndActivate(
   candidate: PatternCandidate,
   generalizedIntent: string,
@@ -508,23 +563,46 @@ export async function createAgentAndActivate(
   useAgentService.setState({ creation: [] });
   progress("compiling", "Compiling the workflow…");
 
-  const created = await useAgents
-    .getState()
-    .createDraft(candidate, generalizedIntent, desiredOutcome, displayName);
-  if (!created.ok) {
-    progress("failed", created.message);
+  // THE TRACE PATH, FIRST. If observation kept a replayable trace of this
+  // routine, the agent is compiled FROM THE EVIDENCE — every step an observed
+  // action, provenance in the spec — instead of matched to a recipe. The
+  // legacy pattern path below survives only for candidates that predate trace
+  // capture; when a trace EXISTS but cannot compile, the typed refusal is the
+  // answer (one inline question), never a recipe substitution.
+  let agentId: string;
+  let compiledTrigger: AgentSpec["trigger"] | null = null;
+  const fromTrace = await compileFromRepresentativeTrace(candidate, displayName);
+  if (fromTrace.kind === "refused") {
+    progress("failed", fromTrace.message);
     return {
       ok: false,
-      message: created.message,
-      ...(created.missing_configuration
-        ? { missing_configuration: created.missing_configuration }
-        : {}),
+      message: fromTrace.message,
+      missing_configuration: fromTrace.missing_configuration,
     };
   }
-  const agentId = created.agent.agent_id;
+  if (fromTrace.kind === "compiled") {
+    progress("compiling", "Compiled from the workflow I watched — no model, no recipe.");
+    agentId = fromTrace.agent_id;
+    compiledTrigger = fromTrace.trigger;
+  } else {
+    const created = await useAgents
+      .getState()
+      .createDraft(candidate, generalizedIntent, desiredOutcome, displayName);
+    if (!created.ok) {
+      progress("failed", created.message);
+      return {
+        ok: false,
+        message: created.message,
+        ...(created.missing_configuration
+          ? { missing_configuration: created.missing_configuration }
+          : {}),
+      };
+    }
+    agentId = created.agent.agent_id;
+  }
 
   progress("installing_trigger", "Installing the trigger…");
-  const trigger = deriveTrigger(candidate);
+  const trigger = compiledTrigger ?? deriveTrigger(candidate);
   const spec = await useAgents.getState().finalizeCreation(agentId, trigger, "shadow");
   if (!spec) {
     progress("failed", "The trigger did not pass spec validation.");

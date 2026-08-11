@@ -1126,6 +1126,30 @@ impl LocalStore {
             .map_err(|e| StoreError::InvalidPayload(e.to_string()))
     }
 
+    /// The newest trace for one app/host, decrypted — the "representative
+    /// trace" a Create Agent click compiles from. Newest is the honest default
+    /// representative until trace_ref stamping lands: the most recent complete
+    /// observation of the routine is the one closest to what the user just did.
+    pub async fn latest_action_trace_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        let hmac = self.app_hmac(host);
+        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT trace_id, encrypted_payload FROM action_traces
+             WHERE app_hmac = ? ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(&hmac)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((trace_id, blob)) = row else { return Ok(None) };
+        let aad = self.aad("action_traces", &trace_id, 1);
+        let plaintext = self.decrypt(&blob, &aad)?;
+        serde_json::from_slice(&plaintext)
+            .map(Some)
+            .map_err(|e| StoreError::InvalidPayload(e.to_string()))
+    }
+
     /// How many traces exist right now. Used by the Privacy screen to report
     /// what deletion would actually remove.
     pub async fn action_trace_count(&self) -> Result<i64, StoreError> {
