@@ -534,3 +534,38 @@ page, failing closed when the moment has passed.
 
 Evidence: desktop 345 (2 new: drained firing + grant → the shadow's honest
 `needs_input`; without the grant → still `suggested`). Gate green.
+
+## 2026-08-11 — Create Agent runs on the signed Chrome relay, with a Demo run preview
+
+Production agent creation is off the owned Tauri browser window. The browser
+adapters accept a second transport — a signed `dispatch` function (the Chrome
+relay's `browser_action_dispatch`) that wins over `host` — and Create Agent,
+the compile-check registry, and shadow discovery all build on it. Relay
+readiness gates creation: a missing/unpaired relay fails with "Chrome Browser
+Relay is not connected. Pair the extension and enable this site." and the
+record stays draft. Origins per transport: an owned window is asked directly
+(absence stays "window is not open" / "could not look"); the relay is probed
+with one bounded read-only `list_controls`, and every observation's origin
+comes from the page's own signed answer. The owned-window transport survives
+only in the labelled demo arcs (`runs.ts`, the named debt).
+
+Fixed along the way: the raw dispatch result shape uses the contract's
+`resolved_name`, not the page-script `accessible_name` the own-window
+transport translates — the desktop mocks used the wrong key, so the "happy
+path" was silently failing schema parse and reaching `needs_input` for the
+wrong reason. With the fix the seeded demo agents' shadows produce their real
+proposals through `browser_action_dispatch`.
+
+Demo run: a secondary button beside Create agent opens an inline dry preview —
+mock browser frame, auto-advancing mock cursor (disabled under
+prefers-reduced-motion), click ring on click steps, active-step highlighting —
+mapped from the candidate's canonical sequence (focus/fill/click/read) with a
+redacted-evidence fallback. Explanatory only; it dispatches nothing.
+
+Evidence: agent-runtime 24 adapter tests (3 new: dispatch-only reads with
+page-answered origin; probe discovers origin read-only; no-transport refuses
+cleanly), desktop 348 (relay-disconnected refusal keeps draft + never
+dispatches; happy path dispatches and never calls agent_browser_evaluate;
+demo-step mapping + evidence fallback; acceptance write/readback and shadow
+queue migrated to the relay shape), full gate green (lint, typecheck, test,
+build, format:check, `git diff --check`).

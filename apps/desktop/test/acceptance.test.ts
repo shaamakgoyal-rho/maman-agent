@@ -53,13 +53,14 @@ vi.mock("../src/lib/bridge.js", () => ({
       return undefined;
     }
     if (cmd === "staged_runs_drain") return "[]";
-    if (cmd === "agent_browser_origin") return ORIGIN;
-    if (cmd === "agent_browser_evaluate") {
-      const expression = args?.expression as string;
-      const marker = "})(";
-      const literal = expression.slice(expression.lastIndexOf(marker) + marker.length, -1);
-      const { request_id, action } = JSON.parse(JSON.parse(literal) as string) as {
+    if (cmd === "browser_relay_status") return { connected: true, in_flight: 0 };
+    // The signed Chrome relay — production's only browser transport. The page
+    // answers `browser_action_dispatch` in the contract's raw result shape.
+    if (cmd === "browser_action_dispatch") {
+      const { request_id, run_id, step_id, action } = args?.request as {
         request_id: string;
+        run_id: string;
+        step_id: string;
         action: {
           kind: string;
           roles?: string[];
@@ -68,13 +69,22 @@ vi.mock("../src/lib/bridge.js", () => ({
           expect_current?: string;
         };
       };
+      const base = {
+        schema_version: 1,
+        type: "browser_action_result",
+        request_id,
+        run_id,
+        step_id,
+        completed_at: new Date().toISOString(),
+      };
       if (action.kind === "list_controls") {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
           observed: {
-            accessible_name: "",
+            resolved_name: "",
             match_count: pageFields.size,
+            origin: ORIGIN,
             controls: [...pageFields.keys()].map((name) => ({
               role: "textbox",
               name,
@@ -83,15 +93,20 @@ vi.mock("../src/lib/bridge.js", () => ({
               duplicate_count: 1,
             })),
           },
-        });
+        };
       }
       const name = action.target?.name ?? "";
       if (action.kind === "read_field" && pageFields.has(name)) {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
-          observed: { value_after: pageFields.get(name), accessible_name: name, match_count: 1 },
-        });
+          observed: {
+            value_after: pageFields.get(name),
+            resolved_name: name,
+            match_count: 1,
+            origin: ORIGIN,
+          },
+        };
       }
       if (action.kind === "set_value" && pageFields.has(name)) {
         // Optimistic concurrency, exactly as the real page script enforces it.
@@ -99,26 +114,33 @@ vi.mock("../src/lib/bridge.js", () => ({
           typeof action.expect_current === "string" &&
           pageFields.get(name) !== action.expect_current
         ) {
-          return JSON.stringify({
-            request_id,
+          return {
+            ...base,
             outcome: "refused",
             refusal_reason: "precondition_failed",
-          });
+            observed: { resolved_name: name, match_count: 1, origin: ORIGIN },
+          };
         }
         const before = pageFields.get(name)!;
         pageFields.set(name, action.value ?? "");
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "applied",
           observed: {
             value_before: before,
             value_after: pageFields.get(name),
-            accessible_name: name,
+            resolved_name: name,
             match_count: 1,
+            origin: ORIGIN,
           },
-        });
+        };
       }
-      return JSON.stringify({ request_id, outcome: "refused", refusal_reason: "target_not_found" });
+      return {
+        ...base,
+        outcome: "refused",
+        refusal_reason: "no_match",
+        observed: { resolved_name: "", match_count: 0, origin: ORIGIN },
+      };
     }
     return undefined;
   },

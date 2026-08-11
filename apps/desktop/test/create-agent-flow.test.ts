@@ -30,13 +30,16 @@ let storedTrace: string | null = null;
 const exactTraces = new Map<string, string>();
 /** What the daemon persisted while no panel existed — drained once at boot. */
 let stagedRunsFile = "[]";
+let relayConnected = true;
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
+const invokedCommands: string[] = [];
 
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
   invokeCommand: async (cmd: string, args?: Record<string, unknown>) => {
+    invokedCommands.push(cmd);
     if (cmd === "agents_load") return agentsJson;
     if (cmd === "agents_save") {
       agentsJson = (args?.json as string) ?? null;
@@ -49,22 +52,30 @@ vi.mock("../src/lib/bridge.js", () => ({
       stagedRunsFile = "[]"; // drain semantics: read once, then gone
       return drained;
     }
-    if (cmd === "agent_browser_origin") return ORIGIN;
-    if (cmd === "agent_browser_evaluate") {
-      const expression = args?.expression as string;
-      const marker = "})(";
-      const literal = expression.slice(expression.lastIndexOf(marker) + marker.length, -1);
-      const { request_id, action } = JSON.parse(JSON.parse(literal) as string) as {
+    if (cmd === "browser_relay_status") return { connected: relayConnected, in_flight: 0 };
+    if (cmd === "browser_action_dispatch") {
+      const { request_id, run_id, step_id, action } = args?.request as {
         request_id: string;
+        run_id: string;
+        step_id: string;
         action: { kind: string; roles?: string[]; target?: { name: string } };
       };
+      const base = {
+        schema_version: 1,
+        type: "browser_action_result",
+        request_id,
+        run_id,
+        step_id,
+        completed_at: new Date().toISOString(),
+      };
       if (action.kind === "list_controls") {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
           observed: {
-            accessible_name: "",
+            resolved_name: "",
             match_count: 1,
+            origin: ORIGIN,
             controls: [...pageFields.keys()].map((name) => ({
               role: "textbox",
               name,
@@ -73,17 +84,27 @@ vi.mock("../src/lib/bridge.js", () => ({
               duplicate_count: 1,
             })),
           },
-        });
+        };
       }
       const name = action.target?.name ?? "";
       if (action.kind === "read_field" && pageFields.has(name)) {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
-          observed: { value_after: pageFields.get(name), accessible_name: name, match_count: 1 },
-        });
+          observed: {
+            value_after: pageFields.get(name),
+            resolved_name: name,
+            match_count: 1,
+            origin: ORIGIN,
+          },
+        };
       }
-      return JSON.stringify({ request_id, outcome: "refused", refusal_reason: "target_not_found" });
+      return {
+        ...base,
+        outcome: "refused",
+        refusal_reason: "no_match",
+        observed: { resolved_name: "", match_count: 0, origin: ORIGIN },
+      };
     }
     return undefined;
   },
@@ -160,7 +181,9 @@ beforeEach(async () => {
   storedTrace = null;
   exactTraces.clear();
   stagedRunsFile = "[]";
+  relayConnected = true;
   listeners.length = 0;
+  invokedCommands.length = 0;
   __resetAgentServiceForTests();
   useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
   useSettings.setState((s) => ({
@@ -181,6 +204,8 @@ describe("Create Agent is the whole verb", () => {
     // Registered with a runtime that can execute it.
     const registered = agentRuntime().get(result.agent_id);
     expect(registered).toBeDefined();
+    expect(invokedCommands).toContain("browser_action_dispatch");
+    expect(invokedCommands).not.toContain("agent_browser_evaluate");
 
     // The trigger is on the persisted spec — derived from the pattern, not manual.
     const spec = record.versions[record.versions.length - 1]!.spec;
@@ -226,6 +251,18 @@ describe("Create Agent is the whole verb", () => {
     expect(result.message.length).toBeGreaterThan(10);
     const record = useAgents.getState().agents[0];
     if (record) expect(record.state).toBe("draft");
+  });
+
+  it("refuses creation when the Chrome Browser Relay is not connected", async () => {
+    relayConnected = false;
+
+    const result = await createOne();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.message).toMatch(/Browser Relay is not connected/);
+    const record = useAgents.getState().agents[0];
+    if (record) expect(record.state).toBe("draft");
+    expect(invokedCommands).not.toContain("browser_action_dispatch");
   });
 });
 

@@ -40,28 +40,33 @@ vi.mock("../src/lib/bridge.js", () => ({
       return existsSync(AGENTS_PATH) ? readFileSync(AGENTS_PATH, "utf8") : null;
     if (cmd === "agents_save") return undefined; // NEVER write back to the device store from a test
     if (cmd === "staged_runs_drain") return "[]";
-    if (cmd === "agent_browser_origin") return currentOrigin;
-    if (cmd === "agent_browser_evaluate") {
-      const expression = args?.expression as string;
-      const marker = "})(";
-      const literal = expression.slice(expression.lastIndexOf(marker) + marker.length, -1);
-      const { request_id, action } = JSON.parse(JSON.parse(literal) as string) as {
+    if (cmd === "browser_relay_status") return { connected: true, in_flight: 0 };
+    // Production shadow runs on the signed Chrome relay now — the mocked page
+    // answers `browser_action_dispatch` in the contract's raw result shape.
+    if (cmd === "browser_action_dispatch") {
+      const { request_id, run_id, step_id, action } = args?.request as {
         request_id: string;
-        action: {
-          kind: string;
-          target?: { name: string };
-          value?: string;
-          expect_current?: string;
-        };
+        run_id: string;
+        step_id: string;
+        action: { kind: string; roles?: string[]; target?: { name: string } };
+      };
+      const base = {
+        schema_version: 1,
+        type: "browser_action_result",
+        request_id,
+        run_id,
+        step_id,
+        completed_at: new Date().toISOString(),
       };
       const fields = PAGES[currentOrigin]!;
       if (action.kind === "list_controls") {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
           observed: {
-            accessible_name: "",
+            resolved_name: "",
             match_count: fields.size,
+            origin: currentOrigin,
             controls: [...fields.keys()].map((name) => ({
               role: "textbox",
               name,
@@ -70,17 +75,27 @@ vi.mock("../src/lib/bridge.js", () => ({
               duplicate_count: 1,
             })),
           },
-        });
+        };
       }
       const name = action.target?.name ?? "";
       if (action.kind === "read_field" && fields.has(name)) {
-        return JSON.stringify({
-          request_id,
+        return {
+          ...base,
           outcome: "observed",
-          observed: { value_after: fields.get(name), accessible_name: name, match_count: 1 },
-        });
+          observed: {
+            value_after: fields.get(name),
+            resolved_name: name,
+            match_count: 1,
+            origin: currentOrigin,
+          },
+        };
       }
-      return JSON.stringify({ request_id, outcome: "refused", refusal_reason: "target_not_found" });
+      return {
+        ...base,
+        outcome: "refused",
+        refusal_reason: "no_match",
+        observed: { resolved_name: "", match_count: 0, origin: currentOrigin },
+      };
     }
     return undefined;
   },

@@ -492,3 +492,123 @@ describe("the request the transport sends is the one the page answers", () => {
     expect(buildEvalExpression).toBeTypeOf("function");
   });
 });
+
+describe("the Chrome-relay dispatch transport (no owned window)", () => {
+  /**
+   * A fake RELAY: answers `dispatch` the way the desktop's
+   * `browser_action_dispatch` command does — already-parsed result objects
+   * carrying the page's origin — with no OwnWindowHost anywhere. This is the
+   * transport production Create Agent runs on.
+   */
+  function relayPage(fields: Record<string, string>) {
+    const seen: string[] = [];
+    const dispatch = async (request: unknown): Promise<unknown> => {
+      const { request_id, run_id, step_id, action } = request as {
+        request_id: string;
+        run_id: string;
+        step_id: string;
+        action: { kind: string; roles?: string[]; target?: { name: string } };
+      };
+      seen.push(action.kind);
+      const base = {
+        schema_version: 1,
+        type: "browser_action_result",
+        request_id,
+        run_id,
+        step_id,
+        completed_at: "2026-08-07T12:00:01.000Z",
+      };
+      if (action.kind === "list_controls") {
+        return {
+          ...base,
+          outcome: "observed",
+          observed: {
+            resolved_name: "",
+            match_count: Object.keys(fields).length,
+            origin: ORIGIN,
+            controls: Object.keys(fields).map((name) => ({
+              role: "textbox",
+              name,
+              secure: false,
+              editable: true,
+              duplicate_count: 1,
+            })),
+          },
+        };
+      }
+      const name = action.target?.name ?? "";
+      if (action.kind === "read_field" && name in fields) {
+        return {
+          ...base,
+          outcome: "observed",
+          observed: {
+            value_after: fields[name],
+            resolved_name: name,
+            match_count: 1,
+            origin: ORIGIN,
+          },
+        };
+      }
+      return {
+        ...base,
+        outcome: "refused",
+        refusal_reason: "no_match",
+        observed: { resolved_name: "", match_count: 0, origin: ORIGIN },
+      };
+    };
+    return { dispatch, seen };
+  }
+
+  function relayDeps(
+    dispatch: BrowserAdapterDeps["dispatch"] | undefined,
+    over: Partial<BrowserAdapterDeps> = {},
+  ): BrowserAdapterDeps {
+    let n = 0;
+    return {
+      ...(dispatch ? { dispatch } : {}),
+      allowedOrigins: [ORIGIN],
+      userPresent: () => true,
+      allowSupervisedBrowserWrites: true,
+      newRequestId: () => `019fc4d0-130f-706e-b94e-5000000000${(n++).toString().padStart(2, "0")}`,
+      mintAuthorization: () => "z".repeat(43),
+      now: () => new Date("2026-08-07T12:00:00.000Z"),
+      ...over,
+    };
+  }
+
+  it("reads fields through the signed dispatch, and the origin comes from the page's answer", async () => {
+    const relay = relayPage({ Phone: "555-0100" });
+    const adapters = browserAdapters(relayDeps(relay.dispatch));
+    const out = (await adapters.get("browser.extract_structured_fields")!.read!(
+      { fields: ["Phone"] },
+      RUN,
+    )) as { values: Record<string, string>; origin: string };
+    expect(out.values.Phone).toBe("555-0100");
+    // No host exists here — the origin is what the RELAY observed, not what an
+    // owned window claims.
+    expect(out.origin).toBe(ORIGIN);
+    expect(relay.seen).toContain("read_field");
+  });
+
+  it("discovers the origin by PROBING the relay when nothing else can answer", async () => {
+    // press_control's proposal needs an origin, and this transport has no
+    // currentOrigin — the adapter must ask the page itself, read-only.
+    const relay = relayPage({ Phone: "555-0100" });
+    const adapters = browserAdapters(relayDeps(relay.dispatch));
+    const diff = await adapters.get("browser.press_control")!.proposeWrite!(
+      { target: JSON.stringify({ role: "button", name: "Save" }) },
+      RUN,
+    );
+    expect(diff.changes[0]).toMatchObject({ account_id: ORIGIN, field: "Save" });
+    // The probe is a bounded list_controls — a read, never a write.
+    expect(relay.seen).toContain("list_controls");
+    expect(relay.seen.every((kind) => kind !== "set_value" && kind !== "click_control")).toBe(true);
+  });
+
+  it("refuses cleanly when no browser transport is configured at all", async () => {
+    const adapters = browserAdapters(relayDeps(undefined, {}));
+    await expect(
+      adapters.get("browser.extract_structured_fields")!.read!({ fields: ["Phone"] }, RUN),
+    ).rejects.toThrow("No browser transport is configured.");
+  });
+});

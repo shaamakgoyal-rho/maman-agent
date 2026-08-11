@@ -32,8 +32,18 @@ import type { CapabilityAdapter, CapabilityContext, ProposedDiff } from "./adapt
 
 /** What the adapters need from the host to act at all. */
 export interface BrowserAdapterDeps {
-  /** Transport: Maman's own window, or any other `OwnWindowHost`. */
-  host: OwnWindowHost;
+  /**
+   * Transport: Maman's own window. Optional because the production desktop
+   * creation path can use the signed Chrome relay directly.
+   */
+  host?: OwnWindowHost;
+  /**
+   * Transport: a browser-action dispatch function, such as the signed Chrome
+   * relay. When present it wins over `host`.
+   */
+  dispatch?: ExecuteDeps["dispatch"];
+  /** Host-observed current origin, when the transport can answer it cheaply. */
+  currentOrigin?: () => Promise<string | null>;
   /** Origins the user has permitted for actuation. Empty ⇒ nothing runs. */
   allowedOrigins: readonly string[];
   /**
@@ -64,11 +74,16 @@ export interface BrowserFieldTarget {
 
 function deps(d: BrowserAdapterDeps): ExecuteDeps {
   return {
-    dispatch: ownWindowDispatch(d.host),
+    dispatch: d.dispatch ?? ownWindowDispatch(requiredHost(d)),
     mintAuthorization: d.mintAuthorization,
     newRequestId: d.newRequestId,
     now: d.now ?? (() => new Date()),
   };
+}
+
+function requiredHost(d: BrowserAdapterDeps): OwnWindowHost {
+  if (!d.host) throw new Error("No browser transport is configured.");
+  return d.host;
 }
 
 /**
@@ -96,13 +111,40 @@ function executeContext(
   };
 }
 
-/** Throws if the agent's window is not showing anything. */
-async function requireOrigin(d: BrowserAdapterDeps): Promise<string> {
-  const origin = await d.host.currentOrigin();
-  if (origin === null) {
+/**
+ * The origin the run is acting against, per transport. An owned window is
+ * asked directly and its absence is final — a window showing no page cannot
+ * answer a probe either. A dispatch transport (the Chrome relay) has no
+ * cheap answer, so the page itself is probed with one bounded read.
+ */
+async function requireOrigin(d: BrowserAdapterDeps, ctx: CapabilityContext): Promise<string> {
+  if (d.currentOrigin) {
+    const origin = await d.currentOrigin();
+    if (origin !== null) return origin;
+  } else if (d.host && !d.dispatch) {
+    const origin = await d.host.currentOrigin();
+    if (origin !== null) return origin;
     throw new Error("Maman's browser window is not open, so there is no page to act on.");
   }
-  return origin;
+  const probed = await probeOrigin(d, ctx);
+  if (probed) return probed;
+  throw new Error("Chrome Browser Relay is connected, but no allowed page answered.");
+}
+
+async function probeOrigin(d: BrowserAdapterDeps, ctx: CapabilityContext): Promise<string | null> {
+  const step: PlanStep = {
+    step_id: "probe-origin",
+    action: { kind: "list_controls", roles: ["textbox"], limit: 1 },
+    preview: "Find the current browser page",
+    change_index: null,
+    write: false,
+  };
+  const outcome = await executeBrowserPlan(
+    [step],
+    executeContext(d, ctx, { allowed: false, approved: false }),
+    deps(d),
+  );
+  return outcome.steps[0]?.observed?.origin ?? null;
 }
 
 /**
@@ -181,7 +223,16 @@ export async function discoverSurface(
   ctx: CapabilityContext,
   roles: readonly BrowserTargetRole[] = FIELD_ROLES,
 ): Promise<DiscoveredSurface> {
-  const origin = await requireOrigin(d);
+  // An owned window can say cheaply whether ANY page exists, and its absence
+  // must read as "could not look" — never as a page with no fields, and never
+  // as the relay's protocol failure. The relay transport has no such cheap
+  // answer; there, the listing itself is the look.
+  if (d.host && !d.dispatch && !d.currentOrigin) {
+    const origin = await d.host.currentOrigin();
+    if (origin === null) {
+      throw new Error("Maman's browser window is not open, so there is no page to act on.");
+    }
+  }
   const step: PlanStep = {
     step_id: "list-controls",
     action: { kind: "list_controls", roles: [...roles], limit: SURFACE_LIMIT },
@@ -205,7 +256,7 @@ export async function discoverSurface(
     );
   }
   return {
-    origin,
+    origin: first.observed?.origin ?? (await requireOrigin(d, ctx)),
     controls: first.observed?.controls ?? [],
     truncated: first.observed?.controls_truncated ?? false,
   };
@@ -235,17 +286,19 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
           "No fields were configured to read. Teach the workflow which fields matter first.",
         );
       }
-      const origin = await requireOrigin(d);
+      let origin: string | null = null;
       const values: Record<string, string> = {};
       const unread: string[] = [];
       for (const field of fields) {
-        const value = observedValue(await readField(d, field, ctx));
+        const result = await readField(d, field, ctx);
+        origin ??= result.observed?.origin ?? null;
+        const value = observedValue(result);
         if (value !== undefined) values[field.name] = value;
         // A field that could not be read is REPORTED, not silently omitted: a
         // caller comparing "before" values needs to know which are unknown.
         else unread.push(field.name);
       }
-      return { origin, values, unread };
+      return { origin: origin ?? (await requireOrigin(d, ctx)), values, unread };
     },
   });
 
@@ -269,11 +322,12 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
       if (wanted.length === 0) {
         throw new Error("No field values were configured, so there is nothing to propose.");
       }
-      const origin = await requireOrigin(d);
+      let origin: string | null = null;
       const changes: ProposedDiff["changes"] = [];
       let unreadable = 0;
       for (const field of wanted) {
         const result = await readField(d, field, ctx);
+        origin ??= result.observed?.origin ?? null;
         const current = observedValue(result);
         if (current === undefined) {
           // Cannot see the current value ⇒ cannot promise what would change.
@@ -282,11 +336,12 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
           continue;
         }
         if (current === field.value) continue; // already correct: no change
+        const changeOrigin = (origin ??= await requireOrigin(d, ctx));
         changes.push({
           // The record this change belongs to: the page's own URL path, which is
           // the only record identity available without inventing one.
-          account_id: origin,
-          account_name: origin,
+          account_id: changeOrigin,
+          account_name: changeOrigin,
           field: field.name,
           old_value: current,
           new_value: field.value,
@@ -324,11 +379,11 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
    */
   registry.set("browser.press_control", {
     id: "browser.press_control",
-    proposeWrite: async (inputs, _ctx): Promise<ProposedDiff> => {
+    proposeWrite: async (inputs, ctx): Promise<ProposedDiff> => {
       const targets = fieldsFromTargetBinding(inputs);
       const name = targets[0]?.name;
       if (!name) throw new Error("No control is bound, so there is nothing to press.");
-      const origin = await requireOrigin(d);
+      const origin = await requireOrigin(d, ctx);
       return {
         summary: {
           input_rows: 0,
