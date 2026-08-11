@@ -22,7 +22,11 @@ beforeAll(() => {
 
 const CONSTANT_REF = "018f0000-0000-7000-8000-00000000a1c1";
 
-const CAPABILITIES = new Set(["browser.extract_structured_fields", "browser.propose_form_fill"]);
+const CAPABILITIES = new Set([
+  "browser.extract_structured_fields",
+  "browser.propose_form_fill",
+  "browser.press_control",
+]);
 
 function trace(overrides: Partial<LocalActionTrace> = {}): LocalActionTrace {
   return {
@@ -190,6 +194,11 @@ describe("a missing fact becomes one question, not a form", () => {
     expect(result.spec.steps[1]!.inputs["value"]).toEqual({
       source: "step_output",
       ref: "step_1",
+    });
+    // …and the selector that picks the scalar out of the read step's output.
+    expect(result.spec.steps[1]!.inputs["value_field"]).toEqual({
+      source: "literal",
+      value: "Company",
     });
     const validation = validateAgentSpec(result.spec);
     expect(validation.valid, JSON.stringify(validation)).toBe(true);

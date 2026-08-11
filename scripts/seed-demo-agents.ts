@@ -42,7 +42,11 @@ const AGENTS_PATH = join(homedir(), "Library/Application Support/com.maman.deskt
 const DEMO_SUFFIX = " (demo)";
 const OWNER = "00000000-0000-7000-8000-000000000001";
 const ORG = "00000000-0000-7000-8000-000000000002";
-const CAPABILITIES = new Set(["browser.extract_structured_fields", "browser.propose_form_fill"]);
+const CAPABILITIES = new Set([
+  "browser.extract_structured_fields",
+  "browser.propose_form_fill",
+  "browser.press_control",
+]);
 
 type Step = LocalActionTrace["steps"][number];
 const at = (m: number, s = 0) =>

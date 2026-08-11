@@ -457,10 +457,11 @@ describe("what is deliberately NOT registered", () => {
     expect(browserAdapters(deps(page.host)).has("browser.extract_table")).toBe(false);
   });
 
-  it("registers exactly the three it can honour", async () => {
+  it("registers exactly the four it can honour", async () => {
     const page = fakePage({ fields: {} });
     expect([...browserAdapters(deps(page.host)).keys()].sort()).toEqual([
       "browser.extract_structured_fields",
+      "browser.press_control",
       "browser.propose_form_fill",
       "browser.supervised_form_fill",
     ]);

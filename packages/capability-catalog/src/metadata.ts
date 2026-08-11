@@ -153,6 +153,13 @@ export const CAPABILITIES: CapabilityMetadata[] = [
   cap("browser.extract_table", "browser", "Extract a table from the page", ["read"], "low"),
   cap("browser.extract_structured_fields", "browser", "Extract structured fields", ["read"], "low"),
   cap("browser.propose_form_fill", "browser", "Propose a form fill", ["propose_write"], "low"),
+  // A button press, previewable then approval-bound like any other write. The
+  // wire action is click_control; shadow only ever produces the proposal.
+  cap("browser.press_control", "browser", "Press a control", ["propose_write", "write"], "high", {
+    is_idempotent: false,
+    retry_class: "unsafe",
+    reversible: false,
+  }),
   cap(
     "browser.supervised_form_fill",
     "browser",
