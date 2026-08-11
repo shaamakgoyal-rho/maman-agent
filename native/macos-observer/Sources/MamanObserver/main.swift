@@ -25,6 +25,21 @@ final class ObserverRuntime {
     private var monotonicStart = DispatchTime.now()
     private var lastBoundaryReason: ObserverMessage.BoundaryReason?
     private var axObserver: AXObserver?
+
+    // ---- the replayable layer ----
+    //
+    // Observations accumulate here and flush as ONE trace on a boundary, because
+    // a routine is a sequence, not a notification. Refusals are recorded too:
+    // ActionTrace turns them into holes, which is how the desktop can tell
+    // "Maman looked away" from "nothing happened".
+    private var traceObservations: [ActionTrace.Observation] = []
+    private var lastObservationAt: Date?
+    /// A routine is over when the user stops for this long. Same boundary the
+    /// browser session uses, so both halves of a cross-app trace end together.
+    private let traceIdleSeconds: TimeInterval = 20
+    /// Safety valve, not a knob: an unbounded buffer is a memory leak with the
+    /// user's work in it.
+    private let maxTraceObservations = 200
     private var observedPid: pid_t = 0
     private var permissionErrorEmitted = false
 
@@ -132,6 +147,9 @@ final class ObserverRuntime {
     }
 
     private func handleAppActivated(_ app: NSRunningApplication) {
+        // Switching apps does not end a routine (they cross apps), but going
+        // idle does; the check lives in recordObservation so a switch mid-flow
+        // keeps one trace.
         let decision = decideObservation(
             bundleId: app.bundleIdentifier,
             appName: app.localizedName,
@@ -350,6 +368,53 @@ final class ObserverRuntime {
         trackWindowFrames(pid: pid)
     }
 
+    /// Records one AX interaction for the trace. Never reads a control's value:
+    /// `label` is a label, and the value-changed notification carries only that
+    /// a commit happened.
+    private func recordObservation(
+        app: NSRunningApplication, operation: String, role: String?, subrole: String?,
+        label: String?, windowTitle: String?, producesValue: Bool
+    ) {
+        // Idle since the last one means the previous routine ended — flush it
+        // before this observation joins a session it does not belong to.
+        if let last = lastObservationAt, Date().timeIntervalSince(last) > traceIdleSeconds {
+            flushTrace(app: app)
+        }
+        if traceObservations.count >= maxTraceObservations {
+            // Drop the OLDEST: the recent steps are the ones a routine is still
+            // building toward.
+            traceObservations.removeFirst()
+        }
+        traceObservations.append(
+            ActionTrace.Observation(
+                at: isoNow(), operation: operation, bundleId: app.bundleIdentifier,
+                role: role, subrole: subrole, label: label, identifier: nil, ancestry: [],
+                menuPath: [], windowTitle: windowTitle, producesValue: producesValue))
+        lastObservationAt = Date()
+    }
+
+    /// Assembles and emits, then clears. `assemble` re-runs the gate over every
+    /// observation, so a trace can never contain something the live gate would
+    /// have refused — and yields nil when nothing survived, in which case
+    /// nothing is emitted at all.
+    private func flushTrace(app: NSRunningApplication?) {
+        defer {
+            traceObservations.removeAll()
+            lastObservationAt = nil
+        }
+        guard !traceObservations.isEmpty else { return }
+        guard
+            let trace = ActionTrace.assemble(
+                observations: traceObservations,
+                traceId: UUID().uuidString,
+                appCategory: "other",
+                allowlistBundles: allowlistBundles,
+                privateApps: privateApps,
+                paused: paused)
+        else { return }
+        emit(.actionTrace(trace))
+    }
+
     fileprivate func handleAxNotification(element: AXUIElement, notification: String) {
         guard !paused else { return }
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
@@ -401,6 +466,12 @@ final class ObserverRuntime {
                 lastBoundaryReason = reason
                 emit(.boundary(reason: reason, occurredAt: isoNow()))
             }
+            // The refusal joins the trace so it becomes a HOLE. Without this a
+            // routine would look continuous across a password field, and a
+            // value could appear to flow through one.
+            recordObservation(
+                app: app, operation: "commit", role: role, subrole: subrole,
+                label: title, windowTitle: nil, producesValue: false)
         case .emit:
             lastBoundaryReason = nil
             let eventType: String
@@ -411,6 +482,13 @@ final class ObserverRuntime {
             default: return
             }
             emitSemantic(app: app, eventType: eventType, role: role, label: title)
+            // A focus change READS (it is where a value is taken from); a value
+            // change WRITES. That distinction is the dataflow edge.
+            recordObservation(
+                app: app,
+                operation: notification == kAXValueChangedNotification ? "commit" : "read",
+                role: role, subrole: subrole, label: title, windowTitle: title,
+                producesValue: notification == kAXFocusedUIElementChangedNotification)
             if notification == kAXFocusedWindowChangedNotification {
                 trackWindowFrames(pid: app.processIdentifier)
             } else {

@@ -2869,6 +2869,42 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                     {
                         Ok(Ok(Some(line))) => match observer::parse_observer_line(&line) {
                             observer::ObserverLine::Event(ev) => ingest_observer_value(&app, &ev).await,
+                            observer::ObserverLine::ActionTrace(trace) => {
+                                // The observer gated every notification and
+                                // ActionTrace re-gated the whole session;
+                                // insert_action_trace checks the forbidden
+                                // fields and the local_only literal AGAIN,
+                                // because a sidecar's output is data, not
+                                // authority.
+                                let bundle = trace
+                                    .get("apps")
+                                    .and_then(|a| a.as_array())
+                                    .and_then(|a| a.first())
+                                    .and_then(|a| a.get("bundle_id"))
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                let app2 = app.clone();
+                                let outcome = async move {
+                                    let state = app2.state::<StoreState>();
+                                    let mut guard = store_guard(&app2, &state).await?;
+                                    let store = guard.as_mut().ok_or("store unavailable")?;
+                                    store
+                                        .insert_action_trace(
+                                            &trace,
+                                            &bundle,
+                                            store::EVENT_RETENTION_DAYS_DEFAULT,
+                                        )
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                }
+                                .await;
+                                if let Err(e) = outcome {
+                                    // Reported, not swallowed: a refused trace
+                                    // means capture has a bug worth seeing.
+                                    let _ = app.emit("observer:trace_refused", e);
+                                }
+                            }
                             observer::ObserverLine::Boundary { .. } => {
                                 set_observer_status(&app, ObserverStatus::Observing);
                             }
