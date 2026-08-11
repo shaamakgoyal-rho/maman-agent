@@ -19,6 +19,50 @@ pub const FORBIDDEN_FIELDS: &[&str] = &[
     "screenshot",
 ];
 
+/// Extra field names refused inside an ACTION TRACE, on top of FORBIDDEN_FIELDS.
+///
+/// Mirrors `FORBIDDEN_TRACE_FIELDS` in packages/contracts/src/action-trace.ts —
+/// the two sides must agree, because a trace can arrive from the Swift observer
+/// (checked here) or be built in TypeScript (checked there). A trace legitimately
+/// carries locators, so the rule is not "no strings": it is "no field that could
+/// hold what was typed or whose data it was". Window and document titles are in
+/// the list because they must arrive already hashed.
+pub const FORBIDDEN_TRACE_FIELDS: &[&str] = &[
+    "typed",
+    "passcode",
+    "otp",
+    "one_time_code",
+    "card_number",
+    "cvv",
+    "authorization",
+    "frame",
+    "jpeg_b64",
+    "window_title",
+    "document_title",
+];
+
+/// Deep-scan a trace payload: the event rules PLUS the trace-only rules.
+pub fn find_forbidden_trace_field(payload: &Value) -> Option<String> {
+    if let Some(found) = find_forbidden_field(payload) {
+        return Some(found);
+    }
+    match payload {
+        Value::Object(map) => {
+            for (key, val) in map {
+                if FORBIDDEN_TRACE_FIELDS.contains(&key.to_lowercase().as_str()) {
+                    return Some(key.clone());
+                }
+                if let Some(found) = find_forbidden_trace_field(val) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(find_forbidden_trace_field),
+        _ => None,
+    }
+}
+
 /// Hard deny list (spec §10): contexts that must never be observed.
 /// Matched against app display names, bundle ids, and domains, lowercased.
 pub const HARD_DENY_SUBSTRINGS: &[&str] = &[

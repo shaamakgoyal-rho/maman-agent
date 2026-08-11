@@ -287,6 +287,27 @@ CREATE TABLE IF NOT EXISTS episode_traces (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_traces_signature ON episode_traces (pattern_signature, started_at DESC);
+-- LOCAL ACTION TRACES — the replayable second layer (see packages/contracts
+-- action-trace.ts). This is what lets Maman compile an agent from work it
+-- watched instead of asking the user to re-describe every field afterwards.
+--
+-- LOCAL-ONLY, like episode_traces and for stronger reasons: a trace carries
+-- locators, origins and menu paths. No code path enqueues from this table into
+-- sync_outbox, and the contract's `local_only` literal means a trace cannot
+-- even be SHAPED into a sync payload. The whole trace is encrypted; only the
+-- id, the app HMAC used for per-app deletion, and the timestamps used for
+-- retention are plaintext, because deletion and expiry must work without
+-- decrypting anything.
+CREATE TABLE IF NOT EXISTS action_traces (
+  trace_id TEXT PRIMARY KEY,
+  app_hmac TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  encrypted_payload BLOB NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_traces_app ON action_traces (app_hmac, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_action_traces_expiry ON action_traces (expires_at);
 "#;
 
 /// Additive column migrations for databases created before the columns existed
@@ -824,7 +845,14 @@ impl LocalStore {
             .bind(&hmac)
             .execute(&self.pool)
             .await?;
-        if result.rows_affected() > 0 {
+        // The replayable layer goes with it. Deleting an app's events while
+        // keeping the traces that reproduce the same work would leave the more
+        // sensitive half behind and make "delete this app's history" a lie.
+        let traces = sqlx::query("DELETE FROM action_traces WHERE app_hmac = ?")
+            .bind(&hmac)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() > 0 || traces.rows_affected() > 0 {
             self.tombstone("app_history", &hmac).await?;
             // Purge queued projections for this app so they never sync.
             sqlx::query("DELETE FROM sync_outbox WHERE app_hmac = ?")
@@ -832,12 +860,15 @@ impl LocalStore {
                 .execute(&self.pool)
                 .await?;
         }
-        Ok(result.rows_affected())
+        Ok(result.rows_affected() + traces.rows_affected())
     }
 
     pub async fn delete_all_events(&self) -> Result<u64, StoreError> {
         let result = sqlx::query("DELETE FROM workflow_events").execute(&self.pool).await?;
         sqlx::query("DELETE FROM workflow_episodes").execute(&self.pool).await?;
+        // Both layers, or the promise is false.
+        sqlx::query("DELETE FROM action_traces").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM episode_traces").execute(&self.pool).await?;
         sqlx::query("DELETE FROM sync_outbox WHERE message_type = 'event'")
             .execute(&self.pool)
             .await?;
@@ -871,7 +902,14 @@ impl LocalStore {
             .bind(&now)
             .execute(&self.pool)
             .await?;
-        Ok(a.rows_affected() + b.rows_affected())
+        // Traces expire on the SAME clock as the events they explain; a trace
+        // outliving its events would quietly extend retention for the richer
+        // layer.
+        let c = sqlx::query("DELETE FROM action_traces WHERE expires_at < ?")
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+        Ok(a.rows_affected() + b.rows_affected() + c.rows_affected())
     }
 
     // ---- outbox ----
@@ -1002,6 +1040,98 @@ impl LocalStore {
             .fetch_one(&self.pool)
             .await?;
         Ok(row.get::<i64, _>("n"))
+    }
+
+    // ---- action traces (the replayable layer; see action_traces DDL) ----
+
+    /// Validates, redaction-checks, encrypts and persists one LocalActionTrace.
+    ///
+    /// `app_display_name` is hashed to the same keyed HMAC the events use, so
+    /// "delete this app's history" reaches both layers with one identifier and
+    /// without decrypting anything.
+    ///
+    /// The guard runs BEFORE anything is written: a trace carrying a typed
+    /// value, an OTP, a card number or an unhashed window title is refused
+    /// outright rather than stored and filtered later.
+    pub async fn insert_action_trace(
+        &self,
+        trace: &serde_json::Value,
+        app_display_name: &str,
+        retention_days: i64,
+    ) -> Result<String, StoreError> {
+        if let Some(field) = crate::redaction::find_forbidden_trace_field(trace) {
+            return Err(StoreError::ForbiddenField(field));
+        }
+        // `local_only` is a literal `true` in the contract. Refusing anything
+        // else here means a payload shaped for sync cannot be persisted as a
+        // trace even if it reached this call.
+        if trace.get("local_only").and_then(|v| v.as_bool()) != Some(true) {
+            return Err(StoreError::InvalidPayload("trace is not local_only".into()));
+        }
+        let trace_id = trace
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StoreError::InvalidPayload("missing trace_id".into()))?;
+        let started_at = trace
+            .get("started_at")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StoreError::InvalidPayload("missing started_at".into()))?;
+        if !trace.get("steps").map(|v| v.is_array()).unwrap_or(false) {
+            return Err(StoreError::InvalidPayload("missing steps".into()));
+        }
+
+        let hmac = self.app_hmac(app_display_name);
+        let aad = self.aad("action_traces", trace_id, 1);
+        let plaintext =
+            serde_json::to_vec(trace).map_err(|e| StoreError::InvalidPayload(e.to_string()))?;
+        let blob = self.encrypt(&plaintext, &aad)?;
+        let expires_at = iso_days_from_now(retention_days);
+        sqlx::query(
+            "INSERT INTO action_traces (trace_id, app_hmac, started_at, encrypted_payload, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(trace_id) DO UPDATE SET
+               app_hmac = excluded.app_hmac,
+               started_at = excluded.started_at,
+               encrypted_payload = excluded.encrypted_payload,
+               expires_at = excluded.expires_at",
+        )
+        .bind(trace_id)
+        .bind(&hmac)
+        .bind(started_at)
+        .bind(blob)
+        .bind(&expires_at)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        Ok(trace_id.to_string())
+    }
+
+    /// Loads one trace by id, decrypted. `None` when it does not exist (or has
+    /// already been deleted or expired) — the compiler treats a missing trace as
+    /// "cannot replay this", never as "replay it from the lossy events".
+    pub async fn action_trace(
+        &self,
+        trace_id: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        let row: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT encrypted_payload FROM action_traces WHERE trace_id = ?")
+                .bind(trace_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((blob,)) = row else { return Ok(None) };
+        let aad = self.aad("action_traces", trace_id, 1);
+        let plaintext = self.decrypt(&blob, &aad)?;
+        serde_json::from_slice(&plaintext)
+            .map(Some)
+            .map_err(|e| StoreError::InvalidPayload(e.to_string()))
+    }
+
+    /// How many traces exist right now. Used by the Privacy screen to report
+    /// what deletion would actually remove.
+    pub async fn action_trace_count(&self) -> Result<i64, StoreError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM action_traces").fetch_one(&self.pool).await?;
+        Ok(count)
     }
 
     // ---- replay verification (two-tier local data; see episode_traces DDL) ----
@@ -1572,6 +1702,112 @@ mod tests {
             .await
             .expect("store opens");
         (store, path)
+    }
+
+    fn sample_trace(id: &str) -> serde_json::Value {
+        json!({
+            "schema_version": 1,
+            "trace_id": id,
+            "started_at": "2026-08-10T09:00:00.000Z",
+            "ended_at": "2026-08-10T09:04:00.000Z",
+            "apps": [{ "category": "crm", "origin": "acme.lightning.force.com" }],
+            "steps": [{
+                "order": 1,
+                "surface": "browser_dom",
+                "operation": "set_value",
+                "target": { "role": "textbox", "accessible_name": "Phone",
+                            "ancestry": [], "menu_path": [] },
+                "value_binding": { "kind": "runtime_input", "input_id": "new_phone",
+                                   "prompt": "Which number?" },
+                "preconditions": { "requires_foreground": true, "requires_user_presence": true }
+            }],
+            "protected_segments": [],
+            "pattern_event_refs": [],
+            "local_only": true
+        })
+    }
+
+    #[tokio::test]
+    async fn action_trace_roundtrips_encrypted_and_never_reaches_the_outbox() {
+        let dir = tempdir().unwrap();
+        let (store, path) = open_store(&dir).await;
+        let id = "018f0000-0000-7000-8000-0000000000t1";
+        store.insert_action_trace(&sample_trace(id), "Salesforce", 30).await.unwrap();
+
+        let loaded = store.action_trace(id).await.unwrap().expect("trace exists");
+        assert_eq!(loaded["steps"][0]["target"]["accessible_name"], "Phone");
+        assert_eq!(store.action_trace_count().await.unwrap(), 1);
+
+        // The locator must not be readable in the file — the payload is encrypted.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("acme.lightning.force.com"),
+            "origin readable on disk"
+        );
+        // And nothing enqueues traces for sync.
+        assert!(store.outbox_drain(10).await.unwrap().is_empty(), "a trace reached the outbox");
+    }
+
+    #[tokio::test]
+    async fn a_trace_carrying_forbidden_material_is_refused_before_it_is_written() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        for field in ["value", "otp", "card_number", "window_title", "keystrokes"] {
+            let mut trace = sample_trace("018f0000-0000-7000-8000-0000000000t2");
+            trace["steps"][0][field] = json!("leaked");
+            let err = store.insert_action_trace(&trace, "Salesforce", 30).await.unwrap_err();
+            assert!(
+                matches!(err, StoreError::ForbiddenField(ref f) if f == field),
+                "expected {field} to be refused, got {err:?}"
+            );
+        }
+        assert_eq!(store.action_trace_count().await.unwrap(), 0, "a refused trace was written");
+    }
+
+    #[tokio::test]
+    async fn a_payload_shaped_for_sync_cannot_be_stored_as_a_trace() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        let mut trace = sample_trace("018f0000-0000-7000-8000-0000000000t3");
+        trace["local_only"] = json!(false);
+        assert!(store.insert_action_trace(&trace, "Salesforce", 30).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_apps_history_removes_its_traces_too() {
+        // The whole point: deleting the events while keeping the traces that
+        // reproduce the same work would leave the MORE sensitive half behind.
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        store
+            .insert_action_trace(&sample_trace("018f0000-0000-7000-8000-0000000000t4"), "Salesforce", 30)
+            .await
+            .unwrap();
+        store
+            .insert_action_trace(&sample_trace("018f0000-0000-7000-8000-0000000000t5"), "Numbers", 30)
+            .await
+            .unwrap();
+
+        store.delete_app_history("Salesforce").await.unwrap();
+        assert_eq!(store.action_trace_count().await.unwrap(), 1, "wrong app's trace deleted");
+        assert!(store.action_trace("018f0000-0000-7000-8000-0000000000t4").await.unwrap().is_none());
+
+        store.delete_all_events().await.unwrap();
+        assert_eq!(store.action_trace_count().await.unwrap(), 0, "delete-all left traces behind");
+    }
+
+    #[tokio::test]
+    async fn retention_expires_traces_on_the_same_clock_as_events() {
+        let dir = tempdir().unwrap();
+        let (store, _) = open_store(&dir).await;
+        // Retention already elapsed: a trace must not outlive the events it explains.
+        store
+            .insert_action_trace(&sample_trace("018f0000-0000-7000-8000-0000000000t6"), "Salesforce", -1)
+            .await
+            .unwrap();
+        assert_eq!(store.action_trace_count().await.unwrap(), 1);
+        store.sweep_retention().await.unwrap();
+        assert_eq!(store.action_trace_count().await.unwrap(), 0, "expired trace survived");
     }
 
     #[tokio::test]
