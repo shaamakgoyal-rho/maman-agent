@@ -1,43 +1,48 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { hidePanel, onAppEvent, emitAppEvent } from "../lib/bridge.js";
 import type { PetStateName } from "../pet/machine.js";
 import { useSettings } from "../state/settings.js";
-import { useRecommendations } from "../lib/recommendations.js";
 import { Onboarding } from "./screens/Onboarding.js";
-import { Home } from "./screens/Home.js";
-import { Privacy } from "./screens/Privacy.js";
-import { Settings } from "./screens/Settings.js";
-import { Activity } from "./screens/Activity.js";
-import { Suggestions } from "./screens/Suggestions.js";
+import { Mother } from "./screens/Mother.js";
 import { Agents } from "./screens/Agents.js";
-import { Teach } from "./screens/Teach.js";
-import { Configure } from "./screens/Configure.js";
-import { useNavigation } from "../state/navigation.js";
+import { Privacy } from "./screens/Privacy.js";
 import { useLearnedWorkflows } from "../lib/learnedWorkflows.js";
 
-// Teach is deliberately NOT here. Demonstrating is something the user does at
-// the moment Maman says it could not see enough, so it opens from that card
-// rather than being a place to browse — see `useNavigation.openTeach`.
-const TABS = ["Home", "Suggestions", "Agents", "Activity", "Privacy", "Settings"] as const;
+/**
+ * THREE DESTINATIONS, NOT SIX TABS PLUS TWO TAKEOVERS.
+ *
+ * What this replaced: Home, Suggestions, Agents, Activity, Privacy, Settings —
+ * plus Configure and Teach as content-area takeovers. That navigation exposed
+ * the implementation (pipelines, replay evidence, execution lanes, detection
+ * thresholds, demo seeding, server enrollment) rather than the product.
+ *
+ *  - Mother — what Maman is doing, the ONE best suggestion, recent work.
+ *  - Agents — what exists, what it does, Test / Pause / Delete.
+ *  - Privacy & access — monitoring, exclusions, permissions, deletion, Advanced.
+ *
+ * Configure and Teach are GONE from the primary journey: a mother agent that
+ * watched you work and then hands you a field-mapping form has not learned
+ * anything. A value Maman cannot infer becomes a runtime input slot the pet asks
+ * about inline, at the moment it is needed.
+ *
+ * This component owns NO timers. The proactive loop lives in `lib/motherLoop.ts`
+ * at module scope (booted from the panel entry), so proactivity outlives any
+ * mounted screen; trigger evaluation and firing already live in the native
+ * daemon. React is a subscriber here, not the owner.
+ */
+const TABS = ["Mother", "Agents", "Privacy & access"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App() {
   const { settings, hydrated, hydrate } = useSettings();
-  const [tab, setTab] = useState<Tab>("Home");
-  const { configureWorkflowId, closeConfigure, teachOpen, closeTeach } = useNavigation();
+  const [tab, setTab] = useState<Tab>("Mother");
   const [reportedPetState, setReportedPetState] = useState<PetStateName | null>(null);
-  // Until the pet window reports, derive the display state from settings.
   const petState: PetStateName =
     reportedPetState ?? (settings.observation_paused ? "sleeping" : "looking_around");
-  // Approval view is a blocking panel state (M7 wires real approvals).
   const [blockingApproval] = useState(false);
 
   useEffect(() => {
     void hydrate();
-    // Learned workflows are persisted on disk; without this the panel starts
-    // with an empty list and a workflow the user taught yesterday reads as
-    // "not found" — their configuration silently invisible until a save
-    // overwrote it.
     void useLearnedWorkflows.getState().hydrate();
   }, [hydrate]);
 
@@ -52,51 +57,6 @@ export function App() {
     void emitAppEvent({ type: "pet_state_probe" });
     return () => unlisten?.();
   }, []);
-
-  // Proactive suggestion loop — the core "Maman notices repeated work and gently
-  // offers help" behavior. The panel webview is always alive (even while the
-  // window is hidden), so it periodically re-runs the pattern engine over
-  // observed activity and, when a NEW suggestion clears the surfacing policy
-  // (daily budget, quiet hours, not paused), tells the pet to wave. Without this
-  // the pipeline only ran when a tab was open and the pet never surfaced anything.
-  const wavingRef = useRef(false);
-  useEffect(() => {
-    if (!hydrated || !settings.onboarding_complete) return;
-    let cancelled = false;
-    let running = false;
-    const tick = async () => {
-      if (running || cancelled) return;
-      running = true;
-      try {
-        // The pet shows a distinct "thinking" state while a pattern is scored —
-        // the worker always knows when Maman is working on their history.
-        await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_STARTED" });
-        await useRecommendations.getState().refresh();
-        await emitAppEvent({ type: "simulate_pet_event", event: "THINKING_FINISHED" });
-        if (cancelled) return;
-        const st = useRecommendations.getState();
-        const hasNew = st.items.some((i) => i.entry.status === "new");
-        if (hasNew && !wavingRef.current && (await st.maybeSurface())) {
-          wavingRef.current = true;
-          await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_READY" });
-        } else if (!hasNew && wavingRef.current) {
-          wavingRef.current = false;
-          await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_HANDLED" });
-        }
-      } catch {
-        // A background tick must never crash the panel.
-      } finally {
-        running = false;
-      }
-    };
-    const initial = setTimeout(() => void tick(), 4000);
-    const id = setInterval(() => void tick(), 60_000);
-    return () => {
-      cancelled = true;
-      clearTimeout(initial);
-      clearInterval(id);
-    };
-  }, [hydrated, settings.onboarding_complete]);
 
   // Escape closes the panel unless a blocking approval is open.
   useEffect(() => {
@@ -146,23 +106,9 @@ export function App() {
         ))}
       </nav>
       <div className="flex-1 overflow-y-auto p-4">
-        {/* Configure belongs to one workflow, so it takes over the content area
-            rather than being a tab. The tab bar stays visible: leaving a
-            half-finished teach session must not require finishing it. */}
-        {configureWorkflowId ? (
-          <Configure workflowId={configureWorkflowId} onDone={closeConfigure} />
-        ) : teachOpen ? (
-          <Teach onDone={closeTeach} />
-        ) : (
-          <>
-            {tab === "Home" && <Home petState={petState} />}
-            {tab === "Suggestions" && <Suggestions />}
-            {tab === "Agents" && <Agents />}
-            {tab === "Activity" && <Activity />}
-            {tab === "Privacy" && <Privacy />}
-            {tab === "Settings" && <Settings />}
-          </>
-        )}
+        {tab === "Mother" && <Mother petState={petState} />}
+        {tab === "Agents" && <Agents />}
+        {tab === "Privacy & access" && <Privacy />}
       </div>
     </main>
   );

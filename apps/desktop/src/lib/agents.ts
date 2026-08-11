@@ -9,8 +9,6 @@ import {
 } from "@maman/contracts";
 import {
   compileAgentSpec,
-  demoAdapterRegistry,
-  DemoSalesforceWorld,
   renderPlainLanguagePlan,
   runtimeFromRegistry,
   stateAfterMaterialEdit,
@@ -19,7 +17,7 @@ import {
   type MissingConfiguration,
 } from "@maman/agent-runtime";
 import { DEFAULT_ORG_POLICY } from "@maman/policy-engine";
-import { DemoModelProvider } from "@maman/model-provider";
+import { DeterministicModelProvider } from "@maman/model-provider";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 import { browserAdapters } from "@maman/agent-runtime";
 import { tauriAgentBrowserHost } from "./agentBrowser.js";
@@ -27,12 +25,25 @@ import { browserActuationOrigins, mintAuthorization } from "./browserRun.js";
 import { useSettings } from "../state/settings.js";
 
 /**
- * Everything this device could execute, for the COMPILE-TIME capability check
- * only. Execution never uses this union: the agent service registers against a
- * real-only registry, and the demo arcs keep their own in runs.ts.
+ * What this device can REALLY execute, for the compile-time capability check.
+ *
+ * This used to be the union of the real browser adapters and the demo Salesforce
+ * world, which meant a workflow could pass the capability gate on the strength
+ * of a fixture and only fail later at registration. Worse, it put
+ * `demoAdapterRegistry` and `DemoSalesforceWorld` on the production creation
+ * path, so "no demo code in production" could not be asserted at all.
+ *
+ * It is now real-only, which makes the gate answer the honest question: can
+ * anything actually installed here run these steps? A demo-only spec fails
+ * COMPILE with its missing capability named — the same message registration
+ * would have produced, one step earlier. The demo arcs keep their own registry
+ * in runs.ts and are not reachable from here.
  */
 function compileCheckRegistry() {
-  const registry = demoAdapterRegistry(new DemoSalesforceWorld());
+  const registry = new Map<
+    string,
+    ReturnType<typeof browserAdapters> extends Map<string, infer A> ? A : never
+  >();
   const origins = browserActuationOrigins(
     useSettings.getState().settings.browser_actuation_origins ?? [],
   );
@@ -353,7 +364,7 @@ export const useAgents = create<AgentsStore>((set, get) => ({
       policy: DEFAULT_ORG_POLICY,
       policy_version_id: uuidv7(),
       now: () => new Date(),
-      model: new DemoModelProvider(),
+      model: new DeterministicModelProvider(),
       // Compile against the UNION of what this device could execute — the real
       // browser adapters (from the settings allowlist) plus the demo world.
       // This gate answers "can anything here run these steps?"; WHICH

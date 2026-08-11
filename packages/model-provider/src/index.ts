@@ -10,6 +10,7 @@ export {
   type NamingOutput,
   type CompileInput,
 } from "./provider.js";
+export { DeterministicModelProvider } from "./deterministic.js";
 export { DemoModelProvider } from "./demo.js";
 export { AnthropicModelProvider, type AnthropicProviderConfig } from "./anthropic.js";
 export {
@@ -20,7 +21,7 @@ export {
   type ModelPrice,
 } from "./pricing.js";
 
-import { DemoModelProvider } from "./demo.js";
+import { DeterministicModelProvider } from "./deterministic.js";
 import { AnthropicModelProvider } from "./anthropic.js";
 import type { ModelProvider } from "./provider.js";
 
@@ -38,5 +39,5 @@ export function createModelProvider(env: {
       compiler_model: env.ANTHROPIC_COMPILER_MODEL ?? "claude-sonnet-5",
     });
   }
-  return new DemoModelProvider();
+  return new DeterministicModelProvider();
 }
