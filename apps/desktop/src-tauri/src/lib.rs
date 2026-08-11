@@ -326,7 +326,14 @@ fn gate_event(settings: &GateSettings, event: &serde_json::Value) -> Result<Opti
             .iter()
             .any(|a| d == a || d.ends_with(&format!(".{a}")));
         let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
-        if !allowed && source == "chrome" {
+        // The observe-all opt-in extends to SITES, not just native apps —
+        // otherwise "observe every app I use" silently excluded most of the
+        // browser, which is where the work happens. The boundaries that hold
+        // regardless sit ABOVE this check and are not reachable from here:
+        // hard-denied identities (password managers, keychain, banking),
+        // user-private apps and sites, private browsing, and secure fields
+        // (refused at the observer before an event exists).
+        if !allowed && source == "chrome" && !settings.observe_all_apps {
             return Ok(Some("not_allowlisted".into()));
         }
     }
@@ -3081,6 +3088,46 @@ mod gate_tests {
         s.observation_paused = true;
         let verdict = gate_event(&s, &event("Salesforce", Some("salesforce.com"), "chrome")).unwrap();
         assert_eq!(verdict, Some("observation_paused".into()));
+    }
+
+    #[test]
+    fn observe_all_extends_to_unlisted_sites() {
+        // "Observe every app I use" includes the browser: an unlisted domain is
+        // admitted once the opt-in is on, instead of silently dropping most of
+        // the user's actual work.
+        let mut s = settings();
+        assert_eq!(
+            gate_event(&s, &event("Chrome", Some("app.hubspot.com"), "chrome")).unwrap(),
+            Some("not_allowlisted".into())
+        );
+        s.observe_all_apps = true;
+        assert_eq!(gate_event(&s, &event("Chrome", Some("app.hubspot.com"), "chrome")).unwrap(), None);
+    }
+
+    #[test]
+    fn observe_all_never_overrides_the_hard_deny_list() {
+        // The opt-in widens SCOPE; it does not touch the boundaries. Banking,
+        // password managers and keychain stay refused with it on.
+        let mut s = settings();
+        s.observe_all_apps = true;
+        assert_eq!(
+            gate_event(&s, &event("Chrome", Some("www.chase.com"), "chrome")).unwrap(),
+            Some("hard_denied".into())
+        );
+        assert_eq!(
+            gate_event(&s, &event("1Password 8", None, "macos_ax")).unwrap(),
+            Some("hard_denied".into())
+        );
+    }
+
+    #[test]
+    fn observe_all_never_overrides_the_user_private_list() {
+        let mut s = settings();
+        s.observe_all_apps = true;
+        assert_eq!(
+            gate_event(&s, &event("Figma", None, "macos_ax")).unwrap(),
+            Some("user_private".into())
+        );
     }
 
     #[test]

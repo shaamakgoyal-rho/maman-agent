@@ -317,7 +317,7 @@ export function Privacy() {
             checked={settings.observe_all_apps}
             onChange={(on) => void update({ observe_all_apps: on })}
             label="Observe every app I use"
-            description="Track work across all your apps. Always-off apps (password managers, banking, private windows) and secure fields are still never observed."
+            description="Track work across all your apps and sites, including ones not on the allowlist. Always-off apps and sites (password managers, banking, private windows) and secure fields are still never observed."
           />
         </div>
         {settings.observe_all_apps ? (

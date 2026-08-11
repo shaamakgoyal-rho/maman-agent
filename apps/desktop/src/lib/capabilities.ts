@@ -40,8 +40,9 @@ export async function capabilitySnapshot(settings: LocalSettings): Promise<Capab
       : {
           label: "Desktop observation",
           status: "active",
-          detail:
-            settings.allowlist_domains.length > 0
+          detail: settings.observe_all_apps
+            ? "Watching every app and site, except the always-off list (password managers, banking, private windows) and anything you marked private."
+            : settings.allowlist_domains.length > 0
               ? `Watching ${settings.allowlist_domains.length} site${settings.allowlist_domains.length === 1 ? "" : "s"} you allowed.`
               : "On, but no sites are allowed yet — nothing is being observed.",
         },
