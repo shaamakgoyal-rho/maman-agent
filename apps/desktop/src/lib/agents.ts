@@ -257,6 +257,17 @@ type AgentsStore = {
     /** The exact workflow name the card showed — becomes the agent's name. */
     displayName?: string,
   ) => Promise<CreateDraftResult>;
+  /**
+   * Persists a spec the TRACE COMPILER already produced and validated. The
+   * draft path compiles from the coarse pattern; this one arrives with the
+   * evidence attached (source_trace_id), so there is nothing left to compile —
+   * only to record.
+   */
+  createFromSpec: (
+    spec: AgentSpec,
+    candidate: PatternCandidate,
+    displayName?: string,
+  ) => Promise<AgentRecord>;
   /** Material edit: new immutable version; agent returns to shadow. */
   editDescription: (agentId: string, description: string) => Promise<boolean>;
   setState: (agentId: string, state: AgentRecord["state"]) => Promise<void>;
@@ -448,6 +459,40 @@ export const useAgents = create<AgentsStore>((set, get) => ({
           ? "Material writes will pause for your approval on every run."
           : "This draft is fully read-only.",
     };
+  },
+
+  createFromSpec: async (spec, candidate, displayName) => {
+    const agent: AgentRecord = {
+      agent_id: spec.agent_id,
+      name: displayName ?? spec.name,
+      state: "draft", // finalizeCreation moves it; never silently active
+      versions: [
+        {
+          version_id: spec.version_id,
+          version_number: 1,
+          spec,
+          // The plan IS the observed steps — no model wrote this prose.
+          plain_language_plan: spec.steps.map((step) => step.name),
+          intent_plan: [],
+          created_at: spec.created_at,
+          created_by: "compiler",
+        },
+      ],
+      created_at: spec.created_at,
+      source_candidate: candidate,
+      server_agent_id: null,
+      generalized_intent: spec.generalized_intent,
+      desired_outcome: spec.description,
+      approved_runs: 0,
+      draft_autonomy: false,
+      last_triggered_at: null,
+      last_run_at: null,
+    };
+    const agents = [...get().agents.filter((a) => a.agent_id !== agent.agent_id), agent];
+    await persist(agents);
+    set({ agents });
+    await emitAppEvent({ type: "status_beat", beat: { kind: "agent_ready", title: agent.name } });
+    return agent;
   },
 
   editDescription: async (agentId, description) => {
