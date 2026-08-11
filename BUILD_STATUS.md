@@ -431,3 +431,54 @@ live WorkOS/connector credentials, code-signing/notarization for the desktop
 app, load and chaos testing, and a full Playwright journey suite (the security-
 and value-critical paths are covered by the integration and E2E-preview checks
 recorded above).
+
+## 2026-08-10/11 — the mother-agent simplification and the trace-to-agent spine
+
+Merged as PRs #37–#48 (each squash-merged with all six CI checks green):
+
+- **Three-surface product** (#37): Mother / Agents / Privacy & access replace six
+  tabs plus the Configure/Teach takeovers; the proactive loop left React
+  (`lib/motherLoop.ts`, structured diagnostics instead of an empty catch); demo
+  fixtures are unreachable from the production graph — enforced by
+  `test/production-graph.test.ts`, which walks the real import graph and found
+  three genuine leaks the day it was written (DemoModelProvider naming, demo
+  compile-gate union, `userIsPresent` living beside the demo arcs).
+  `lib/runs.ts` remains the single NAMED debt (demo arcs + real run store in
+  one module), pinned by a ratchet test.
+- **Local action traces** (#38–#41): the encrypted replayable layer.
+  Contracts with raw values structurally unrepresentable; `action_traces`
+  table with atomic per-app/all deletion and same-clock retention; capture in
+  BOTH observers (Chrome content script sessions with copy→paste dataflow
+  recovery; Swift AX with menu paths and full-width title hashes) reusing each
+  side's existing deny gate so capture and tracing cannot disagree. Evidence:
+  18 contract tests, 5 store tests (incl. on-disk grep for plaintext), 18
+  extension tests, 11 mirrored Swift checks (61 total), Rust 176→181.
+- **Trace → agent compilation** (#42–#44, #46): `trace-compiler.ts` translates
+  observed steps into AgentSpecs (deterministic, model-free, zero
+  token/cost budgets as fact; refuses by typed `missing_configuration` instead
+  of guessing; a compiled spec can never contain the old Salesforce/CSV recipe
+  substitution — pinned by test). Create Agent tries the trace path first,
+  refuses honestly when a trace cannot compile, falls back to the pattern path
+  only when no trace exists. Shadow-testing the seeded demo agents caught two
+  real execution bugs the unit tests missed: `press` had no adapter (now
+  `browser.press_control`, proposal-bound click via `click_control`) and
+  `from_step` bindings lost the field name (now `value_field`). Agent-runtime
+  at 206 tests.
+- **Device demo state**: `scripts/seed-demo-agents.ts` stages three
+  "(demo)"-suffixed agents through the real compiler+validator into
+  agents.json (idempotent, `--remove` to clean); all three verified against
+  the real runtime by `apps/desktop/test/demo-agents-shadow.test.ts`
+  (skips where no seeded store exists): a proposed dataflow diff, a 3-step
+  press-chain proposal, and one honest `needs_input` question.
+- **Distribution**: releases moved onto this (now public) repository;
+  `v0.1.0-preview.3` published (universal DMG, sha pinned in release notes,
+  anonymous download verified byte-exact). Download page repositioned as the
+  enterprise proactive-agents thesis (#45, #48): zero JS, zero external
+  requests, honest three-column prototype status, disclosures ordered
+  Install → What it can see → Troubleshooting; live content verified on the
+  production alias.
+
+**Known-not-done, stated plainly**: `trace_ref` stamping (representative trace
+is still "newest for origin", a labeled heuristic); native daemon still
+announces rather than dispatches; no live-Chrome/AX end-to-end capture
+verification yet; no mamanctl; `runs.ts` split pending. See task notes.
