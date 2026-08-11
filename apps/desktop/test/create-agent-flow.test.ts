@@ -28,6 +28,8 @@ let agentsJson: string | null = null;
 let storedTrace: string | null = null;
 /** Traces retrievable BY ID — what action_trace_get serves. */
 const exactTraces = new Map<string, string>();
+/** What the daemon persisted while no panel existed — drained once at boot. */
+let stagedRunsFile = "[]";
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
@@ -42,6 +44,11 @@ vi.mock("../src/lib/bridge.js", () => ({
     }
     if (cmd === "action_trace_lookup") return storedTrace;
     if (cmd === "action_trace_get") return exactTraces.get(args?.traceId as string) ?? null;
+    if (cmd === "staged_runs_drain") {
+      const drained = stagedRunsFile;
+      stagedRunsFile = "[]"; // drain semantics: read once, then gone
+      return drained;
+    }
     if (cmd === "agent_browser_origin") return ORIGIN;
     if (cmd === "agent_browser_evaluate") {
       const expression = args?.expression as string;
@@ -152,6 +159,7 @@ beforeEach(async () => {
   agentsJson = null;
   storedTrace = null;
   exactTraces.clear();
+  stagedRunsFile = "[]";
   listeners.length = 0;
   __resetAgentServiceForTests();
   useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
@@ -314,6 +322,58 @@ describe("restart: the agent and its trigger come back", () => {
     await emitAppEvent(matchingContext());
     await settled();
     expect(useAgentService.getState().staged).toHaveLength(1);
+  });
+});
+
+describe("daemon firings drained at boot dispatch through autonomy", () => {
+  function reboot() {
+    __resetAgentServiceForTests();
+    listeners.length = 0;
+    useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
+    return bootAgentService();
+  }
+
+  function grantAutonomy(agentId: string) {
+    const parsed = JSON.parse(agentsJson!) as { agents: Array<{ agent_id: string }> };
+    for (const a of parsed.agents) {
+      if (a.agent_id === agentId) (a as { draft_autonomy?: boolean }).draft_autonomy = true;
+    }
+    agentsJson = JSON.stringify(parsed);
+  }
+
+  it("an autonomy-granted agent's drained firing becomes a SHADOW RUN, not a suggestion", async () => {
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+    grantAutonomy(created.agent_id);
+
+    // What the daemon wrote while every webview was closed.
+    stagedRunsFile = JSON.stringify([
+      { agent_id: created.agent_id, agent_name: "phone helper", at: new Date().toISOString() },
+    ]);
+    await reboot();
+    await settled();
+
+    // The firing was dispatched: the user returns to the shadow's real outcome
+    // (this agent writes with no supplied value, so the honest answer is the
+    // ask) — never a bare "suggested" the daemon already knew how to advance.
+    const staged = useAgentService.getState().staged;
+    expect(staged).toHaveLength(1);
+    expect(staged[0]!.outcome.kind).toBe("needs_input");
+  });
+
+  it("without the grant, a drained firing stays a suggestion — autonomy is consumed, not assumed", async () => {
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+
+    stagedRunsFile = JSON.stringify([
+      { agent_id: created.agent_id, agent_name: "phone helper", at: new Date().toISOString() },
+    ]);
+    await reboot();
+    await settled();
+
+    const staged = useAgentService.getState().staged;
+    expect(staged).toHaveLength(1);
+    expect(staged[0]!.outcome.kind).toBe("suggested");
   });
 });
 

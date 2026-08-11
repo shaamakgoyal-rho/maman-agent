@@ -11,7 +11,11 @@
 //! Deliberately narrow. This daemon MATCHES and ANNOUNCES; it never executes.
 //! Execution needs discovery, inputs, approvals — the panel's runtime owns
 //! those, and a daemon that wrote to pages while no one could watch would
-//! violate the presence gate the actuator enforces anyway.
+//! violate the presence gate the actuator enforces anyway. Dispatch still
+//! happens for what this daemon staged: on next boot the panel drains the
+//! file through its normal autonomy routing, so an agent granted
+//! draft_autonomy gets its shadow run (a proposal, never a write) without
+//! anyone re-approving the firing.
 //!
 //! Privacy: matching consumes exactly the canonical-token fields (category,
 //! event type, role, semantic, object, host) that pattern learning consumes.
