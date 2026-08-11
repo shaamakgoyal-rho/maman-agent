@@ -126,6 +126,17 @@ export const workflowEventSchema = z
      */
     classification: domainClassification.optional(),
     duration_ms: z.number().int().nonnegative().optional(),
+    /**
+     * Pointer to the encrypted local action trace recorded alongside this
+     * event, stamped BY THE OBSERVER at capture time (both observers mint the
+     * trace id when a session starts, so the very events of that session can
+     * name it). An opaque local UUID — not content, not identity, meaningless
+     * off the device — carried through storage into PatternFeatureEvent so a
+     * candidate can be joined to the exact trace that can replay it.
+     */
+    trace_ref: uuid.optional(),
+    /** Which step of that trace this event corresponds to. */
+    trace_step_order: z.number().int().positive().optional(),
     sensitivity,
     redaction: z
       .object({

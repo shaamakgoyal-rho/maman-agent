@@ -42,6 +42,11 @@ public enum ActionTrace {
         public let windowTitle: String?
         /// True when this step read a value another step will consume.
         public let producesValue: Bool
+        /// Step order pre-assigned at capture time, so the pattern event
+        /// emitted for the SAME interaction can be stamped with it before the
+        /// trace flushes. Monotonic per session — survives the drop-oldest cap
+        /// without shifting, which positional numbering would not.
+        public let stepOrder: Int?
 
         public init(
             at: String,
@@ -54,7 +59,8 @@ public enum ActionTrace {
             ancestry: [String] = [],
             menuPath: [String] = [],
             windowTitle: String? = nil,
-            producesValue: Bool = false
+            producesValue: Bool = false,
+            stepOrder: Int? = nil
         ) {
             self.at = at
             self.operation = operation
@@ -67,6 +73,7 @@ public enum ActionTrace {
             self.menuPath = menuPath
             self.windowTitle = windowTitle
             self.producesValue = producesValue
+            self.stepOrder = stepOrder
         }
     }
 
@@ -191,6 +198,12 @@ public enum ActionTrace {
         var steps: [Step] = []
         var holes: [ProtectedSegment] = []
         var lastRead: (order: Int, output: String)?
+        // Highest order used so far. A pre-assigned order (stamped at capture)
+        // wins; an unstamped observation continues above the maximum rather
+        // than positionally, so the two numbering sources can never collide —
+        // the contract rejects duplicate orders, and a collision here would
+        // refuse a whole trace after a perfectly good capture.
+        var maxOrder = 0
 
         for observation in observations {
             let decision = decideObservation(
@@ -220,7 +233,8 @@ public enum ActionTrace {
                 break
             }
 
-            let order = steps.count + 1
+            let order = observation.stepOrder ?? maxOrder + 1
+            maxOrder = max(maxOrder, order)
             let writes = observation.operation == "commit" || observation.operation == "set_value"
             var binding: Binding = .none
             if observation.producesValue {

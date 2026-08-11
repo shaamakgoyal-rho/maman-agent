@@ -202,3 +202,40 @@ describe("tunable detection bars (live demo tuning)", () => {
     expect(result.episodes.length).toBe(6);
   });
 });
+
+describe("the trace_ref join (candidate → exact trace)", () => {
+  const DAY_REFS: Record<string, string> = {
+    "2026-07-14": "018f0000-0000-7000-8000-0000000000d1",
+    "2026-07-15": "018f0000-0000-7000-8000-0000000000d2",
+    "2026-07-16": "018f0000-0000-7000-8000-0000000000d3",
+  };
+  const LONE_REF = "018f0000-0000-7000-8000-00000000feed";
+
+  /** Fixture events stamped the way a live observer would: one trace session
+   * per day, except the very last event, which starts its own session — an
+   * idle-flush boundary landing mid-episode. */
+  const stampedEvents = () => {
+    const events = fixtureEvents();
+    events.forEach((e, i) => {
+      e.trace_ref = DAY_REFS[e.occurred_at.slice(0, 10)]!;
+      e.trace_step_order = i + 1;
+    });
+    events.at(-1)!.trace_ref = LONE_REF;
+    return events;
+  };
+
+  it("joins the candidate to the DOMINANT trace of its newest episode", () => {
+    const result = runPatternEngine(stampedEvents(), options());
+    const eligible = result.candidates.find((c) => c.status === "eligible")!;
+    // The newest episode's events mostly carry the newest day's session ref;
+    // the lone tail ref must not win just for being last.
+    expect(eligible.representative_trace_ref).toBe(DAY_REFS["2026-07-16"]);
+    expect(eligible.representative_trace_ref).not.toBe(LONE_REF);
+  });
+
+  it("is honestly absent for candidates whose events predate stamping", () => {
+    const result = runPatternEngine(fixtureEvents(), options());
+    const eligible = result.candidates.find((c) => c.status === "eligible")!;
+    expect(eligible.representative_trace_ref).toBeUndefined();
+  });
+});

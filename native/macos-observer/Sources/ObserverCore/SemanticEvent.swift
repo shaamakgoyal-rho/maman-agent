@@ -19,6 +19,12 @@ public struct SemanticEvent: Encodable, Sendable {
     public var durationMs: Int?
     public var sensitivity: String
     public var redaction: Redaction
+    /// The trace stamp: id of the local action trace being recorded as this
+    /// event happened, and which step of it this interaction became. An opaque
+    /// local UUID + counter — never content. Nil when no trace step was
+    /// recorded (a refused observation, or app-activation bookkeeping).
+    public var traceRef: String?
+    public var traceStepOrder: Int?
 
     public struct App: Encodable, Sendable {
         public var bundleId: String?
@@ -96,13 +102,15 @@ public struct SemanticEvent: Encodable, Sendable {
         case schemaVersion = "schema_version", eventId = "event_id", deviceId = "device_id",
             userId = "user_id", organizationId = "organization_id", occurredAt = "occurred_at",
             monotonicMs = "monotonic_ms", source, app, eventType = "event_type", target, context,
-            durationMs = "duration_ms", sensitivity, redaction
+            durationMs = "duration_ms", sensitivity, redaction, traceRef = "trace_ref",
+            traceStepOrder = "trace_step_order"
     }
 
     public init(
         eventId: String, deviceId: String, userId: String, organizationId: String,
         occurredAt: String, monotonicMs: Int, app: App, eventType: String, target: Target,
-        context: Context, durationMs: Int?, sensitivity: String, redaction: Redaction
+        context: Context, durationMs: Int?, sensitivity: String, redaction: Redaction,
+        traceRef: String? = nil, traceStepOrder: Int? = nil
     ) {
         self.eventId = eventId
         self.deviceId = deviceId
@@ -117,6 +125,8 @@ public struct SemanticEvent: Encodable, Sendable {
         self.durationMs = durationMs
         self.sensitivity = sensitivity
         self.redaction = redaction
+        self.traceRef = traceRef
+        self.traceStepOrder = traceStepOrder
     }
 }
 

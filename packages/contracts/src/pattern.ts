@@ -116,6 +116,15 @@ export const patternCandidateSchema = z
      * chose. Pack taxonomy ids only.
      */
     domain_actions: z.array(packIdentifier).optional(),
+    /**
+     * The exact trace behind this candidate's most recent occurrence: the
+     * dominant `trace_ref` among the newest episode's events that carry one.
+     * This is the JOIN the compiler follows — replacing the "newest trace for
+     * the origin" heuristic — and it is absent for candidates whose events
+     * predate trace stamping. Same privacy class as the event-side pointer:
+     * an opaque local UUID, never synced (see patternSyncSummarySchema).
+     */
+    representative_trace_ref: uuid.optional(),
   })
   .strict();
 

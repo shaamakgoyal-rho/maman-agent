@@ -507,28 +507,43 @@ type TraceCompileAttempt =
   | { kind: "no_trace" };
 
 /**
- * Finds the representative trace for this candidate's origin and compiles it.
+ * Finds the representative trace for this candidate and compiles it.
  *
- * "Newest trace for the origin" is the representative until trace_ref stamping
- * joins candidates to their exact traces — stated here so nobody mistakes the
- * heuristic for the join. No trace at all is a normal answer (candidates that
- * predate capture) and falls through to the legacy pattern path.
+ * THE JOIN, then the heuristic: a candidate stamped with
+ * `representative_trace_ref` names the exact trace recorded during its most
+ * recent occurrence, and that is what compiles. "Newest trace for the origin"
+ * survives only as the fallback for candidates whose events predate stamping —
+ * and for a stamped trace that has since expired or been deleted, where the
+ * newest observation of the same routine is the honest substitute. No trace at
+ * all is a normal answer and falls through to the legacy pattern path.
  */
 async function compileFromRepresentativeTrace(
   candidate: PatternCandidate,
   displayName?: string,
 ): Promise<TraceCompileAttempt> {
   if (!isTauri()) return { kind: "no_trace" };
-  const derived = deriveTrigger(candidate);
-  const origin = derived.type === "context" ? derived.origin : undefined;
-  if (!origin) return { kind: "no_trace" };
-  const host = origin.replace(/^https?:\/\//, "").split("/")[0]!;
 
   let raw: string | null = null;
-  try {
-    raw = await invokeCommand<string | null>("action_trace_lookup", { host });
-  } catch {
-    return { kind: "no_trace" }; // lookup unavailable ≠ refusal
+  if (candidate.representative_trace_ref) {
+    try {
+      raw = await invokeCommand<string | null>("action_trace_get", {
+        traceId: candidate.representative_trace_ref,
+      });
+    } catch {
+      raw = null; // lookup unavailable ≠ refusal — the fallback below decides
+    }
+  }
+
+  if (!raw) {
+    const derived = deriveTrigger(candidate);
+    const origin = derived.type === "context" ? derived.origin : undefined;
+    if (!origin) return { kind: "no_trace" };
+    const host = origin.replace(/^https?:\/\//, "").split("/")[0]!;
+    try {
+      raw = await invokeCommand<string | null>("action_trace_lookup", { host });
+    } catch {
+      return { kind: "no_trace" }; // lookup unavailable ≠ refusal
+    }
   }
   if (!raw) return { kind: "no_trace" };
 

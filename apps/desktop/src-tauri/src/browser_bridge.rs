@@ -187,7 +187,7 @@ pub fn shape_to_workflow_event(
             None => s.to_string(),
         }
     })?;
-    Some(serde_json::json!({
+    let mut event = serde_json::json!({
         "schema_version": 1,
         "event_id": event_id,
         "device_id": identity.0,
@@ -202,7 +202,35 @@ pub fn shape_to_workflow_event(
         "context": shape.get("context").cloned().unwrap_or(serde_json::json!({})),
         "sensitivity": "internal",
         "redaction": { "applied": false, "reasons": [] }
-    }))
+    });
+    // The content script's trace stamp — the join between this event and the
+    // encrypted local trace recorded alongside it. Extension input is data,
+    // not authority: a malformed ref is dropped (the event stays valid without
+    // it), never stored to fail the contract later. Order only rides with a
+    // valid ref.
+    if let Some(trace_ref) = shape.get("trace_ref").and_then(|v| v.as_str()) {
+        if is_uuid(trace_ref) {
+            event["trace_ref"] = serde_json::json!(trace_ref);
+            if let Some(order) = shape.get("trace_step_order").and_then(|v| v.as_i64()) {
+                if order > 0 {
+                    event["trace_step_order"] = serde_json::json!(order);
+                }
+            }
+        }
+    }
+    Some(event)
+}
+
+/// Strict-enough UUID shape check for extension-supplied ids: 8-4-4-4-12 hex.
+fn is_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => *b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 #[cfg(test)]
@@ -428,6 +456,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(event["context"], json!({}));
+    }
+
+    #[test]
+    fn shape_conversion_carries_a_valid_trace_stamp_and_drops_a_malformed_one() {
+        let base = |extra: serde_json::Value| {
+            let mut shape = json!({
+                "event_type": "value_committed",
+                "target": {"role": "input"},
+                "context": {},
+                "domain": "app.hubspot.com"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                shape[k] = v.clone();
+            }
+            shape_to_workflow_event(&shape, ("d", "u", "o"), 100, "2026-07-17T18:00:00.000Z", "e4")
+                .unwrap()
+        };
+
+        // A well-formed stamp rides through to the stored event.
+        let stamped = base(json!({
+            "trace_ref": "018f0000-0000-7000-8000-0000000000aa",
+            "trace_step_order": 3
+        }));
+        assert_eq!(stamped["trace_ref"], "018f0000-0000-7000-8000-0000000000aa");
+        assert_eq!(stamped["trace_step_order"], 3);
+
+        // Extension input is data, not authority: a non-UUID ref is dropped
+        // (the event stays valid without it), never stored to fail the
+        // contract later — and content can never ride in the ref field.
+        let malformed = base(json!({
+            "trace_ref": "the user's account name",
+            "trace_step_order": 3
+        }));
+        assert!(malformed.get("trace_ref").is_none());
+        assert!(malformed.get("trace_step_order").is_none());
+
+        // Order only rides alongside a valid ref, and only when positive.
+        let orphan_order = base(json!({"trace_step_order": 3}));
+        assert!(orphan_order.get("trace_step_order").is_none());
+        let bad_order = base(json!({
+            "trace_ref": "018f0000-0000-7000-8000-0000000000aa",
+            "trace_step_order": 0
+        }));
+        assert_eq!(bad_order["trace_ref"], "018f0000-0000-7000-8000-0000000000aa");
+        assert!(bad_order.get("trace_step_order").is_none());
+    }
+
+    #[test]
+    fn uuid_shape_check_accepts_uuids_and_rejects_everything_else() {
+        assert!(is_uuid("018f0000-0000-7000-8000-0000000000aa"));
+        assert!(is_uuid("018F0000-0000-7000-8000-0000000000AA")); // zod's uuid() is case-insensitive too
+        assert!(!is_uuid("018f0000-0000-7000-8000-0000000000a")); // too short
+        assert!(!is_uuid("018f0000000070008000_0000000000aa-")); // dashes misplaced
+        assert!(!is_uuid("zzzf0000-0000-7000-8000-0000000000aa")); // not hex
+        assert!(!is_uuid(""));
     }
 
     #[test]

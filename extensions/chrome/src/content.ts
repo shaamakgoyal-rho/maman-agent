@@ -9,7 +9,7 @@
 import { buildSemanticEvent, type FieldDescriptor } from "./lib/semantic.js";
 import { executeBrowserAction, type ActuationContext } from "./lib/actuate.js";
 import { accessibleName, roleOf } from "./lib/dom-adapter.js";
-import { TraceSession, type TraceObservation } from "./lib/trace.js";
+import { TraceSession, type TraceObservation, type TraceStamp } from "./lib/trace.js";
 
 function describeField(el: Element): FieldDescriptor {
   const input = el as HTMLInputElement;
@@ -36,8 +36,13 @@ const incognito = chrome.extension?.inIncognitoContext === true;
 const session = new TraceSession(() => crypto.randomUUID());
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Records one interaction for the trace. Never reads a value. */
-function observe(kind: TraceObservation["kind"], el?: Element) {
+/**
+ * Records one interaction for the trace. Never reads a value. Returns the
+ * (trace_ref, step order) stamp when the observation became a trace step, so
+ * the pattern event for the SAME interaction can name the trace that can
+ * replay it — the join the compiler follows instead of guessing by origin.
+ */
+function observe(kind: TraceObservation["kind"], el?: Element): TraceStamp | undefined {
   const observation: TraceObservation = {
     at: new Date().toISOString(),
     kind,
@@ -50,8 +55,10 @@ function observe(kind: TraceObservation["kind"], el?: Element) {
     ...(el && accessibleName(el) ? { accessibleName: accessibleName(el).slice(0, 120) } : {}),
     ...(el?.id ? { identifier: el.id } : {}),
   };
-  if (session.push(observation)) void flushTrace();
+  const { flushNow, stamp } = session.push(observation);
+  if (flushNow) void flushTrace();
   else scheduleFlush();
+  return stamp;
 }
 
 /**
@@ -80,7 +87,7 @@ async function flushTrace() {
 }
 
 async function send(kind: "click" | "commit" | "navigation" | "copy" | "paste", el?: Element) {
-  observe(kind, el);
+  const stamp = observe(kind, el);
   const shape = await buildSemanticEvent({
     kind,
     ...(el && (kind === "commit" || kind === "click") && isFieldLike(el)
@@ -90,6 +97,10 @@ async function send(kind: "click" | "commit" | "navigation" | "copy" | "paste", 
     pageUrl: location.href,
   });
   if (!shape) return; // redacted at the source
+  if (stamp) {
+    shape.trace_ref = stamp.trace_ref;
+    shape.trace_step_order = stamp.trace_step_order;
+  }
   try {
     await chrome.runtime.sendMessage({ type: "semantic_event", event: shape });
   } catch {

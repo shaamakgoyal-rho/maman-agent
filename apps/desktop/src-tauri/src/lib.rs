@@ -1365,6 +1365,24 @@ async fn action_trace_lookup<R: Runtime>(
     Ok(trace.map(|t| t.to_string()))
 }
 
+/// One trace BY ID — the exact join a candidate's `representative_trace_ref`
+/// names, as opposed to the newest-for-host heuristic above. Panel-only for
+/// the same reason: traces carry locators and origins. `None` when the trace
+/// has expired or been deleted; the caller falls back rather than erroring.
+#[tauri::command]
+async fn action_trace_get<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+    state: tauri::State<'_, StoreState>,
+    trace_id: String,
+) -> Result<Option<String>, String> {
+    require_panel(&window)?;
+    let guard = store_guard(&app, &state).await?;
+    let store = guard.as_ref().expect("initialized");
+    let trace = store.action_trace(&trace_id).await.map_err(|e| e.to_string())?;
+    Ok(trace.map(|t| t.to_string()))
+}
+
 #[tauri::command]
 fn suggestions_load<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
     let path = config_path(&app, "suggestions.json")?;
@@ -3013,6 +3031,7 @@ pub fn run() {
             events_ingest,
             trigger_service::staged_runs_drain,
             action_trace_lookup,
+            action_trace_get,
             events_timeline,
             events_pattern_features,
             suggestions_load,

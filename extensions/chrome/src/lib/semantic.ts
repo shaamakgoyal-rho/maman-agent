@@ -135,6 +135,14 @@ export type SemanticEventShape = {
   target: { role?: string; semantic_type?: string; stable_id_hash?: string };
   context: { page_type?: string; object_type?: string };
   domain: string;
+  /**
+   * Stamped by the content script from its TraceSession — the id of the local
+   * action trace being recorded as this event happened, and which step of it
+   * this interaction became. Opaque local UUID + a counter; never content.
+   * Absent when no trace step was recorded (protected observation, incognito).
+   */
+  trace_ref?: string;
+  trace_step_order?: number;
 };
 
 /**

@@ -106,3 +106,20 @@ describe("containsForbiddenEventField", () => {
     expect(containsForbiddenEventField({ nested: { keystrokes: [1, 2] } })).toBe("keystrokes");
   });
 });
+
+describe("the observer trace stamp on WorkflowEvent", () => {
+  it("accepts a trace_ref with a step order", () => {
+    const evt = { ...validEvent(), trace_ref: uuidv7(), trace_step_order: 3 };
+    expect(workflowEventSchema.parse(evt)).toBeTruthy();
+  });
+
+  it("rejects a non-uuid trace_ref — the join key is an opaque local UUID, never content", () => {
+    const evt = { ...validEvent(), trace_ref: "the user's account name" };
+    expect(workflowEventSchema.safeParse(evt).success).toBe(false);
+  });
+
+  it("rejects a non-positive step order", () => {
+    const evt = { ...validEvent(), trace_ref: uuidv7(), trace_step_order: 0 };
+    expect(workflowEventSchema.safeParse(evt).success).toBe(false);
+  });
+});
