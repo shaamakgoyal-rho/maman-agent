@@ -42,6 +42,7 @@ import {
   type ExecutionReceipt,
   type PatternCandidate,
 } from "@maman/contracts";
+import { userIsPresent } from "./presence.js";
 import { emitAppEvent } from "./bridge.js";
 import type { StatusBeat } from "./status.js";
 import { tauriAgentBrowserHost } from "./agentBrowser.js";
@@ -267,10 +268,6 @@ let activeWorld: DemoSalesforceWorld | null = null;
  * It is not proof of a human (a screen can be left on). It is honest evidence,
  * and it fails CLOSED — in a non-browser context with no document, it is false.
  */
-export function userIsPresent(): boolean {
-  if (typeof document === "undefined") return false;
-  return document.visibilityState === "visible";
-}
 
 /**
  * The adapters for one run: the demo Salesforce world PLUS the real browser
@@ -1267,3 +1264,6 @@ export const useRuns = create<RunsStore>((set) => ({
     });
   },
 }));
+
+/** Re-exported for existing demo-arc callers; defined in presence.ts. */
+export { userIsPresent };

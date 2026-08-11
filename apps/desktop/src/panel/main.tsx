@@ -2,13 +2,15 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
 import { bootAgentService } from "../lib/agentService.js";
+import { bootMotherLoop } from "../lib/motherLoop.js";
 import "../styles.css";
 
-// The agent service boots HERE, at the entry, not inside a component: an
-// agent's triggers must outlive every screen, and a service started from a
-// useEffect dies with its component. Errors surface in the console rather than
-// silently disabling proactivity — the service itself reports specifics.
+// Both services boot HERE, at the entry, not inside a component: an agent's
+// triggers and Maman's noticing must outlive every screen, and a service
+// started from a useEffect dies with its component. Errors surface as
+// structured diagnostics rather than silently disabling proactivity.
 void bootAgentService();
+bootMotherLoop();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

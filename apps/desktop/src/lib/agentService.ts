@@ -25,7 +25,7 @@ import { tauriAgentBrowserHost } from "./agentBrowser.js";
 import { mintAuthorization } from "./browserRun.js";
 import { useAgents } from "./agents.js";
 import { useSettings } from "../state/settings.js";
-import { userIsPresent } from "./runs.js";
+import { userIsPresent } from "./presence.js";
 
 /**
  * THE AGENT SERVICE — module scope, booted from the panel ENTRY, not a screen.
