@@ -645,6 +645,31 @@
             </p>
           </div>
         </details>
+
+        <details>
+          <summary>Troubleshooting</summary>
+          <div class="body">
+            <p>
+              <b>The dot is not green.</b> That is the point of the dot — it goes green only when
+              Maman is genuinely observing. Grey or amber means observation is paused or the
+              observer is starting; "Accessibility permission needed" means the switch in System
+              Settings is off; "Needs keychain access" means macOS did not release the database key
+              — quit Maman, open it again, and click <b>Always Allow</b>.
+            </p>
+            <p>
+              <b>No suggestions yet.</b> Expected early on: a workflow has to recur enough times, on
+              enough separate days, and survive a replay test. Maman shows which bar it has yet to
+              clear rather than leaving you guessing.
+            </p>
+            <p>
+              <b>Removing it completely:</b>
+              <code>rm -rf /Applications/Maman.app</code> and
+              <code>rm -rf ~/Library/Application\ Support/com.maman.desktop</code> — the second
+              deletes the encrypted database. Privacy → Delete device data does the same from inside
+              the app, including the keychain key.
+            </p>
+          </div>
+        </details>
       </section>
 
       <!-- ============================ FINAL ============================== -->
