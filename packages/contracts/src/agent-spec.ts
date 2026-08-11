@@ -281,6 +281,21 @@ export const agentSpecSchema = z
     description: z.string(),
     generalized_intent: z.string(),
     source_pattern_id: uuid,
+    /**
+     * PROVENANCE — which encrypted local action trace this agent was compiled
+     * from, and by what.
+     *
+     * All three are OPTIONAL so agents created before the trace compiler stay
+     * valid rather than failing validation on load (a migration that invalidates
+     * a user's working agents is a worse outcome than a missing field). An agent
+     * without them was compiled from the coarse pattern projection and cannot be
+     * traced back to observed actions; the UI shows that as Needs attention
+     * rather than pretending the evidence exists.
+     */
+    source_trace_id: uuid.optional(),
+    /** "deterministic-local" — never "demo", which claimed a fixture made it. */
+    compiler: z.string().min(1).optional(),
+    compiler_version: z.number().int().positive().optional(),
     state: agentState,
     trigger: agentTriggerSchema,
     inputs: z.array(agentInputSchema),
