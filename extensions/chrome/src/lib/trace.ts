@@ -47,7 +47,28 @@ export type TraceObservation = {
    * auth/payment flow — surfaces where the hole itself is the honest record.
    */
   refused?: ProtectedSegment["reason"];
+  /**
+   * Step order assigned by `TraceSession.push` at capture time, so the pattern
+   * event emitted for the SAME interaction can be stamped with it before the
+   * trace flushes. Pre-assigned orders survive the drop-oldest cap (they are
+   * monotonic per session, not buffer positions), which is why `assembleTrace`
+   * prefers them: a stamped event must never point at the wrong step.
+   */
+  stepOrder?: number;
 };
+
+/**
+ * The ONE answer to "is this observation off limits" — shared by `stepFrom`
+ * (which turns a denied observation into a hole) and `TraceSession.push`
+ * (which must refuse to stamp the same observation's pattern event). Two
+ * implementations here would eventually disagree, and a disagreement means an
+ * event stamped with a step that does not exist.
+ */
+export function protectedReason(observation: TraceObservation): ProtectedSegment["reason"] | null {
+  if (observation.refused) return observation.refused;
+  if (observation.field && classifyField(observation.field) === "deny") return "secure_field";
+  return null;
+}
 
 /** Origin + the SHAPE of the path — "/leads/:id", never the id itself. */
 export function pathTemplate(rawUrl: string): string | undefined {
@@ -112,10 +133,8 @@ export function stepFrom(
 ):
   | { kind: "step"; step: ObservedAction }
   | { kind: "protected"; reason: ProtectedSegment["reason"] } {
-  if (observation.refused) return { kind: "protected", reason: observation.refused };
-  if (observation.field && classifyField(observation.field) === "deny") {
-    return { kind: "protected", reason: "secure_field" };
-  }
+  const refusal = protectedReason(observation);
+  if (refusal) return { kind: "protected", reason: refusal };
 
   const origin = (() => {
     try {
@@ -174,9 +193,17 @@ export function assembleTrace(
   const protectedSegments: ProtectedSegment[] = [];
   /** The most recent step that READ something — a paste's likely source. */
   let lastRead: { order: number; output: string } | null = null;
+  // Highest order used so far. A pre-assigned order (from TraceSession.push)
+  // wins — it is what the matching pattern event was stamped with; an
+  // unstamped observation continues above the maximum rather than
+  // positionally, so the two numbering sources can never collide (the
+  // contract rejects duplicate orders).
+  let maxOrder = 0;
 
   for (const observation of observations) {
-    const result = stepFrom(observation, steps.length + 1);
+    const order = observation.stepOrder ?? maxOrder + 1;
+    maxOrder = Math.max(maxOrder, order);
+    const result = stepFrom(observation, order);
     if (result.kind === "protected") {
       protectedSegments.push({
         started_at: observation.at,
@@ -248,8 +275,19 @@ export function assembleTrace(
  */
 export const MAX_SESSION_OBSERVATIONS = 200;
 
+/** What `push` hands back for stamping the interaction's pattern event. */
+export type TraceStamp = { trace_ref: string; trace_step_order: number };
+
 export class TraceSession {
   private observations: TraceObservation[] = [];
+  /**
+   * Minted at the FIRST push, not at flush: the events emitted during the
+   * session must be able to name the trace they belong to, and an id that only
+   * exists after the routine ends cannot be on the events recorded during it.
+   */
+  private traceId: string | null = null;
+  /** Monotonic step counter for the session — survives drop-oldest. */
+  private stepsAssigned = 0;
 
   constructor(private readonly newTraceId: () => string) {}
 
@@ -259,28 +297,50 @@ export class TraceSession {
   }
 
   /**
-   * Records one observation. Returns true when the caller should flush now
+   * Records one observation. `flushNow` is true when the caller should flush
    * because the cap is reached — the session never flushes itself, so a caller
    * cannot be surprised by network activity inside a DOM handler.
+   *
+   * `stamp` is the (trace_ref, trace_step_order) the matching pattern event may
+   * carry. A protected observation gets NO stamp — it produces a hole, not a
+   * step, and an event pointing into a hole would be a fabricated join.
    */
-  push(observation: TraceObservation): boolean {
+  push(observation: TraceObservation): { flushNow: boolean; stamp?: TraceStamp } {
+    this.traceId ??= this.newTraceId();
     if (this.observations.length >= MAX_SESSION_OBSERVATIONS) {
       // Drop the OLDEST, not the newest: the recent steps are the ones a
       // routine is most likely still building toward.
       this.observations.shift();
     }
+    let stamp: TraceStamp | undefined;
+    if (protectedReason(observation) === null) {
+      this.stepsAssigned += 1;
+      observation.stepOrder = this.stepsAssigned;
+      stamp = { trace_ref: this.traceId, trace_step_order: this.stepsAssigned };
+    }
     this.observations.push(observation);
-    return this.observations.length >= MAX_SESSION_OBSERVATIONS;
+    return {
+      flushNow: this.observations.length >= MAX_SESSION_OBSERVATIONS,
+      ...(stamp ? { stamp } : {}),
+    };
   }
 
   /**
    * Assembles and clears. Returns null when nothing survived capture — a
    * session of nothing but refused fields produces no trace at all, rather than
    * an empty shell that would read as "Maman watched and saw nothing happen".
+   * Either way the session identity ends here: the next push starts a new
+   * trace id, so stamps can never leak across a flush boundary.
    */
   flush(apps: LocalActionTrace["apps"]): LocalActionTrace | null {
+    const traceId = this.traceId;
+    this.traceId = null;
+    this.stepsAssigned = 0;
     if (this.observations.length === 0) return null;
-    const trace = assembleTrace(this.observations, { trace_id: this.newTraceId(), apps });
+    const trace = assembleTrace(this.observations, {
+      trace_id: traceId ?? this.newTraceId(),
+      apps,
+    });
     this.observations = [];
     return trace;
   }

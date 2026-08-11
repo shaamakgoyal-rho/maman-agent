@@ -33,6 +33,12 @@ final class ObserverRuntime {
     // ActionTrace turns them into holes, which is how the desktop can tell
     // "Maman looked away" from "nothing happened".
     private var traceObservations: [ActionTrace.Observation] = []
+    /// The id of the trace session currently being recorded — minted at the
+    /// first observation so the session's own events can carry it, cleared at
+    /// every flush. See recordObservation.
+    private var currentTraceId: String?
+    /// Monotonic step counter for the session — survives drop-oldest.
+    private var traceStepsAssigned = 0
     private var lastObservationAt: Date?
     /// A routine is over when the user stops for this long. Same boundary the
     /// browser session uses, so both halves of a cross-app trace end together.
@@ -176,7 +182,8 @@ final class ObserverRuntime {
     }
 
     private func emitSemantic(
-        app: NSRunningApplication, eventType: String, role: String?, label: String?
+        app: NSRunningApplication, eventType: String, role: String?, label: String?,
+        traceRef: String? = nil, traceStepOrder: Int? = nil
     ) {
         eventsEmitted += 1
         let event = SemanticEvent(
@@ -219,7 +226,9 @@ final class ObserverRuntime {
             context: .init(),
             durationMs: nil,
             sensitivity: "internal",
-            redaction: .init(applied: false, reasons: [])
+            redaction: .init(applied: false, reasons: []),
+            traceRef: traceRef,
+            traceStepOrder: traceStepOrder
         )
         emit(.event(event))
     }
@@ -371,26 +380,47 @@ final class ObserverRuntime {
     /// Records one AX interaction for the trace. Never reads a control's value:
     /// `label` is a label, and the value-changed notification carries only that
     /// a commit happened.
+    ///
+    /// Returns the (trace id, step order) stamp when the observation is
+    /// expected to become a trace step, so the pattern event emitted for the
+    /// SAME interaction can name the trace that can replay it. A refused
+    /// observation gets no stamp — it becomes a hole, and an event pointing
+    /// into a hole would be a fabricated join.
+    @discardableResult
     private func recordObservation(
         app: NSRunningApplication, operation: String, role: String?, subrole: String?,
-        label: String?, windowTitle: String?, producesValue: Bool
-    ) {
+        label: String?, windowTitle: String?, producesValue: Bool, refused: Bool = false
+    ) -> (traceRef: String, stepOrder: Int)? {
         // Idle since the last one means the previous routine ended — flush it
         // before this observation joins a session it does not belong to.
         if let last = lastObservationAt, Date().timeIntervalSince(last) > traceIdleSeconds {
             flushTrace(app: app)
+        }
+        // Minted at the FIRST observation, not at flush: the events emitted
+        // during the session must be able to name the trace they belong to.
+        if currentTraceId == nil {
+            currentTraceId = UUID().uuidString.lowercased()
         }
         if traceObservations.count >= maxTraceObservations {
             // Drop the OLDEST: the recent steps are the ones a routine is still
             // building toward.
             traceObservations.removeFirst()
         }
+        var stamp: (traceRef: String, stepOrder: Int)?
+        var stepOrder: Int?
+        if !refused {
+            traceStepsAssigned += 1
+            stepOrder = traceStepsAssigned
+            stamp = (currentTraceId!, traceStepsAssigned)
+        }
         traceObservations.append(
             ActionTrace.Observation(
                 at: isoNow(), operation: operation, bundleId: app.bundleIdentifier,
                 role: role, subrole: subrole, label: label, identifier: nil, ancestry: [],
-                menuPath: [], windowTitle: windowTitle, producesValue: producesValue))
+                menuPath: [], windowTitle: windowTitle, producesValue: producesValue,
+                stepOrder: stepOrder))
         lastObservationAt = Date()
+        return stamp
     }
 
     /// Assembles and emits, then clears. `assemble` re-runs the gate over every
@@ -398,15 +428,20 @@ final class ObserverRuntime {
     /// have refused — and yields nil when nothing survived, in which case
     /// nothing is emitted at all.
     private func flushTrace(app: NSRunningApplication?) {
+        let traceId = currentTraceId ?? UUID().uuidString.lowercased()
         defer {
             traceObservations.removeAll()
             lastObservationAt = nil
+            // The session identity ends here — the next observation starts a
+            // new trace id, so stamps can never leak across a flush boundary.
+            currentTraceId = nil
+            traceStepsAssigned = 0
         }
         guard !traceObservations.isEmpty else { return }
         guard
             let trace = ActionTrace.assemble(
                 observations: traceObservations,
-                traceId: UUID().uuidString,
+                traceId: traceId,
                 appCategory: "other",
                 allowlistBundles: allowlistBundles,
                 privateApps: privateApps,
@@ -468,10 +503,11 @@ final class ObserverRuntime {
             }
             // The refusal joins the trace so it becomes a HOLE. Without this a
             // routine would look continuous across a password field, and a
-            // value could appear to flow through one.
+            // value could appear to flow through one. `refused` keeps the stamp
+            // away: no event may point into a hole.
             recordObservation(
                 app: app, operation: "commit", role: role, subrole: subrole,
-                label: title, windowTitle: nil, producesValue: false)
+                label: title, windowTitle: nil, producesValue: false, refused: true)
         case .emit:
             lastBoundaryReason = nil
             let eventType: String
@@ -481,14 +517,19 @@ final class ObserverRuntime {
             case kAXValueChangedNotification: eventType = "value_committed" // metadata only, never the value
             default: return
             }
-            emitSemantic(app: app, eventType: eventType, role: role, label: title)
-            // A focus change READS (it is where a value is taken from); a value
-            // change WRITES. That distinction is the dataflow edge.
-            recordObservation(
+            // The trace observation is recorded FIRST so its stamp can ride on
+            // the event for the same interaction — the join the compiler
+            // follows. A focus change READS (it is where a value is taken
+            // from); a value change WRITES. That distinction is the dataflow
+            // edge.
+            let stamp = recordObservation(
                 app: app,
                 operation: notification == kAXValueChangedNotification ? "commit" : "read",
                 role: role, subrole: subrole, label: title, windowTitle: title,
                 producesValue: notification == kAXFocusedUIElementChangedNotification)
+            emitSemantic(
+                app: app, eventType: eventType, role: role, label: title,
+                traceRef: stamp?.traceRef, traceStepOrder: stamp?.stepOrder)
             if notification == kAXFocusedWindowChangedNotification {
                 trackWindowFrames(pid: app.processIdentifier)
             } else {

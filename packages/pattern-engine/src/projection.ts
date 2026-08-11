@@ -35,6 +35,17 @@ export function toPatternFeature(
       ? { item_count_bucket: bucketize(event.context.item_count)! }
       : {}),
     ...(event.duration_ms !== undefined ? { duration_ms: event.duration_ms } : {}),
+    // The observer-stamped trace pointer, carried through unchanged: the
+    // projection never mints one and never guesses which trace an event
+    // belongs to. Order rides only alongside its ref.
+    ...(event.trace_ref
+      ? {
+          trace_ref: event.trace_ref,
+          ...(event.trace_step_order !== undefined
+            ? { trace_step_order: event.trace_step_order }
+            : {}),
+        }
+      : {}),
     // Domain classification, flattened. Carried through as-is: the projection
     // never classifies (that happens on-device, pre-storage) and never invents
     // a domain for an unclassified event.

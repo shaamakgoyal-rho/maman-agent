@@ -761,6 +761,15 @@ impl LocalStore {
             if let Some(b) = bucket {
                 feature["item_count_bucket"] = serde_json::json!(b);
             }
+            // The observer-stamped trace pointer, from the encrypted payload:
+            // an opaque local UUID joining this event to the trace that can
+            // replay it. Order rides only alongside its ref.
+            if let Some(t) = payload.get("trace_ref").and_then(|v| v.as_str()) {
+                feature["trace_ref"] = serde_json::json!(t);
+                if let Some(o) = payload.get("trace_step_order").and_then(|v| v.as_i64()) {
+                    feature["trace_step_order"] = serde_json::json!(o);
+                }
+            }
             // Domain classification, read from the plaintext columns. Named
             // pack_domain (not domain) because in this projection `domain` means
             // a WEB domain and must never appear — see the contracts tests.
@@ -1126,10 +1135,10 @@ impl LocalStore {
             .map_err(|e| StoreError::InvalidPayload(e.to_string()))
     }
 
-    /// The newest trace for one app/host, decrypted — the "representative
-    /// trace" a Create Agent click compiles from. Newest is the honest default
-    /// representative until trace_ref stamping lands: the most recent complete
-    /// observation of the routine is the one closest to what the user just did.
+    /// The newest trace for one app/host, decrypted — the FALLBACK
+    /// representative for candidates whose events predate trace_ref stamping.
+    /// When a candidate carries `representative_trace_ref`, the exact join
+    /// (`action_trace`) is used instead of this heuristic.
     pub async fn latest_action_trace_for_host(
         &self,
         host: &str,
@@ -2538,6 +2547,40 @@ mod domain_ingest_tests {
         let mut sorted = times.clone();
         sorted.sort_unstable();
         assert_eq!(times, sorted);
+    }
+
+    #[tokio::test]
+    async fn pattern_features_carry_the_trace_stamp_through_the_encrypted_payload() {
+        let dir = tempdir().unwrap();
+        let store = LocalStore::open(
+            &dir.path().join("t.sqlite"),
+            &StaticKeyProvider(TEST_KEY),
+            "user-1",
+        )
+        .await
+        .unwrap();
+
+        let mut stamped = crm_event(1, "account");
+        stamped["trace_ref"] = json!("018f0000-0000-7000-8000-0000000000aa");
+        stamped["trace_step_order"] = json!(4);
+        store.insert_event(&stamped, 30).await.unwrap();
+        let unstamped = crm_event(2, "account");
+        store.insert_event(&unstamped, 30).await.unwrap();
+
+        let features = store.pattern_features(10).await.unwrap();
+        let by_id = |suffix: &str| {
+            features
+                .iter()
+                .find(|f| f["event_id"].as_str().unwrap().ends_with(suffix))
+                .unwrap()
+        };
+        // The stamp survives encryption + projection, so the engine can join
+        // candidates to the exact trace that can replay them…
+        assert_eq!(by_id("01")["trace_ref"], "018f0000-0000-7000-8000-0000000000aa");
+        assert_eq!(by_id("01")["trace_step_order"], 4);
+        // …and an event that was never stamped stays honestly unstamped.
+        assert!(by_id("02").get("trace_ref").is_none());
+        assert!(by_id("02").get("trace_step_order").is_none());
     }
 
     #[tokio::test]

@@ -482,3 +482,39 @@ Merged as PRs #37–#48 (each squash-merged with all six CI checks green):
 is still "newest for origin", a labeled heuristic); native daemon still
 announces rather than dispatches; no live-Chrome/AX end-to-end capture
 verification yet; no mamanctl; `runs.ts` split pending. See task notes.
+
+## 2026-08-11 — the trace_ref join: candidates compile from their exact trace
+
+The "newest trace for the origin" heuristic is retired to a fallback. Both
+observers now mint the trace-session id at the FIRST observation (not at
+flush) and stamp every step-producing interaction's pattern event with
+`trace_ref` + `trace_step_order`; the pattern engine joins each candidate to
+the dominant trace of its newest episode (`representative_trace_ref`); Create
+Agent compiles from that exact trace via the new panel-only `action_trace_get`
+command, falling back to the origin heuristic only for unstamped history or an
+expired trace.
+
+Correctness details that took real design:
+
+- Step orders are PRE-ASSIGNED at capture (monotonic per session) so they
+  survive the drop-oldest cap without shifting — an event stamped before a
+  drop still points at the right step. Both assemblers number unstamped
+  observations above the stamped maximum so the two sources can never collide
+  on the contract's unique-order rule.
+- A protected observation gets NO stamp (extension: shared `protectedReason`
+  predicate with `stepFrom`; Swift: the boundary path passes `refused`), so
+  no event can point into a hole.
+- Extension input stays data, not authority: the Rust bridge drops a non-UUID
+  `trace_ref` (event survives without it) and `trace_step_order` only rides
+  with a valid ref.
+- The join key may never sync: `patternSyncSummarySchema` rejects
+  `representative_trace_ref` — pinned by test.
+
+Evidence: extension 153 tests (4 new stamp tests incl. cap-drop alignment),
+pattern-engine 153 (join dominance + honest absence), contracts 102 (stamp
+accepted/rejected, sync rejection), desktop 343 (exact-join beats the
+heuristic; expired-trace fallback), Rust 180 (bridge passthrough/validation,
+store projection round-trip through the encrypted payload), Swift runner ALL
+CHECKS PASSED (stamped-order assembly incl. gaps and mixed numbering; wire
+names for the stamp). `pnpm lint / typecheck / test / build / format:check`
+all green.

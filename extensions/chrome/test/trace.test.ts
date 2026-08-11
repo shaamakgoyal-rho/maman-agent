@@ -223,9 +223,9 @@ describe("a session buffers until the caller flushes", () => {
 
   it("assembles what it buffered and empties itself", () => {
     const session = new TraceSession(newId);
-    expect(session.push(obs({ kind: "copy", role: "textbox", accessibleName: "Domain" }))).toBe(
-      false,
-    );
+    expect(
+      session.push(obs({ kind: "copy", role: "textbox", accessibleName: "Domain" })).flushNow,
+    ).toBe(false);
     session.push(obs({ kind: "paste", role: "textbox", accessibleName: "Website" }));
     expect(session.size).toBe(2);
 
@@ -241,7 +241,7 @@ describe("a session buffers until the caller flushes", () => {
     const session = new TraceSession(newId);
     let asked = false;
     for (let i = 0; i < MAX_SESSION_OBSERVATIONS + 10; i += 1) {
-      asked = session.push(obs({ kind: "click" })) || asked;
+      asked = session.push(obs({ kind: "click" })).flushNow || asked;
     }
     expect(asked).toBe(true);
     expect(session.size).toBe(MAX_SESSION_OBSERVATIONS);
@@ -251,5 +251,69 @@ describe("a session buffers until the caller flushes", () => {
     const session = new TraceSession(newId);
     session.push(obs({ kind: "commit", field: { tag: "input", type: "password" } as never }));
     expect(session.flush(APPS)).toBeNull();
+  });
+});
+
+describe("the trace stamp joins pattern events to their trace", () => {
+  let minted = 0;
+  const newId = () => `018f0000-0000-7000-8000-00000000${(++minted).toString(16).padStart(4, "0")}`;
+
+  it("stamps every step-producing observation with the session's trace id, in order", () => {
+    const session = new TraceSession(newId);
+    const first = session.push(obs({ kind: "copy", role: "textbox", accessibleName: "Domain" }));
+    const second = session.push(obs({ kind: "paste", role: "textbox", accessibleName: "Website" }));
+    expect(first.stamp).toBeDefined();
+    expect(second.stamp).toBeDefined();
+    expect(first.stamp!.trace_ref).toBe(second.stamp!.trace_ref);
+    expect(first.stamp!.trace_step_order).toBe(1);
+    expect(second.stamp!.trace_step_order).toBe(2);
+
+    // The flushed trace IS the one the stamps named, step orders included.
+    const trace = session.flush(APPS)!;
+    expect(trace.trace_id).toBe(first.stamp!.trace_ref);
+    expect(trace.steps.map((s) => s.order)).toEqual([1, 2]);
+  });
+
+  it("never stamps a protected observation — no event may point into a hole", () => {
+    const session = new TraceSession(newId);
+    const denied = session.push(
+      obs({ kind: "commit", field: { tag: "INPUT", type: "password" } as never }),
+    );
+    expect(denied.stamp).toBeUndefined();
+    // The next allowed observation still gets order 1: holes consume no order,
+    // exactly as assembleTrace builds the steps.
+    const allowed = session.push(obs({ kind: "click", role: "button", accessibleName: "Save" }));
+    expect(allowed.stamp!.trace_step_order).toBe(1);
+    const trace = session.flush(APPS)!;
+    expect(trace.steps.map((s) => s.order)).toEqual([1]);
+    expect(trace.protected_segments).toHaveLength(1);
+  });
+
+  it("a flush ends the session identity: the next push gets a new trace id", () => {
+    const session = new TraceSession(newId);
+    const before = session.push(obs({ kind: "click" })).stamp!;
+    session.flush(APPS);
+    const after = session.push(obs({ kind: "click" })).stamp!;
+    expect(after.trace_ref).not.toBe(before.trace_ref);
+    expect(after.trace_step_order).toBe(1);
+  });
+
+  it("stamped orders stay correct even when the cap drops the oldest steps", () => {
+    const session = new TraceSession(newId);
+    const stamps: number[] = [];
+    let lastRef = "";
+    for (let i = 0; i < MAX_SESSION_OBSERVATIONS + 5; i += 1) {
+      const { stamp } = session.push(obs({ kind: "click", accessibleName: `Button ${i}` }));
+      stamps.push(stamp!.trace_step_order);
+      lastRef = stamp!.trace_ref;
+    }
+    // Orders are monotonic per session, not buffer positions…
+    expect(stamps.at(-1)).toBe(MAX_SESSION_OBSERVATIONS + 5);
+    // …and the assembled steps carry EXACTLY the stamped orders, so an event
+    // stamped before the drop still points at the right step.
+    const trace = session.flush(APPS)!;
+    expect(trace.trace_id).toBe(lastRef);
+    expect(trace.steps[0]!.order).toBe(6); // the first 5 were dropped
+    expect(trace.steps.at(-1)!.order).toBe(MAX_SESSION_OBSERVATIONS + 5);
   });
 });

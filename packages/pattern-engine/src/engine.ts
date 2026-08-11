@@ -223,6 +223,9 @@ export function runPatternEngine(
       ...(observedDomainActions(members).length > 0
         ? { domain_actions: observedDomainActions(members) }
         : {}),
+      ...(representativeTraceRef(members)
+        ? { representative_trace_ref: representativeTraceRef(members)! }
+        : {}),
     };
     candidates.push(candidate);
 
@@ -245,6 +248,41 @@ function toTemplateStep(event: PatternFeatureEvent): TemplateStepInput {
     ...(event.target_role ? { target_role: event.target_role } : {}),
     event_type: event.event_type,
   };
+}
+
+/**
+ * The trace behind the candidate's MOST RECENT occurrence — the join that
+ * replaces "newest trace for the origin".
+ *
+ * Rule: walk episodes newest-first; in the first episode whose events carry a
+ * `trace_ref` at all, pick the ref stamped on the most of them (an episode can
+ * straddle a trace-session boundary, e.g. an idle flush mid-routine — the
+ * dominant ref is the session that recorded the routine, not the tail). Ties
+ * break toward the ref on the latest event. Episodes that predate stamping
+ * contribute nothing, so candidates from old history honestly get none.
+ */
+function representativeTraceRef(members: SegmentedEpisode[]): string | undefined {
+  const newestFirst = [...members].sort((a, b) => b.started_at.localeCompare(a.started_at));
+  for (const episode of newestFirst) {
+    const counts = new Map<string, number>();
+    let latest: string | undefined;
+    for (const event of episode.events) {
+      if (!event.trace_ref) continue;
+      counts.set(event.trace_ref, (counts.get(event.trace_ref) ?? 0) + 1);
+      latest = event.trace_ref; // events are in ascending time order
+    }
+    if (counts.size === 0) continue;
+    let best: string | undefined;
+    let bestCount = 0;
+    for (const [ref, count] of counts) {
+      if (count > bestCount || (count === bestCount && ref === latest)) {
+        best = ref;
+        bestCount = count;
+      }
+    }
+    return best;
+  }
+  return undefined;
 }
 
 /** Distinct pack actions across an episode group, in first-seen order. */
@@ -335,6 +373,9 @@ function buildTemplateCandidate(
     template_id: templateId,
     ...(observedDomainActions(members).length > 0
       ? { domain_actions: observedDomainActions(members) }
+      : {}),
+    ...(representativeTraceRef(members)
+      ? { representative_trace_ref: representativeTraceRef(members)! }
       : {}),
   };
 

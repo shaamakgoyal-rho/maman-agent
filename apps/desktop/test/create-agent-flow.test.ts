@@ -26,6 +26,8 @@ const ORIGIN = "https://acme.example";
 let agentsJson: string | null = null;
 /** The representative trace the store would return, or null (legacy path). */
 let storedTrace: string | null = null;
+/** Traces retrievable BY ID — what action_trace_get serves. */
+const exactTraces = new Map<string, string>();
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
@@ -39,6 +41,7 @@ vi.mock("../src/lib/bridge.js", () => ({
       return undefined;
     }
     if (cmd === "action_trace_lookup") return storedTrace;
+    if (cmd === "action_trace_get") return exactTraces.get(args?.traceId as string) ?? null;
     if (cmd === "agent_browser_origin") return ORIGIN;
     if (cmd === "agent_browser_evaluate") {
       const expression = args?.expression as string;
@@ -97,7 +100,7 @@ const {
 } = await import("../src/lib/agentService.js");
 const { emitAppEvent } = await import("../src/lib/bridge.js");
 
-function candidate(): PatternCandidate {
+function candidate(overrides: Partial<PatternCandidate> = {}): PatternCandidate {
   return {
     pattern_id: "018f0000-0000-7000-8000-0000000000e1",
     owner_user_id: "018f0000-0000-7000-8000-0000000000aa",
@@ -119,6 +122,7 @@ function candidate(): PatternCandidate {
     projected_minutes_saved_weekly: 12,
     opportunity_score: 0.69,
     status: "eligible",
+    ...overrides,
   };
 }
 
@@ -147,6 +151,7 @@ function matchingContext() {
 beforeEach(async () => {
   agentsJson = null;
   storedTrace = null;
+  exactTraces.clear();
   listeners.length = 0;
   __resetAgentServiceForTests();
   useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
@@ -387,5 +392,42 @@ describe("Create Agent compiles from the trace when one exists", () => {
     // Legacy candidates predate capture; they keep working, without provenance.
     expect(spec.source_trace_id).toBeUndefined();
     expect(record.state).toBe("shadow");
+  });
+
+  it("a stamped candidate compiles from its EXACT trace, not the newest for the origin", async () => {
+    const exactId = "018f0000-0000-7000-8000-00000000c0de";
+    exactTraces.set(exactId, JSON.stringify({ ...TRACE, trace_id: exactId }));
+    // A newer trace exists for the same origin — the heuristic's answer. The
+    // join must beat it: the candidate names the trace recorded during ITS
+    // most recent occurrence, and that is the evidence to compile from.
+    storedTrace = JSON.stringify(TRACE);
+
+    const result = await createAgentAndActivate(
+      candidate({ representative_trace_ref: exactId }),
+      INTENT,
+      "Fill the phone field.",
+      "phone helper",
+    );
+    if (!result.ok) throw new Error(`create failed: ${result.message}`);
+    const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
+    const spec = record.versions[record.versions.length - 1]!.spec;
+    expect(spec.source_trace_id).toBe(exactId);
+    expect(spec.compiler).toBe("deterministic-local");
+  });
+
+  it("a stamped candidate whose exact trace expired falls back to the origin heuristic", async () => {
+    // Nothing in exactTraces: the stamped trace was deleted or aged out.
+    storedTrace = JSON.stringify(TRACE);
+    const result = await createAgentAndActivate(
+      candidate({ representative_trace_ref: "018f0000-0000-7000-8000-00000000dead" }),
+      INTENT,
+      "Fill the phone field.",
+      "phone helper",
+    );
+    if (!result.ok) throw new Error(`create failed: ${result.message}`);
+    const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
+    const spec = record.versions[record.versions.length - 1]!.spec;
+    // The newest observation of the same routine is the honest substitute.
+    expect(spec.source_trace_id).toBe(TRACE.trace_id);
   });
 });

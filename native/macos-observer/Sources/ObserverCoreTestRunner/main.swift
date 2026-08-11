@@ -140,6 +140,34 @@ if let line = try? ObserverMessage.event(event).jsonLine(),
     check(false, "event line uses snake_case wire format")
 }
 
+// The trace stamp's wire names are load-bearing: a CodingKeys typo here would
+// silently sever the event → trace join with no other symptom.
+let stampedEvent = SemanticEvent(
+    eventId: "e2", deviceId: "d1", userId: "u1", organizationId: "o1",
+    occurredAt: "2026-07-17T18:00:01.000Z", monotonicMs: 6,
+    app: .init(bundleId: "com.google.Chrome", displayName: "Chrome"),
+    eventType: "value_committed",
+    target: .init(role: "AXTextField", semanticType: nil, stableIdHash: "abc", labelHash: nil),
+    context: .init(), durationMs: nil, sensitivity: "internal",
+    redaction: .init(applied: false, reasons: []),
+    traceRef: "018f0000-0000-7000-8000-0000000000cc", traceStepOrder: 2
+)
+if let line = try? ObserverMessage.event(stampedEvent).jsonLine(),
+   let json = decode(line), let payload = json["event"] as? [String: Any] {
+    check(payload["trace_ref"] as? String == "018f0000-0000-7000-8000-0000000000cc"
+          && payload["trace_step_order"] as? Int == 2,
+          "the trace stamp encodes under its snake_case wire names")
+} else {
+    check(false, "the trace stamp encodes under its snake_case wire names")
+}
+if let line = try? ObserverMessage.event(event).jsonLine(),
+   let json = decode(line), let payload = json["event"] as? [String: Any] {
+    check(payload["trace_ref"] == nil && payload["trace_step_order"] == nil,
+          "an unstamped event carries no trace keys at all")
+} else {
+    check(false, "an unstamped event carries no trace keys at all")
+}
+
 check(ObserverControl.parse(line: #"{"type":"pause"}"#) == .pause, "control pause parses")
 check(ObserverControl.parse(line: #"{"type":"teach_mode_start","max_seconds":300,"session_id":"s-1","scope_bundle_ids":["com.google.Chrome"]}"#)
       == .teachModeStart(sessionId: "s-1", maxSeconds: 300, scopeBundleIds: ["com.google.Chrome"]),
@@ -473,6 +501,67 @@ do {
     } else {
         check(false, "a trace encodes to JSON")
     }
+}
+
+// ------------------------------------------------------------ TRACE STAMPING
+// Pre-assigned step orders (the trace_ref join): an observation stamped at
+// capture time keeps its order through assembly, holes consume no order, and
+// an unstamped observation can never collide with a stamped one.
+do {
+    func obs(
+        _ at: String, _ operation: String, role: String? = "AXTextField",
+        label: String? = nil, produces: Bool = false, stepOrder: Int? = nil
+    ) -> ActionTrace.Observation {
+        ActionTrace.Observation(
+            at: at, operation: operation, bundleId: "com.apple.Numbers", role: role, subrole: nil,
+            label: label, identifier: nil, ancestry: [], menuPath: [], windowTitle: nil,
+            producesValue: produces, stepOrder: stepOrder)
+    }
+    func assemble(_ o: [ActionTrace.Observation]) -> ActionTrace.Trace? {
+        ActionTrace.assemble(
+            observations: o, traceId: "018f0000-0000-7000-8000-0000000000ee",
+            appCategory: "spreadsheet", allowlistBundles: ["com.apple.Numbers"],
+            privateApps: [], paused: false)
+    }
+
+    // Orders survive assembly exactly as stamped — including a gap where the
+    // drop-oldest cap discarded early steps (orders 6 and 7 with nothing
+    // before them), so an event stamped before the drop still points at the
+    // right step.
+    let gapped = assemble([
+        obs("2026-08-10T09:00:00.000Z", "read", label: "Domain", produces: true, stepOrder: 6),
+        obs("2026-08-10T09:00:03.000Z", "commit", label: "Website", stepOrder: 7),
+    ])
+    check(
+        gapped?.steps.map(\.order) == [6, 7],
+        "pre-assigned step orders survive assembly, gaps included")
+    if case let .fromStep(step, _)? = gapped?.steps[1].value_binding {
+        check(step == 6, "dataflow binds to the STAMPED order, not a positional one")
+    } else {
+        check(false, "dataflow binds to the STAMPED order, not a positional one")
+    }
+
+    // A refused observation carries no stamp and becomes a hole; the stamped
+    // steps around it keep their orders.
+    let holed = assemble([
+        obs("2026-08-10T09:00:00.000Z", "commit", label: "Phone", stepOrder: 1),
+        obs("2026-08-10T09:00:02.000Z", "commit", role: "AXSecureTextField", label: "Password"),
+        obs("2026-08-10T09:00:04.000Z", "press", role: "AXButton", label: "Save", stepOrder: 2),
+    ])
+    check(
+        holed?.steps.map(\.order) == [1, 2] && holed?.protected_segments.count == 1,
+        "holes consume no order and stamped orders stand")
+
+    // An unstamped observation among stamped ones continues ABOVE the maximum
+    // rather than positionally — a duplicate order would refuse the whole
+    // trace after a perfectly good capture.
+    let mixed = assemble([
+        obs("2026-08-10T09:00:00.000Z", "commit", label: "Phone", stepOrder: 3),
+        obs("2026-08-10T09:00:02.000Z", "press", role: "AXButton", label: "Save"),
+    ])
+    check(
+        mixed?.steps.map(\.order) == [3, 4],
+        "an unstamped observation numbers above the stamped maximum, never colliding")
 }
 
 // The action_trace message must ride the same line protocol the Rust core reads.
