@@ -370,6 +370,111 @@ if let data = try? Data(contentsOf: teachGatePath),
     check(false, "teach-egress-conformance.json missing or unreadable at \(teachGatePath.path)")
 }
 
+// ---------------------------------------------------------------- ACTION TRACE
+// Mirrors ActionTraceTests.swift so the native trace layer is verified on a
+// Command Line Tools box too, where XCTest does not exist.
+do {
+    func obs(
+        _ at: String, _ operation: String, role: String? = "AXTextField",
+        label: String? = nil, menuPath: [String] = [], windowTitle: String? = nil,
+        produces: Bool = false, bundle: String = "com.apple.Numbers"
+    ) -> ActionTrace.Observation {
+        ActionTrace.Observation(
+            at: at, operation: operation, bundleId: bundle, role: role, subrole: nil,
+            label: label, identifier: nil, ancestry: [], menuPath: menuPath,
+            windowTitle: windowTitle, producesValue: produces)
+    }
+    func assemble(_ o: [ActionTrace.Observation], paused: Bool = false) -> ActionTrace.Trace? {
+        ActionTrace.assemble(
+            observations: o, traceId: "018f0000-0000-7000-8000-0000000000aa",
+            appCategory: "spreadsheet", allowlistBundles: ["com.apple.Numbers"],
+            privateApps: [], paused: paused)
+    }
+
+    let hash = ActionTrace.titleHash("Q3 Forecast — Acme Corp")
+    check(hash.count == 64, "window titles hash at the 64 chars the contract requires")
+    check(!hash.contains("Acme"), "a hashed window title does not contain the title")
+
+    let withSecret = assemble([
+        obs("2026-08-10T09:00:00.000Z", "commit", label: "Phone"),
+        obs("2026-08-10T09:00:05.000Z", "commit", role: "AXSecureTextField", label: "Password"),
+        obs("2026-08-10T09:00:09.000Z", "press", role: "AXButton", label: "Save"),
+    ])
+    check(withSecret?.steps.count == 2, "a secure field becomes a hole, and other steps survive")
+    check(
+        withSecret?.protected_segments.first?.reason == "secure_field",
+        "the hole records its reason")
+
+    let bound = assemble([
+        obs("2026-08-10T09:00:00.000Z", "read", label: "Company Domain", produces: true),
+        obs("2026-08-10T09:00:03.000Z", "commit", label: "Website"),
+    ])
+    if case let .fromStep(step, output)? = bound?.steps[1].value_binding {
+        check(step == 1 && output == "Company Domain", "a write binds to the read that produced it")
+    } else {
+        check(false, "a write binds to the read that produced it")
+    }
+
+    let unbound = assemble([obs("2026-08-10T09:00:00.000Z", "commit", label: "Company Domain")])
+    if case let .runtimeInput(inputId, _)? = unbound?.steps[0].value_binding {
+        check(inputId == "company_domain", "an unknowable value becomes a runtime input slot")
+    } else {
+        check(false, "an unknowable value becomes a runtime input slot")
+    }
+
+    let acrossHole = assemble([
+        obs("2026-08-10T09:00:00.000Z", "read", label: "Domain", produces: true),
+        obs("2026-08-10T09:00:02.000Z", "commit", role: "AXSecureTextField", label: "Password"),
+        obs("2026-08-10T09:00:04.000Z", "commit", label: "Website"),
+    ])
+    if case .runtimeInput? = acrossHole?.steps[1].value_binding {
+        check(true, "a value never carries across a protected hole")
+    } else {
+        check(false, "a value never carries across a protected hole")
+    }
+
+    let menu = assemble([
+        obs(
+            "2026-08-10T09:00:00.000Z", "press", role: "AXMenuItem", label: "CSV…",
+            menuPath: ["File", "Export To", "CSV…"], windowTitle: "Q3 Forecast")
+    ])
+    check(
+        menu?.steps[0].target.menu_path == ["File", "Export To", "CSV…"],
+        "a menu path survives into the trace")
+    check(
+        menu?.steps[0].preconditions.requires_foreground == true,
+        "a UI action requires the foreground")
+
+    check(
+        assemble([obs("2026-08-10T09:00:00.000Z", "commit", label: "Phone")], paused: true) == nil,
+        "paused observation produces no trace at all")
+
+    let denied = ActionTrace.assemble(
+        observations: [
+            obs(
+                "2026-08-10T09:00:00.000Z", "commit", label: "Login",
+                bundle: "com.1password.1password")
+        ],
+        traceId: "018f0000-0000-7000-8000-0000000000bb", appCategory: "other",
+        allowlistBundles: ["com.1password.1password"], privateApps: [], paused: false)
+    check(denied == nil, "a hard-denied app yields no trace, not an empty one")
+
+    if let trace = assemble([obs("2026-08-10T09:00:00.000Z", "commit", label: "Phone")]),
+        let data = try? JSONEncoder().encode(trace)
+    {
+        let encoded = String(decoding: data, as: UTF8.self)
+        check(encoded.contains("\"local_only\":true"), "the encoded trace is local_only")
+        check(encoded.contains("\"surface\":\"macos_ax\""), "steps name the AX surface")
+        var leaked: [String] = []
+        for forbidden in ["\"value\":", "\"text\":", "\"keystrokes\":", "\"window_title\":"] {
+            if encoded.contains(forbidden) { leaked.append(forbidden) }
+        }
+        check(leaked.isEmpty, "no forbidden field encodes into a trace" + (leaked.isEmpty ? "" : " — \(leaked)"))
+    } else {
+        check(false, "a trace encodes to JSON")
+    }
+}
+
 // The summary MUST stay at the very end of this file: it exits the process, so
 // any check written below it never runs (that silently disabled the
 // label-pattern and date checks until 2026-08-03).
