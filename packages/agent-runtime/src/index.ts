@@ -88,3 +88,11 @@ export {
   type MissingInput,
   type InputReadiness,
 } from "./agent-inputs.js";
+export {
+  compileTraceToAgentSpec,
+  TRACE_COMPILER_ID,
+  TRACE_COMPILER_VERSION,
+  type TraceCompileRequest,
+  type TraceCompileResult,
+  type TraceProvenance,
+} from "./trace-compiler.js";
