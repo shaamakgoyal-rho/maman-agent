@@ -129,6 +129,18 @@ export class LocalAgentRuntime {
   private readonly deps: LocalAgentRuntimeDeps;
   private readonly now: () => Date;
 
+  /**
+   * Swaps the capability registry LIVE — the environment changed, not the
+   * agents. Called when the user grants or revokes an actuation origin:
+   * revocation must bite immediately (the very next step resolves against the
+   * new registry and finds nothing), and a grant must work without restarting
+   * Maman. Registered agents stay registered; whether they can still RUN is
+   * re-answered per run, which is the honest reading of a permission change.
+   */
+  replaceRegistry(registry: Map<string, CapabilityAdapter>): void {
+    this.deps.registry = registry;
+  }
+
   constructor(deps: LocalAgentRuntimeDeps, restore: readonly RegisteredAgent[] = []) {
     this.deps = deps;
     this.now = deps.now ?? (() => new Date());
@@ -306,7 +318,10 @@ export class LocalAgentRuntime {
         if (result.kind === "read" && Array.isArray(result.output)) {
           recordsRead += result.output.length;
         }
-        if (result.kind === "proposed") diff = result.diff;
+        // MERGED, not last-wins: a routine with several consequential steps
+        // (fill a field, then press Save) proposes ONE combined diff — the
+        // whole change the user is being shown, not just its tail.
+        if (result.kind === "proposed") diff = mergeDiffs(diff, result.diff);
       }
     } catch (e) {
       // The step's own message is the useful part ("no Phone field", "origin
@@ -350,40 +365,21 @@ export class LocalAgentRuntime {
 
     const state: RunState = { outputs: {} };
     const runCtx: CapabilityContext = { ...ctx, mode: "supervised" };
+    const ordered = [...agent.spec.steps].sort((a, b) => a.order - b.order);
+
+    // ---- PASS 1: reads and proposals only, fresh against the live page ----
+    //
+    // Every proposal re-runs BEFORE anything writes, and the MERGED diff must
+    // hash to what the user approved. Interleaving (the old shape) checked
+    // staleness one pair at a time, which meant a two-write routine could land
+    // its first write and then abort — a partial write that cannot be
+    // retracted. Checking the whole plan first means staleness aborts with
+    // NOTHING written, which is the only acceptable failure order.
     let freshDiff: ProposedDiff | null = null;
-    let freshSha = "";
-    let written: { verified: boolean; verify_detail: string } | null = null;
-
+    const proposedByKey = new Map<string, ProposedDiff>();
     try {
-      for (const step of [...agent.spec.steps].sort((a, b) => a.order - b.order)) {
-        if (step.mode === "write") {
-          if (freshDiff === null || freshSha !== approvedDiffSha) {
-            return {
-              status: "aborted_stale",
-              approved_sha: approvedDiffSha,
-              fresh_sha: freshSha,
-              fresh_diff: freshDiff,
-            };
-          }
-          const result = await executeStep({
-            spec: agent.spec,
-            step,
-            state,
-            agentInputs,
-            ctx: runCtx,
-            adapter: requireAdapter(this.deps.registry, step, this.deps.runtime_id),
-            approvedDiff: freshDiff,
-            approvedDiffSha,
-          });
-          if (result.kind !== "written") {
-            return { status: "failed", detail: `the write step returned ${result.kind}` };
-          }
-          written = { verified: result.verified, verify_detail: result.verify_detail };
-          // NOT returning here: the spec's own trailing steps (the verify-read)
-          // still run, so the plan the user approved is the plan that executes.
-          continue;
-        }
-
+      for (const step of ordered) {
+        if (step.mode === "write") continue;
         const result = await executeStep({
           spec: agent.spec,
           step,
@@ -393,15 +389,75 @@ export class LocalAgentRuntime {
           adapter: requireAdapter(this.deps.registry, step, this.deps.runtime_id),
         });
         if (result.kind === "proposed") {
-          freshDiff = result.diff;
-          freshSha = diffSha256(result.diff);
+          proposedByKey.set(step.output_key, result.diff);
+          freshDiff = mergeDiffs(freshDiff, result.diff);
         }
       }
     } catch (e) {
       return { status: "failed", detail: e instanceof Error ? e.message : String(e) };
     }
 
-    if (written === null || freshDiff === null) {
+    const freshSha = freshDiff ? diffSha256(freshDiff) : "";
+    if (freshDiff === null || freshSha !== approvedDiffSha) {
+      return {
+        status: "aborted_stale",
+        approved_sha: approvedDiffSha,
+        fresh_sha: freshSha,
+        fresh_diff: freshDiff,
+      };
+    }
+
+    // ---- PASS 2: the writes, each bound to the slice it proposes ----
+    //
+    // A write step compiled from a trace names its proposing sibling via the
+    // `pairs_with` literal (its output_key), so a press executes against the
+    // press's own proposal, not the form fill's. A write with no named pair —
+    // every agent compiled before pairing existed — takes the whole merged
+    // diff, which for those single-pair specs IS its proposal.
+    let written: { verified: boolean; verify_detail: string } | null = null;
+    try {
+      for (const step of ordered) {
+        if (step.mode !== "write") continue;
+        const pairKey = step.inputs["pairs_with"];
+        const slice =
+          pairKey?.source === "literal" && typeof pairKey.value === "string"
+            ? (proposedByKey.get(pairKey.value) ?? null)
+            : freshDiff;
+        if (slice === null) {
+          return {
+            status: "failed",
+            detail: `write step ${step.step_id} pairs with a proposal that produced nothing`,
+          };
+        }
+        const result = await executeStep({
+          spec: agent.spec,
+          step,
+          state,
+          agentInputs,
+          ctx: runCtx,
+          adapter: requireAdapter(this.deps.registry, step, this.deps.runtime_id),
+          approvedDiff: slice,
+          approvedDiffSha: diffSha256(slice),
+        });
+        if (result.kind !== "written") {
+          return { status: "failed", detail: `the write step returned ${result.kind}` };
+        }
+        written =
+          written === null
+            ? { verified: result.verified, verify_detail: result.verify_detail }
+            : {
+                // The run is verified only when EVERY write read back correctly.
+                verified: written.verified && result.verified,
+                verify_detail: [written.verify_detail, result.verify_detail]
+                  .filter(Boolean)
+                  .join("; "),
+              };
+      }
+    } catch (e) {
+      return { status: "failed", detail: e instanceof Error ? e.message : String(e) };
+    }
+
+    if (written === null) {
       return { status: "failed", detail: "this agent has no write step to approve" };
     }
     agent.last_run_at = this.now().toISOString();
@@ -413,4 +469,23 @@ export class LocalAgentRuntime {
       verify_detail: written.verify_detail,
     };
   }
+}
+
+/**
+ * Two proposals → one, additively. The merged diff is what the user approves:
+ * the WHOLE routine's changes, in plan order, never just the last step's.
+ */
+function mergeDiffs(a: ProposedDiff | null, b: ProposedDiff): ProposedDiff {
+  if (a === null) return b;
+  return {
+    summary: {
+      input_rows: a.summary.input_rows + b.summary.input_rows,
+      confident_matches: a.summary.confident_matches + b.summary.confident_matches,
+      ambiguous_skipped: a.summary.ambiguous_skipped + b.summary.ambiguous_skipped,
+      missing: a.summary.missing + b.summary.missing,
+      change_count: a.summary.change_count + b.summary.change_count,
+      accounts_affected: Math.max(a.summary.accounts_affected, b.summary.accounts_affected),
+    },
+    changes: [...a.changes, ...b.changes],
+  };
 }

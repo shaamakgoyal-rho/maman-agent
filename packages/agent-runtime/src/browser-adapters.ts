@@ -404,13 +404,23 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
         ],
       };
     },
-    write: async (_inputs, approvedDiff, ctx) => {
+    write: async (inputs, approvedDiff, ctx) => {
       if (approvedDiff.changes.length === 0) return { applied: 0, results: [] };
+      // The OBSERVED role rides in the target binding — a link press must
+      // resolve links, not whatever button shares the label. Unknown roles
+      // fall back to button (the pre-role behaviour), never to a guess.
+      const boundRole = fieldsFromTargetBinding(inputs)[0]?.role;
+      const pressRole: BrowserTargetRole =
+        boundRole === "link" || boundRole === "a"
+          ? "link"
+          : boundRole === "checkbox"
+            ? "checkbox"
+            : "button";
       const steps: PlanStep[] = approvedDiff.changes.map((change, i) => ({
         step_id: `press-${i + 1}-${change.field}`,
         action: {
           kind: "click_control",
-          target: { role: "button", name: change.field },
+          target: { role: pressRole, name: change.field },
           confirm_name: change.field,
         } satisfies BrowserAction,
         preview: `Press “${change.field}”`,
@@ -528,7 +538,7 @@ export function browserAdapters(d: BrowserAdapterDeps): Map<string, CapabilityAd
  */
 function fieldsFromTargetBinding(
   inputs: Record<string, unknown>,
-): Array<BrowserFieldTarget & { value?: string }> {
+): Array<BrowserFieldTarget & { value?: string; role?: string }> {
   const rawTarget = inputs["target"];
   if (typeof rawTarget !== "string") return [];
   let parsed: unknown;
@@ -541,6 +551,7 @@ function fieldsFromTargetBinding(
   const name = (parsed as { name?: unknown }).name;
   if (typeof name !== "string" || name.length === 0) return [];
   const nth = (parsed as { nth?: unknown }).nth;
+  const role = (parsed as { role?: unknown }).role;
   let value = inputs["value"];
   // A step_output binding delivers the READ step's whole output
   // ({origin, values, unread}), not a scalar. `value_field` — emitted by the
@@ -562,6 +573,7 @@ function fieldsFromTargetBinding(
       name,
       ...(typeof nth === "number" ? { nth } : {}),
       ...(typeof value === "string" ? { value } : {}),
+      ...(typeof role === "string" ? { role } : {}),
     },
   ];
 }

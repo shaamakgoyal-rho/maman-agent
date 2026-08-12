@@ -37,6 +37,9 @@ let totalEvaluates = 0;
 
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
+  // Boot hydrates settings FIRST now — the persisted form is what counts.
+  loadSettingsRaw: async () => JSON.stringify({ browser_actuation_origins: [ORIGIN] }),
+  saveSettingsRaw: async () => {},
   invokeCommand: async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === "agents_load") return agentsJson;
     if (cmd === "agents_save") {

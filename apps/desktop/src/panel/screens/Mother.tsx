@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { useSettings, pauseUntil } from "../../state/settings.js";
 import { useRecommendations, type RecommendationWithState } from "../../lib/recommendations.js";
-import { createAgentAndActivate, useAgentService } from "../../lib/agentService.js";
+import {
+  answerStagedRun,
+  approveStagedRun,
+  createAgentAndActivate,
+  grantOriginAndRetry,
+  useAgentService,
+} from "../../lib/agentService.js";
 import { useAgents } from "../../lib/agents.js";
 import { setSubtitleBarVisible } from "../../lib/statusbar.js";
 import { Button, Card, Muted, SectionTitle, StatusPill } from "../ui.js";
@@ -38,6 +44,12 @@ export function Mother({ petState }: { petState: PetStateName }) {
   const [demo, setDemo] = useState<{ steps: DemoStep[]; active: number } | null>(null);
   const [barError, setBarError] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  /** Creation paused on ONE inline question: may Maman act on this origin? */
+  const [consent, setConsent] = useState<{ origin: string; item: RecommendationWithState } | null>(
+    null,
+  );
+  /** Inline answers being typed for a staged run's missing inputs. */
+  const [stagedAnswers, setStagedAnswers] = useState<Record<string, string>>({});
 
   useEffect(() => {
     void refresh();
@@ -70,9 +82,40 @@ export function Mother({ petState }: { petState: PetStateName }) {
         await act(item.signature, { type: "accepted" });
         return;
       }
+      // ONE inline question instead of a trip to Privacy: the workflow names
+      // its own site, and consent for exactly that site continues the flow.
+      if ("needs_permission" in created) {
+        setConsent({ origin: created.needs_permission.origin, item });
+        return;
+      }
       // A refusal is stated where the user asked for the thing, in the words the
       // runtime used. No navigation into an editor: the click was "do this", and
       // an honest "I can't, because X" respects that better than a form.
+      setFailure(created.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const grantConsent = async () => {
+    if (!consent) return;
+    const { origin, item } = consent;
+    setConsent(null);
+    setBusy(true);
+    setFailure(null);
+    try {
+      const rec = item.recommendation;
+      const created = await grantOriginAndRetry(
+        origin,
+        item.candidate,
+        rec.generalized_intent ?? "automate_record_workflow",
+        rec.summary,
+        item.entry.custom_title ?? rec.title,
+      );
+      if (created.ok) {
+        await act(item.signature, { type: "accepted" });
+        return;
+      }
       setFailure(created.message);
     } finally {
       setBusy(false);
@@ -216,23 +259,120 @@ export function Mother({ petState }: { petState: PetStateName }) {
         </Card>
       )}
 
-      {/* ----------------------------------------------- what it did recently */}
+      {/* ------------------------------------ one inline permission question */}
+      {consent && (
+        <Card>
+          <SectionTitle>One permission</SectionTitle>
+          <p className="text-sm">
+            Allow Maman to act on <span className="font-mono">{consent.origin}</span>?
+          </p>
+          <Muted>
+            Permission applies only to that site. Maman still shows every change before anything is
+            written, and never touches password, payment or one-time-code fields.
+          </Muted>
+          <div className="mt-2 flex gap-2">
+            <Button onClick={() => void grantConsent()} disabled={busy}>
+              Allow this site
+            </Button>
+            <Button variant="secondary" onClick={() => setConsent(null)}>
+              Not now
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {/* ------------------------- proposals, questions, approvals, receipts */}
       {staged.length > 0 && (
         <Card>
           <SectionTitle>Recently, for you</SectionTitle>
-          <ul className="space-y-1.5">
+          <ul className="space-y-2">
             {staged.slice(0, 4).map((run) => (
-              <li key={run.staged_id} className="flex items-start justify-between gap-2 text-sm">
-                <span className="font-medium">{run.agent_name}</span>
-                <span className="text-right text-xs text-muted">
-                  {run.outcome.kind === "shadow"
-                    ? "Practised it — nothing changed"
-                    : run.outcome.kind === "needs_input"
-                      ? "Needs one answer from you"
-                      : run.outcome.kind === "failed"
-                        ? run.outcome.detail
-                        : "Ready when you are"}
-                </span>
+              <li key={run.staged_id} className="rounded-md border border-line p-2 text-sm">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="font-medium">{run.agent_name}</span>
+                  <span className="text-right text-xs text-muted">
+                    {run.outcome.kind === "shadow"
+                      ? "Practised it — nothing changed yet"
+                      : run.outcome.kind === "needs_input"
+                        ? "Needs one answer from you"
+                        : run.outcome.kind === "executing"
+                          ? "Doing it now…"
+                          : run.outcome.kind === "completed"
+                            ? run.outcome.verified
+                              ? "Done, and read back to confirm"
+                              : "Done — see what was and wasn't confirmed"
+                            : run.outcome.kind === "stale"
+                              ? "The page changed — review again"
+                              : run.outcome.kind === "failed"
+                                ? run.outcome.detail
+                                : "Ready when you are"}
+                  </span>
+                </div>
+
+                {/* The exact proposed changes, and the approval that binds to them. */}
+                {(run.outcome.kind === "shadow" || run.outcome.kind === "stale") &&
+                  run.outcome.diff &&
+                  run.outcome.diff.changes.length > 0 && (
+                    <div className="mt-2">
+                      <ul className="space-y-0.5 font-mono text-xs">
+                        {run.outcome.diff.changes.slice(0, 6).map((change, i) => (
+                          <li key={i}>
+                            {change.field}: “{change.old_value}” → “{change.new_value}”
+                          </li>
+                        ))}
+                      </ul>
+                      {run.outcome.sha && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button onClick={() => void approveStagedRun(run.staged_id)}>
+                            Approve &amp; do it
+                          </Button>
+                          <span className="text-[10px] text-muted">
+                            approves exactly {run.outcome.sha.slice(0, 12)}…
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                {/* The one inline question, answered where it was asked. */}
+                {run.outcome.kind === "needs_input" && run.outcome.missing.length > 0 && (
+                  <div className="mt-2 space-y-1.5">
+                    {run.outcome.missing.map((m) => (
+                      <label key={m.key} className="block text-xs">
+                        <span className="text-muted">{m.label}</span>
+                        <input
+                          className="mt-0.5 w-full rounded border border-line bg-bg px-2 py-1 text-sm"
+                          value={stagedAnswers[`${run.staged_id}:${m.key}`] ?? ""}
+                          onChange={(e) =>
+                            setStagedAnswers((s) => ({
+                              ...s,
+                              [`${run.staged_id}:${m.key}`]: e.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                    ))}
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const missing =
+                          run.outcome.kind === "needs_input" ? run.outcome.missing : [];
+                        const answers = Object.fromEntries(
+                          missing
+                            .map((m) => [m.key, stagedAnswers[`${run.staged_id}:${m.key}`] ?? ""])
+                            .filter(([, v]) => v !== ""),
+                        );
+                        void answerStagedRun(run.staged_id, answers);
+                      }}
+                    >
+                      Use this
+                    </Button>
+                  </div>
+                )}
+
+                {run.outcome.kind === "completed" && (
+                  <p className="mt-1 text-xs text-muted">{run.outcome.verify_detail}</p>
+                )}
               </li>
             ))}
           </ul>

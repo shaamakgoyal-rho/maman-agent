@@ -606,3 +606,54 @@ correlation rule); Rust 181 (browser_action_result line parse); desktop 349
 (creation through the native lane alone with no extension anywhere; the
 no-lane refusal names the native remedy first and never demands the
 extension). Full gate green.
+
+## 2026-08-12 — the Create Agent arrow connects: click → … → approve → execute → readback
+
+Five confirmed production defects repaired, each pinned by a test that failed
+before the fix:
+
+1. **Boot order.** `bootAgentService` built the capability registry while
+   in-memory settings still held DEFAULTS (App.tsx hydrated them in a later
+   React effect) — the runtime snapshotted zero actuation origins and an EMPTY
+   registry for the whole session. Boot now hydrates settings first; the four
+   service suites were converted from "preload setState then boot" (which is
+   how this stayed invisible) to persisted-settings-plus-default-memory, the
+   production shape.
+2. **Frozen registry.** The registry is no longer a construction-time
+   snapshot: a settings subscription rebuilds it live
+   (`LocalAgentRuntime.replaceRegistry`), so granting an origin works without
+   restarting and revoking one bites on the very next run — both tested.
+3. **Propose-only agents.** Trace compiler v2 emits propose→WRITE pairs
+   (set_value → propose_form_fill + supervised_form_fill; press →
+   press_control both halves) with `pairs_with`/`proposal` bindings, observed-
+   role gates (no typing into what was watched as a button, no pressing a
+   heading), and refuses when the write half is unavailable — no more agents
+   that describe forever and do never. `runApproved` became two-pass: ALL
+   reads/proposals re-run fresh and the MERGED diff must hash to the approval
+   BEFORE any write — a two-write routine can no longer land half and abort.
+4. **Discarded answers.** User answers now flow into declared `source:"user"`
+   inputs through shadow, proposal, and execution (only spec-declared keys).
+5. **Disconnected approval UI.** Mother's staged cards now show the exact
+   field-level diff and its hash, collect missing inputs inline, and call the
+   REAL `approveStagedRun`/`answerStagedRun` — which execute through
+   `executeApproved` → `runApproved` → the browser lane, with the stale-page
+   abort surfacing the fresh diff for re-approval.
+
+Plus: inline origin consent (Create Agent asks "Allow Maman to act on
+<origin>?" for the trace's own origin — exactly that origin, never a wildcard
+— persists it, the registry rebuilds, creation continues; no Privacy trip),
+and the native-trace refusal now states the truth: execution needs no
+extension, but trace-quality OBSERVATION still does.
+
+Evidence: agent-runtime 24+4 (trace-execution end-to-end: merged one-diff
+proposal, approved-hash execution mutating the page with readback, whole-plan
+stale abort writing NOTHING, wrong-hash writes nothing; propose→write pair
+shape; role refusals; write-half-missing refusal), desktop create-agent-flow
+21 (jsdom so the presence gate is real — plain node silently not_issued every
+write, itself a finding; production boot order; live grant/revoke; inline
+consent; answer→approve→execute→readback through the UI's own verbs;
+changed-page abort), full gate green.
+
+Honest remainders: real-page visual dry-run overlay (panel mock only), typed
+readiness blocker report (lane+consent only today), Agents-screen legacy
+runs.ts arcs, autonomy as an enum, packaged Tauri+Chrome E2E.

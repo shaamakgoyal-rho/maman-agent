@@ -25,6 +25,7 @@ const CONSTANT_REF = "018f0000-0000-7000-8000-00000000a1c1";
 const CAPABILITIES = new Set([
   "browser.extract_structured_fields",
   "browser.propose_form_fill",
+  "browser.supervised_form_fill",
   "browser.press_control",
 ]);
 
@@ -85,7 +86,9 @@ describe("an observed trace becomes an executable spec", () => {
     // The strongest available check: the runtime's own validator accepts it.
     const validation = validateAgentSpec(result.spec);
     expect(validation.valid, JSON.stringify(validation)).toBe(true);
-    expect(result.spec.steps).toHaveLength(2);
+    // read + press-propose + press-WRITE: the consequential action carries
+    // both halves, so the agent can execute, not merely describe.
+    expect(result.spec.steps).toHaveLength(3);
     expect(result.spec.name).toBe("Assign and qualify the next lead");
   });
 
@@ -122,7 +125,7 @@ describe("an observed trace becomes an executable spec", () => {
     // the audit trail.
     expect(result.spec.compiler).toBe("deterministic-local");
     expect(TRACE_COMPILER_ID).toBe("deterministic-local");
-    expect(result.provenance).toMatchObject({ compiled_steps: 2, protected_segments: 0 });
+    expect(result.provenance).toMatchObject({ compiled_steps: 3, protected_segments: 0 });
   });
 
   it("declares zero token and cost budget, because no model is constructed", () => {
@@ -209,6 +212,9 @@ describe("a missing fact becomes one question, not a form", () => {
     t.steps[1] = {
       ...t.steps[1]!,
       operation: "set_value",
+      // A set_value needs set_value evidence: the observed role gate refuses
+      // typing into what was watched as a button.
+      target: { role: "textbox", accessible_name: "Owner", ancestry: [], menu_path: [] },
       value_binding: { kind: "local_constant", encrypted_ref: CONSTANT_REF },
     };
     const result = compile(t);
@@ -273,5 +279,102 @@ describe("it refuses rather than guessing", () => {
       value_binding: { kind: "from_step", step: 2, output: "x" },
     };
     expect(compile(t).ok).toBe(false);
+  });
+});
+
+describe("consequential actions compile as propose → WRITE pairs (v2)", () => {
+  it("emits the executing write step beside every proposal, paired by output_key", () => {
+    const result = compile();
+    if (!result.ok) throw new Error(result.detail);
+    const [read, propose, write] = result.spec.steps;
+    expect(read!.mode).toBe("read");
+    expect(propose!).toMatchObject({
+      capability_id: "browser.press_control",
+      mode: "propose_write",
+      output_key: "step_2",
+    });
+    expect(write!).toMatchObject({
+      capability_id: "browser.press_control",
+      mode: "write",
+      approval: { required: true },
+    });
+    expect(write!.inputs["pairs_with"]).toEqual({ source: "literal", value: "step_2" });
+    // The write carries the SAME target evidence its proposal was built from.
+    expect(write!.inputs["target"]).toEqual(propose!.inputs["target"]);
+    const validation = validateAgentSpec(result.spec);
+    expect(validation.valid, JSON.stringify(validation)).toBe(true);
+  });
+
+  it("a set_value pairs propose_form_fill with supervised_form_fill", () => {
+    const t = trace();
+    t.steps[1] = {
+      ...t.steps[1]!,
+      operation: "set_value",
+      target: { role: "textbox", accessible_name: "Owner", ancestry: [], menu_path: [] },
+      value_binding: {
+        kind: "runtime_input",
+        input_id: "owner",
+        prompt: "Who should own this?",
+      },
+    };
+    const result = compile(t);
+    if (!result.ok) throw new Error(result.detail);
+    const write = result.spec.steps.find((s) => s.mode === "write")!;
+    expect(write.capability_id).toBe("browser.supervised_form_fill");
+    // The runtime input flows to BOTH halves — the write resolves the same
+    // value the proposal was computed from.
+    expect(write.inputs["value"]).toEqual({ source: "agent_input", ref: "owner" });
+  });
+
+  it("refuses to compile when the WRITE half is unavailable — no propose-only agents", () => {
+    const t = trace();
+    t.steps[1] = {
+      ...t.steps[1]!,
+      operation: "set_value",
+      target: { role: "textbox", accessible_name: "Owner", ancestry: [], menu_path: [] },
+      value_binding: { kind: "runtime_input", input_id: "owner", prompt: "Owner?" },
+    };
+    const result = compileTraceToAgentSpec({
+      trace: t,
+      pattern_id: "018f0000-0000-7000-8000-00000000a1f1",
+      owner_user_id: "018f0000-0000-7000-8000-00000000a1f2",
+      organization_id: "018f0000-0000-7000-8000-00000000a1f3",
+      name: "propose-only must refuse",
+      // The proposal capability exists; the EXECUTING one does not. v1 would
+      // happily have compiled an agent that could describe forever and do never.
+      availableCapabilities: new Set([
+        "browser.extract_structured_fields",
+        "browser.propose_form_fill",
+      ]),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.missing_configuration[0]!.detail).toContain("browser.supervised_form_fill");
+  });
+
+  it("refuses a press on a control kind that is not pressable, by role", () => {
+    const t = trace();
+    t.steps[1] = {
+      ...t.steps[1]!,
+      target: { role: "heading", accessible_name: "Assign to me", ancestry: [], menu_path: [] },
+    };
+    const result = compile(t);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.missing_configuration[0]).toMatchObject({ kind: "target" });
+    expect(result.missing_configuration[0]!.detail).toContain("heading");
+  });
+
+  it("refuses typing into what was observed as a button", () => {
+    const t = trace();
+    t.steps[1] = {
+      ...t.steps[1]!,
+      operation: "set_value",
+      value_binding: { kind: "runtime_input", input_id: "v", prompt: "Value?" },
+    };
+    const result = compile(t);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.missing_configuration[0]!.detail).toContain("button");
   });
 });

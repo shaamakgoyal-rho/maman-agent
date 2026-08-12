@@ -34,7 +34,8 @@ import {
 
 /** Identity recorded in every spec this module produces. */
 export const TRACE_COMPILER_ID = "deterministic-local";
-export const TRACE_COMPILER_VERSION = 1;
+/** v2: consequential actions compile as propose→WRITE pairs, not proposals alone. */
+export const TRACE_COMPILER_VERSION = 2;
 
 /**
  * Trace operations this compiler can execute today, mapped to the capabilities
@@ -43,15 +44,40 @@ export const TRACE_COMPILER_VERSION = 1;
  * A narrow, honest map. An operation absent from here is REFUSED by name rather
  * than approximated with a neighbouring capability — "press" is not "set_value",
  * and pretending otherwise is how an agent does something the user never saw.
+ *
+ * A consequential operation names BOTH halves: the proposal the user approves
+ * and the write that executes it. v1 emitted only the proposal, which produced
+ * agents that could describe the change forever and perform it never —
+ * `runApproved` ended every run with "this agent has no write step".
+ *
+ * `roles` is the observed-role gate: a press compiled from a click on
+ * something that is not pressable (a heading, an anonymous div) is refused as
+ * an unsupported target instead of being replayed as a button click on
+ * whatever shares the label.
  */
 const BROWSER_OPERATIONS: Record<
   string,
-  { capability: string; mode: AgentSpec["steps"][number]["mode"] }
+  {
+    capability: string;
+    mode: AgentSpec["steps"][number]["mode"];
+    write_capability?: string;
+    roles?: readonly string[];
+  }
 > = {
   read_field: { capability: "browser.extract_structured_fields", mode: "read" },
   list_controls: { capability: "browser.extract_structured_fields", mode: "read" },
-  set_value: { capability: "browser.propose_form_fill", mode: "propose_write" },
-  press: { capability: "browser.press_control", mode: "propose_write" },
+  set_value: {
+    capability: "browser.propose_form_fill",
+    mode: "propose_write",
+    write_capability: "browser.supervised_form_fill",
+    roles: ["textbox", "combobox", "checkbox", "input", "textarea", "select"],
+  },
+  press: {
+    capability: "browser.press_control",
+    mode: "propose_write",
+    write_capability: "browser.press_control",
+    roles: ["button", "link", "checkbox", "menuitem", "tab", "a"],
+  },
 };
 
 export type TraceCompileRequest = {
@@ -123,10 +149,14 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
     };
   }
 
-  // 2. Every app in the trace must be a browser surface, because the browser
-  //    lane is the one that is genuinely implemented. A native step is named as
-  //    unsupported rather than silently dropped, which would produce an agent
-  //    that does part of the user's routine without saying so.
+  // 2. Every step must come from BROWSER observation. Stated truthfully
+  //    rather than hidden behind a capability error: macOS-Accessibility
+  //    traces record labels but not the page URLs and dataflow evidence this
+  //    compiler needs, so a routine watched only through Accessibility cannot
+  //    compile yet. (EXECUTION does not need the extension — the native AX
+  //    lane acts fine; it is trace-quality OBSERVATION that still does.) A
+  //    native step is named rather than silently dropped, which would produce
+  //    an agent that does part of the user's routine without saying so.
   const nativeStep = trace.steps.find((s) => s.surface !== "browser_dom");
   if (nativeStep) {
     return {
@@ -134,7 +164,10 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
       missing_configuration: [
         {
           kind: "workflow_definition",
-          detail: `step ${nativeStep.order} happened in ${nativeStep.surface}, and only the browser lane can execute today`,
+          detail:
+            `Step ${nativeStep.order} was watched through macOS Accessibility (${nativeStep.surface}). ` +
+            `Compiling a browser workflow needs the browser-observed trace the Chrome extension records — ` +
+            `enable it for this site and repeat the workflow once.`,
         },
       ],
       detail: `unsupported surface: ${nativeStep.surface}`,
@@ -158,10 +191,13 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
       });
       continue;
     }
-    if (!availableCapabilities.has(mapped.capability)) {
+    if (
+      !availableCapabilities.has(mapped.capability) ||
+      (mapped.write_capability && !availableCapabilities.has(mapped.write_capability))
+    ) {
       missing.push({
         kind: "workflow_definition",
-        detail: `${mapped.capability} is not available on this device.`,
+        detail: `${mapped.write_capability && !availableCapabilities.has(mapped.write_capability) ? mapped.write_capability : mapped.capability} is not available on this device.`,
       });
       continue;
     }
@@ -170,6 +206,17 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
         kind: "target",
         step_id: stepId(trace, step),
         detail: `I could not tell which control step ${step.order} acted on.`,
+      });
+      continue;
+    }
+    // The OBSERVED role must be one this operation can honestly replay. A
+    // click on a heading or an anonymous container is not a press the runtime
+    // can perform — refusing by name beats clicking whatever shares the label.
+    if (mapped.roles && !mapped.roles.includes(step.target.role)) {
+      missing.push({
+        kind: "target",
+        step_id: stepId(trace, step),
+        detail: `step ${step.order} acted on a “${step.target.role}” control, and I cannot ${step.operation.replace(/_/g, " ")} that kind yet.`,
       });
       continue;
     }
@@ -247,6 +294,33 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
       },
       retry: { allowed: false, max_attempts: 0, backoff_seconds: [] },
     });
+
+    // THE OTHER HALF. Every consequential action gets its executing write
+    // step, paired to the proposal above by output_key. The write carries the
+    // SAME bindings (the adapter re-resolves against the approved slice and
+    // reads back independently), and `pairs_with` is how the runtime hands it
+    // its own proposal rather than a sibling's.
+    if (mapped.write_capability) {
+      steps.push({
+        step_id: `${stepId(trace, step)}w`,
+        order: steps.length + 1,
+        name: `Apply: ${describeStep(step)}`,
+        capability_id: mapped.write_capability,
+        capability_version: 1,
+        mode: "write",
+        inputs: {
+          ...stepInputs,
+          pairs_with: { source: "literal", value: `step_${step.order}` },
+          // The proposing sibling's OUTPUT (its diff) — what the independent
+          // readback verifier compares the live page against after the write.
+          proposal: { source: "step_output", ref: `step_${step.order}` },
+        },
+        output_key: `step_${step.order}w`,
+        risk_level: "medium",
+        approval: { required: true, reason: "changes a real record" },
+        retry: { allowed: false, max_attempts: 0, backoff_seconds: [] },
+      });
+    }
   }
 
   // 5. Nothing executable ⇒ no agent. An empty spec that registers successfully
@@ -309,7 +383,8 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
       max_model_tokens: 0,
       max_cost_usd: 0,
       max_records_read: 100,
-      max_records_written: steps.filter((step) => step.mode !== "read").length,
+      // Real writes, not proposals: the budget bounds what can CHANGE.
+      max_records_written: Math.max(1, steps.filter((step) => step.mode === "write").length),
     },
     failure_policy: {
       on_assertion_failure: "stop",
