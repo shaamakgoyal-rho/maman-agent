@@ -160,6 +160,12 @@ public enum ObserverControl: Equatable {
     case teachModeStart(sessionId: String, maxSeconds: Int, scopeBundleIds: [String])
     case teachModeStop
     case shutdown
+    /// One browser action to execute against the live Chrome AX tree — the
+    /// native lane that replaces the extension as a REQUIREMENT. The request
+    /// is carried as its canonical JSON string: the executable re-parses it
+    /// (the desktop's serialization is data here, like everything on stdin)
+    /// and answers with a `browser_action_result` line.
+    case browserAction(requestJson: String)
 
     public static func parse(line: String) -> ObserverControl? {
         guard let data = line.data(using: .utf8),
@@ -187,6 +193,15 @@ public enum ObserverControl: Equatable {
             return .teachModeStart(sessionId: sessionId, maxSeconds: max, scopeBundleIds: scope)
         case "teach_mode_stop": return .teachModeStop
         case "shutdown": return .shutdown
+        case "browser_action":
+            // The request must at least be an object carrying a request_id, or
+            // no answer could ever be correlated — refuse to parse instead.
+            guard let request = json["request"] as? [String: Any],
+                request["request_id"] as? String != nil,
+                let data = try? JSONSerialization.data(withJSONObject: request),
+                let requestJson = String(data: data, encoding: .utf8)
+            else { return nil }
+            return .browserAction(requestJson: requestJson)
         default: return nil
         }
     }

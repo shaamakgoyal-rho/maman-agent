@@ -569,3 +569,40 @@ dispatches; happy path dispatches and never calls agent_browser_evaluate;
 demo-step mapping + evidence fallback; acceptance write/readback and shadow
 queue migrated to the relay shape), full gate green (lint, typecheck, test,
 build, format:check, `git diff --check`).
+
+## 2026-08-11 — the native browser lane: no extension required, ever
+
+Maman is a standalone app: agents act in the user's real Chrome through the
+SAME macOS Accessibility access observation already uses. The observer sidecar
+gains a browser-action executor (`BrowserActor` + pure `BrowserActuation` in
+ObserverCore): one AX walk of the focused Chrome window's web area serves
+list_controls / read_field / focus_field / set_value / click_control, the
+page's own `AXURL` supplies the origin, values are set through `AXValue` and
+presses through `AXPress` (no key events exist anywhere), and the write reads
+back from the same element. The sidecar re-checks for itself what the page
+makes fact: origin against allowed_origins (exact or true subdomain — the
+lookalike-suffix rule from ingest), secure roles AND sensitive labels (one
+deny vocabulary with observation), incognito windows, request expiry
+(fail-closed), confirm_name, and expect_current. Self-observation is
+suppressed while acting, so an agent's run can never teach the pattern engine
+its own output.
+
+Rust routes `browser_action_dispatch` to the extension relay when one is
+paired and connected, otherwise to the native lane over the sidecar's control
+pipe (waiter map keyed by request_id, 15s timeout, supervisor tick tightened
+to 500ms). `browser_relay_status` now reports `{connected, lane}` where
+connected means "an agent can act in Chrome right now" on either lane. Create
+Agent's readiness message no longer demands the extension: "Browser automation
+is not available. Turn observation on — Maman drives Chrome itself through
+Accessibility — or pair the optional Chrome extension." Privacy copy updated
+in the same change (the binding rule): the type-into card says how Maman acts
+and that the extension is optional.
+
+Evidence: Swift runner ALL CHECKS PASSED (16 new: role table, resolution incl.
+nth/ambiguity, secure-role + sensitive-label refusals, editability,
+precondition, confirm_name, origin gate incl. lookalikes/http/empty, expiry
+fail-closed, incognito, refused/applied wire shapes, control-line parse
+correlation rule); Rust 181 (browser_action_result line parse); desktop 349
+(creation through the native lane alone with no extension anywhere; the
+no-lane refusal names the native remedy first and never demands the
+extension). Full gate green.

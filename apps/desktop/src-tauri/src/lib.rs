@@ -2086,28 +2086,49 @@ fn queue_teach_control<R: Runtime>(app: &AppHandle<R>, line: String) -> Result<(
     Ok(())
 }
 
-/// Whether a browser relay is currently connected, for the run UI to show before
-/// it offers a browser-lane step.
+/// Whether SOME browser automation lane is ready, and which one.
+///
+/// Two lanes exist: the optional Chrome extension relay, and the NATIVE lane —
+/// the observer sidecar acting on Chrome's accessibility tree with the same
+/// permission it observes with. `connected` means "an agent can act in Chrome
+/// right now"; the extension is never required for that to be true.
 #[tauri::command]
-fn browser_relay_status<R: Runtime>(window: Window<R>) -> Result<serde_json::Value, String> {
+fn browser_relay_status<R: Runtime>(
+    app: AppHandle<R>,
+    window: Window<R>,
+) -> Result<serde_json::Value, String> {
     require_panel(&window)?;
+    let extension = browser_relay::relay().is_connected();
+    let native = app
+        .try_state::<ObserverState>()
+        .and_then(|s| s.0.lock().ok().map(|g| *g == ObserverStatus::Observing))
+        .unwrap_or(false);
     Ok(serde_json::json!({
-        "connected": browser_relay::relay().is_connected(),
+        "connected": extension || native,
+        "lane": if extension { "extension" } else if native { "native" } else { "none" },
         "in_flight": browser_relay::relay().pending_count(),
     }))
 }
 
-/// Pushes ONE approved browser action to the extension and returns its result.
+/// Pushes ONE approved browser action to whichever lane is ready and returns
+/// its result.
 ///
 /// The request arrives already built and policy-checked by the run path — this
-/// command is transport, and deliberately adds no judgement of its own. What it
-/// does add is the signature: the extension must be able to tell a request from
-/// the desktop apart from anything the native host could have injected, and the
-/// host holds no key material precisely so that it cannot.
+/// command is transport, and deliberately adds no judgement of its own.
+///
+/// Lane choice: the extension relay when one is paired AND connected —
+/// otherwise the NATIVE lane, where the observer sidecar performs the action
+/// on Chrome's accessibility tree. The extension is an optional enhancement,
+/// never a requirement: a stock Maman install acts in the user's Chrome by
+/// itself. The extension path adds a signature because a native-messaging
+/// host sits between desktop and extension; the sidecar's stdin has no such
+/// third party, so the native path has nothing to sign — the sidecar re-checks
+/// origin, expiry, secure fields, and private windows for itself either way.
 ///
 /// Panel-only. The status bar webview must not be able to drive the browser.
 #[tauri::command]
 async fn browser_action_dispatch<R: Runtime>(
+    app: AppHandle<R>,
     window: Window<R>,
     request: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -2118,6 +2139,10 @@ async fn browser_action_dispatch<R: Runtime>(
         .and_then(|v| v.as_str())
         .ok_or("request must carry request_id")?
         .to_string();
+
+    if !browser_relay::relay().is_connected() {
+        return native_action_dispatch(&app, &request_id, request).await;
+    }
 
     let secret = keyring::Entry::new(KEYCHAIN_SERVICE, browser_bridge::BROWSER_SECRET_ACCOUNT)
         .and_then(|e| e.get_password())
@@ -2155,6 +2180,59 @@ async fn browser_action_dispatch<R: Runtime>(
             return Err(e);
         }
         relay.wait(&request_id, rx, browser_relay::ACTION_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("dispatch thread failed: {e}"))?
+}
+
+/// The NATIVE lane: hand the request to the observer sidecar over its control
+/// pipe and wait for the correlated `browser_action_result` line. Requires the
+/// observer to be OBSERVING — acting uses the same Accessibility grant as
+/// watching, and a sidecar that is paused or missing cannot act for the same
+/// reason it cannot see.
+async fn native_action_dispatch<R: Runtime>(
+    app: &AppHandle<R>,
+    request_id: &str,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let observing = app
+        .try_state::<ObserverState>()
+        .and_then(|s| s.0.lock().ok().map(|g| *g == ObserverStatus::Observing))
+        .unwrap_or(false);
+    if !observing {
+        return Err(
+            "Browser automation is not available: turn observation on (Maman drives Chrome \
+             itself through Accessibility) or pair the optional Chrome extension."
+                .to_string(),
+        );
+    }
+
+    // Interest FIRST, then the queued line — the same ordering rule as the
+    // relay: an answer that arrives before the waiter exists is dropped.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<serde_json::Value>(1);
+    {
+        let state = app.state::<NativeActionWaiters>();
+        let mut map = state.0.lock().map_err(|_| "waiter state poisoned".to_string())?;
+        map.insert(request_id.to_string(), tx);
+    }
+    let line = serde_json::json!({ "type": "browser_action", "request": request }).to_string();
+    if let Some(state) = app.try_state::<TeachControlState>() {
+        if let Ok(mut queue) = state.0.lock() {
+            queue.push(line);
+        }
+    }
+
+    let app2 = app.clone();
+    let request_id2 = request_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcome = rx.recv_timeout(NATIVE_ACTION_TIMEOUT);
+        // Whatever happened, the waiter entry must not leak.
+        if let Some(state) = app2.try_state::<NativeActionWaiters>() {
+            if let Ok(mut map) = state.0.lock() {
+                map.remove(&request_id2);
+            }
+        }
+        outcome.map_err(|_| "the observer did not answer the browser action in time".to_string())
     })
     .await
     .map_err(|e| format!("dispatch thread failed: {e}"))?
@@ -2525,13 +2603,32 @@ use observer::{ObserverGate, ObserverStatus};
 /// Live observer status, surfaced to the pet UI (honest, never a silent degrade).
 pub struct ObserverState(pub std::sync::Mutex<ObserverStatus>);
 
-/// Control lines waiting to be written to the observer's stdin.
+/// Control lines waiting to be written to the observer's stdin (Teach Mode
+/// start/stop AND native-lane browser actions).
 ///
 /// The supervisor owns that pipe inside its loop, so a Tauri command cannot write
 /// to it directly. Commands push a line here and the supervisor drains it on its
-/// existing ~2s tick — which also means a queued line is DROPPED when the observer
-/// is not running, rather than starting a session against a dead child.
+/// ~500ms tick — which also means a queued line is DROPPED when the observer
+/// is not running, rather than starting work against a dead child.
 pub struct TeachControlState(pub std::sync::Mutex<Vec<String>>);
+
+/// Waiters for NATIVE-lane browser action results, keyed by request_id.
+///
+/// The dispatch command registers interest, queues the control line, and
+/// blocks on its receiver; the supervisor routes each `browser_action_result`
+/// line here. Mirrors the extension relay's begin/deliver pair — two lanes,
+/// one correlation discipline.
+pub struct NativeActionWaiters(
+    pub std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::mpsc::SyncSender<serde_json::Value>>,
+    >,
+);
+
+/// How long the native lane waits for the observer to answer one action. The
+/// supervisor drains the control queue on its read tick, and an AX walk of a
+/// heavy page takes a moment — but a silent sidecar must fail the step, not
+/// hang the run.
+const NATIVE_ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn set_observer_status<R: Runtime>(app: &AppHandle<R>, status: ObserverStatus) {
     if let Some(state) = app.try_state::<ObserverState>() {
@@ -2896,8 +2993,13 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                             let _ = stdin.flush().await;
                         }
                     }
+                    // 500ms, not 2s: this tick also drains the control queue,
+                    // and a browser action waiting a whole tick per step makes
+                    // the native lane feel broken. Gate + config checks are
+                    // in-memory (GateSettingsCache), so the faster tick is
+                    // cheap.
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_millis(500),
                         lines.next_line(),
                     )
                     .await
@@ -2969,6 +3071,27 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                                     }),
                                 );
                             }
+                            observer::ObserverLine::ActionResult(result) => {
+                                // Route to the dispatch command waiting on this
+                                // request_id. A result nobody waits for (the
+                                // waiter timed out) is dropped — same rule as
+                                // the extension relay.
+                                let request_id = result
+                                    .get("request_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if let Some(state) = app.try_state::<NativeActionWaiters>() {
+                                    let sender = state
+                                        .0
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut map| map.remove(&request_id));
+                                    if let Some(sender) = sender {
+                                        let _ = sender.try_send(result);
+                                    }
+                                }
+                            }
                             observer::ObserverLine::Heartbeat { .. }
                             | observer::ObserverLine::Hello { .. }
                             | observer::ObserverLine::Ignored => {}
@@ -3022,6 +3145,7 @@ pub fn run() {
         .manage(StoreHealth(std::sync::Mutex::new(StoreStatus::Ok)))
         .manage(ObserverState(std::sync::Mutex::new(ObserverStatus::Disabled)))
         .manage(TeachControlState(std::sync::Mutex::new(Vec::new())))
+        .manage(NativeActionWaiters(std::sync::Mutex::new(std::collections::HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             settings_load,
             settings_save,

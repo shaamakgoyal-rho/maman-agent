@@ -266,8 +266,10 @@ export function Privacy() {
         <Muted>
           Only for systems with no usable API. Every change is planned, shown to you action by
           action, and needs your approval — and Maman refuses password, payment and one-time-code
-          fields outright. Give the full address, including https://, because it is matched exactly:
-          an org on its own subdomain has to be named as such.
+          fields outright. Maman acts in Chrome by itself, through the same macOS Accessibility
+          access it observes with (no extension needed); pairing the optional Chrome extension
+          simply gives it a second way in. Give the full address, including https://, because it is
+          matched exactly: an org on its own subdomain has to be named as such.
         </Muted>
         {settings.browser_actuation_origins.length === 0 ? (
           <Muted>No sites — Maman cannot type into anything.</Muted>

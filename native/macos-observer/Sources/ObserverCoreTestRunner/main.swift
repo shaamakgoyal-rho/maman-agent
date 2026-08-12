@@ -564,6 +564,149 @@ do {
         "an unstamped observation numbers above the stamped maximum, never colliding")
 }
 
+// ---------------------------------------------------- NATIVE BROWSER LANE
+// The pure half of acting in Chrome without an extension: role vocabulary,
+// target resolution, refusal decisions, origin/expiry gates, result shapes.
+do {
+    func control(
+        _ role: String, _ name: String, secure: Bool = false, editable: Bool = true,
+        handle: Int = 0
+    ) -> BrowserActuation.PageControl {
+        BrowserActuation.PageControl(
+            role: role, name: name, secure: secure, editable: editable, handle: handle)
+    }
+
+    // Role translation is ONE table used in both directions.
+    check(
+        BrowserActuation.contractRole(axRole: "AXTextField") == "textbox"
+            && BrowserActuation.contractRole(axRole: "AXSecureTextField") == "textbox"
+            && BrowserActuation.contractRole(axRole: "AXButton") == "button"
+            && BrowserActuation.contractRole(axRole: "AXGroup") == nil,
+        "AX roles translate to contract roles, and unknown roles to nothing")
+
+    // Resolution: exact name, ambiguity refused, nth disambiguates.
+    let page = [
+        control("textbox", "Phone", handle: 0),
+        control("textbox", "Website", handle: 1),
+        control("textbox", "Website", handle: 2),
+        control("button", "Save", handle: 3),
+    ]
+    check(
+        BrowserActuation.resolve(controls: page, role: "textbox", name: "Phone", nth: nil)
+            == .match(page[0]),
+        "a unique role+name resolves")
+    check(
+        BrowserActuation.resolve(controls: page, role: "textbox", name: "Fax", nth: nil)
+            == .refused(reason: "no_match", matchCount: 0),
+        "a missing control refuses no_match")
+    check(
+        BrowserActuation.resolve(controls: page, role: "textbox", name: "Website", nth: nil)
+            == .refused(reason: "ambiguous_match", matchCount: 2),
+        "duplicates without nth refuse ambiguous_match")
+    check(
+        BrowserActuation.resolve(controls: page, role: "textbox", name: "Website", nth: 2)
+            == .match(page[2]),
+        "nth picks among duplicates")
+
+    // Refusal gates: secure fields, editability, preconditions, confirm_name.
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "read_field", control: control("textbox", "Password", secure: true),
+            expectCurrent: nil, currentValue: nil, confirmName: nil) == "secure_field",
+        "a secure field refuses even a read")
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "set_value", control: control("textbox", "OTP code"),
+            expectCurrent: nil, currentValue: "", confirmName: nil) == "secure_field",
+        "a sensitive LABEL refuses like a secure role — one deny vocabulary")
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "set_value", control: control("textbox", "Phone", editable: false),
+            expectCurrent: nil, currentValue: "", confirmName: nil) == "target_not_editable",
+        "a readonly field refuses the write")
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "set_value", control: control("textbox", "Phone"),
+            expectCurrent: "555-0100", currentValue: "555-9999", confirmName: nil)
+            == "precondition_failed",
+        "a stale expect_current refuses — the page moved on")
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "click_control", control: control("button", "Delete forever"),
+            expectCurrent: nil, currentValue: nil, confirmName: "Save")
+            == "confirm_name_mismatch",
+        "a relabelled button is a different action")
+    check(
+        BrowserActuation.refusalForAction(
+            kind: "set_value", control: control("textbox", "Phone"),
+            expectCurrent: "555-0100", currentValue: "555-0100", confirmName: nil) == nil,
+        "a clean write passes every gate")
+
+    // Origin gate mirrors the ingest allowlist: exact or true subdomain only.
+    let allowed = ["https://acme.example"]
+    check(
+        BrowserActuation.originAllowed("https://acme.example", allowedOrigins: allowed)
+            && BrowserActuation.originAllowed("https://app.acme.example", allowedOrigins: allowed),
+        "exact origin and true subdomains are allowed")
+    check(
+        !BrowserActuation.originAllowed(
+            "https://acme.example.evil.test", allowedOrigins: allowed)
+            && !BrowserActuation.originAllowed("http://acme.example", allowedOrigins: allowed)
+            && !BrowserActuation.originAllowed("https://acme.example", allowedOrigins: []),
+        "lookalike suffixes, http, and an empty allowlist refuse")
+
+    // Expiry: a request that aged out in the queue is not a live intent.
+    check(
+        !BrowserActuation.isExpired(
+            expiresAt: "2999-01-01T00:00:00.000Z", now: Date())
+            && BrowserActuation.isExpired(expiresAt: "2020-01-01T00:00:00.000Z", now: Date())
+            && BrowserActuation.isExpired(expiresAt: nil, now: Date()),
+        "expiry fails closed: past or missing deadlines refuse")
+
+    // Private windows are refused by title, in either locale spelling.
+    check(
+        BrowserActuation.looksPrivate(windowTitle: "Inbox — Incognito")
+            && BrowserActuation.looksPrivate(windowTitle: "Private Browsing — Mail")
+            && !BrowserActuation.looksPrivate(windowTitle: "Inbox — Chrome"),
+        "incognito windows are recognized and refused")
+
+    // Result wire shape: the contract's RAW result, snake_case, refusal pairing.
+    let envelope = BrowserActuation.ResultEnvelope(
+        requestId: "r-1", runId: "run-1", stepId: "s-1")
+    let refused = BrowserActuation.refusedResult(
+        envelope, reason: "no_match", resolvedName: "", matchCount: 0,
+        origin: "https://acme.example")
+    check(
+        refused["type"] as? String == "browser_action_result"
+            && refused["outcome"] as? String == "refused"
+            && refused["refusal_reason"] as? String == "no_match"
+            && (refused["observed"] as? [String: Any])?["origin"] as? String
+                == "https://acme.example"
+            && refused["request_id"] as? String == "r-1",
+        "a refused result carries the contract's wire names")
+    let applied = BrowserActuation.appliedResult(
+        envelope,
+        observed: [
+            "resolved_name": "Phone", "match_count": 1, "origin": "https://acme.example",
+            "value_before": "a", "value_after": "b",
+        ])
+    check(
+        applied["outcome"] as? String == "applied" && applied["refusal_reason"] == nil
+            && applied["completed_at"] is String,
+        "an applied result pairs no refusal_reason and stamps completion")
+
+    // Protocol: the control line parses only when correlatable.
+    check(
+        ObserverControl.parse(
+            line: #"{"type":"browser_action","request":{"request_id":"r-1","action":{"kind":"read_field"}}}"#
+        ) != nil,
+        "a browser_action control line with a request_id parses")
+    check(
+        ObserverControl.parse(line: #"{"type":"browser_action","request":{"action":{}}}"#) == nil
+            && ObserverControl.parse(line: #"{"type":"browser_action"}"#) == nil,
+        "a browser_action without a request_id cannot be correlated — refused at parse")
+}
+
 // The action_trace message must ride the same line protocol the Rust core reads.
 do {
     if let trace = ActionTrace.assemble(
