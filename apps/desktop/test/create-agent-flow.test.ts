@@ -31,6 +31,8 @@ const exactTraces = new Map<string, string>();
 /** What the daemon persisted while no panel existed — drained once at boot. */
 let stagedRunsFile = "[]";
 let relayConnected = true;
+/** Which lane the Rust status reports: "extension", "native", or "none". */
+let relayLane = "extension";
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
@@ -52,7 +54,13 @@ vi.mock("../src/lib/bridge.js", () => ({
       stagedRunsFile = "[]"; // drain semantics: read once, then gone
       return drained;
     }
-    if (cmd === "browser_relay_status") return { connected: relayConnected, in_flight: 0 };
+    if (cmd === "browser_relay_status") {
+      return {
+        connected: relayConnected,
+        lane: relayConnected ? relayLane : "none",
+        in_flight: 0,
+      };
+    }
     if (cmd === "browser_action_dispatch") {
       const { request_id, run_id, step_id, action } = args?.request as {
         request_id: string;
@@ -182,6 +190,7 @@ beforeEach(async () => {
   exactTraces.clear();
   stagedRunsFile = "[]";
   relayConnected = true;
+  relayLane = "extension";
   listeners.length = 0;
   invokedCommands.length = 0;
   __resetAgentServiceForTests();
@@ -253,16 +262,29 @@ describe("Create Agent is the whole verb", () => {
     if (record) expect(record.state).toBe("draft");
   });
 
-  it("refuses creation when the Chrome Browser Relay is not connected", async () => {
-    relayConnected = false;
+  it("refuses creation when NO automation lane exists — and never demands the extension", async () => {
+    relayConnected = false; // neither the native lane nor the extension answered
 
     const result = await createOne();
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
-    expect(result.message).toMatch(/Browser Relay is not connected/);
+    expect(result.message).toMatch(/Browser automation is not available/);
+    // The extension is optional: the remedy offered FIRST is Maman's own
+    // native lane, and the extension is named as optional.
+    expect(result.message).toMatch(/Maman drives Chrome itself/);
+    expect(result.message).toMatch(/optional Chrome extension/);
     const record = useAgents.getState().agents[0];
     if (record) expect(record.state).toBe("draft");
     expect(invokedCommands).not.toContain("browser_action_dispatch");
+  });
+
+  it("creates through the NATIVE lane alone — no extension anywhere", async () => {
+    // The status the Rust side reports when only the observer lane is up.
+    relayLane = "native";
+    const result = await createOne();
+    if (!result.ok) throw new Error(`create failed: ${result.message}`);
+    expect(invokedCommands).toContain("browser_action_dispatch");
+    expect(result.shadow.status).toBe("needs_input");
   });
 });
 

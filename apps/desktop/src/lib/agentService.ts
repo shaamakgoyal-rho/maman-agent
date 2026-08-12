@@ -132,21 +132,31 @@ function persistAgentChange(agent: RegisteredAgent): void {
   });
 }
 
-async function chromeRelayReady(): Promise<{ ok: true } | { ok: false; detail: string }> {
+/**
+ * Whether an agent could act in Chrome RIGHT NOW, on either lane: the native
+ * one (the observer driving Chrome's accessibility tree — no extension, no
+ * pairing, the same grant observation uses) or the optional extension relay.
+ * Maman is a standalone app; the extension only ever adds, never gates.
+ */
+async function browserAutomationReady(): Promise<{ ok: true } | { ok: false; detail: string }> {
   if (!isTauri()) {
     return { ok: false, detail: "Chrome automation needs the desktop app." };
   }
   try {
-    const status = await invokeCommand<{ connected?: boolean }>("browser_relay_status");
+    const status = await invokeCommand<{ connected?: boolean; lane?: string }>(
+      "browser_relay_status",
+    );
     if (status?.connected) return { ok: true };
     return {
       ok: false,
-      detail: "Chrome Browser Relay is not connected. Pair the extension and enable this site.",
+      detail:
+        "Browser automation is not available. Turn observation on — Maman drives Chrome " +
+        "itself through Accessibility — or pair the optional Chrome extension.",
     };
   } catch (error) {
     return {
       ok: false,
-      detail: error instanceof Error ? error.message : "Chrome Browser Relay is unavailable.",
+      detail: error instanceof Error ? error.message : "Browser automation is unavailable.",
     };
   }
 }
@@ -663,11 +673,11 @@ export async function createAgentAndActivate(
   }
 
   progress("checking_runtime", "Checking this device can run it…");
-  const relay = await chromeRelayReady();
-  if (!relay.ok) {
+  const automation = await browserAutomationReady();
+  if (!automation.ok) {
     await useAgents.getState().setState(agentId, "draft");
-    progress("failed", relay.detail);
-    return { ok: false, message: relay.detail };
+    progress("failed", automation.detail);
+    return { ok: false, message: automation.detail };
   }
 
   progress("registering", "Registering with the local runtime…");

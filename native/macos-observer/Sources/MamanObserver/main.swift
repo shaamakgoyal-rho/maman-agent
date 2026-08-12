@@ -48,6 +48,9 @@ final class ObserverRuntime {
     private let maxTraceObservations = 200
     private var observedPid: pid_t = 0
     private var permissionErrorEmitted = false
+    /// True while a browser action executes — AX notifications fired by
+    /// Maman's own actuation are dropped, never observed as the user's work.
+    private var actuating = false
 
     private let out = FileHandle.standardOutput
     /// Teach Mode capture. Lazy so `emit` exists first; the closure retain cycle
@@ -147,9 +150,32 @@ final class ObserverRuntime {
                 sessionId: sessionId, maxSeconds: maxSeconds, scopeBundleIds: scopeBundleIds)
         case .teachModeStop:
             teach.stop()
+        case let .browserAction(requestJson):
+            // The native browser lane: executed on the MAIN thread (AX calls
+            // belong there), with self-observation suppressed — Maman acting
+            // must not be recorded as the user working, or every agent run
+            // would teach the pattern engine its own output.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.actuating = true
+                let result = BrowserActor.execute(requestJson: requestJson)
+                self.actuating = false
+                self.emitBrowserActionResult(result)
+            }
         case .shutdown:
             exit(0)
         }
+    }
+
+    /// Emits the raw contract result under the line protocol. Raw because the
+    /// result is an arbitrary contract object, not one of the typed messages —
+    /// the Rust core re-validates it like everything else on this pipe.
+    private func emitBrowserActionResult(_ result: [String: Any]) {
+        let line: [String: Any] = ["type": "browser_action_result", "result": result]
+        guard let data = try? JSONSerialization.data(withJSONObject: line),
+            let text = String(data: data, encoding: .utf8), !text.contains("\n")
+        else { return }
+        out.write(Data((text + "\n").utf8))
     }
 
     private func handleAppActivated(_ app: NSRunningApplication) {
@@ -451,7 +477,7 @@ final class ObserverRuntime {
     }
 
     fileprivate func handleAxNotification(element: AXUIElement, notification: String) {
-        guard !paused else { return }
+        guard !paused, !actuating else { return }
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
 
         // A window move or resize is NOT workflow activity — it must never become

@@ -89,6 +89,10 @@ pub enum ObserverLine {
         state: String,
         detail: Option<String>,
     },
+    /// One browser action's result from the NATIVE lane (the observer acting
+    /// on Chrome's AX tree). The raw contract object — the run path re-parses
+    /// it against the strict schema, because a sidecar's output is data.
+    ActionResult(Value),
     /// Malformed or an unrecognized message type — dropped, never crashes.
     Ignored,
 }
@@ -113,6 +117,10 @@ pub fn parse_observer_line(line: &str) -> ObserverLine {
         },
         Some("action_trace") => match v.get("trace") {
             Some(trace) if trace.is_object() => ObserverLine::ActionTrace(trace.clone()),
+            _ => ObserverLine::Ignored,
+        },
+        Some("browser_action_result") => match v.get("result") {
+            Some(result) if result.is_object() => ObserverLine::ActionResult(result.clone()),
             _ => ObserverLine::Ignored,
         },
         Some("boundary") => ObserverLine::Boundary {
@@ -228,6 +236,27 @@ impl RestartPolicy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_a_native_browser_action_result_and_refuses_a_shapeless_one() {
+        let line = r#"{"type":"browser_action_result","result":{"request_id":"r-1","outcome":"observed"}}"#;
+        match parse_observer_line(line) {
+            ObserverLine::ActionResult(result) => {
+                assert_eq!(result.get("request_id").and_then(|v| v.as_str()), Some("r-1"));
+            }
+            other => panic!("expected an action result, got {other:?}"),
+        }
+        // The run path re-parses against the strict contract; this parser only
+        // refuses lines it could not even route.
+        assert!(matches!(
+            parse_observer_line(r#"{"type":"browser_action_result","result":"nope"}"#),
+            ObserverLine::Ignored
+        ));
+        assert!(matches!(
+            parse_observer_line(r#"{"type":"browser_action_result"}"#),
+            ObserverLine::Ignored
+        ));
+    }
+
     #[test]
     fn parses_an_action_trace_line_and_refuses_a_shapeless_one() {
         let line = r#"{"type":"action_trace","trace":{"trace_id":"t-1","local_only":true,"steps":[]}}"#;
