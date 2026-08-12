@@ -715,6 +715,11 @@ describe("capabilities follow permissions LIVE — no restart, no snapshot", () 
     if (!second.ok) throw new Error(`retry failed: ${second.message}`);
     expect(useSettings.getState().settings.browser_actuation_origins).toContain(ORIGIN);
     expect(useSettings.getState().settings.browser_actuation_origins).not.toContain("*");
+    // ONE consent covers both halves: acting on a site is meaningless if the
+    // trigger can never SEE that site, and Rust's ingest gate drops events for
+    // a non-allowlisted domain. The host — not the full origin — is what the
+    // observation allowlist compares.
+    expect(useSettings.getState().settings.allowlist_domains).toContain("acme.example");
   });
 });
 

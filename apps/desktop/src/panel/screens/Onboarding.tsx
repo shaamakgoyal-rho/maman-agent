@@ -1,7 +1,7 @@
 import { useState } from "react";
 import * as Checkbox from "@radix-ui/react-checkbox";
 import { product } from "@maman/config";
-import { ALLOWLIST_PRESETS, useSettings } from "../../state/settings.js";
+import { ALLOWLIST_PRESETS, bundlesForDomains, useSettings } from "../../state/settings.js";
 import { useEnrollment } from "../../state/enrollment.js";
 import { isTauri } from "../../lib/bridge.js";
 import { Button, Card, Muted, SectionTitle } from "../ui.js";
@@ -41,6 +41,10 @@ export function Onboarding() {
       onboarding_complete: true,
       comprehension_confirmed: true,
       allowlist_domains: selectedDomains,
+      // Allowing a SITE has to imply the browser it runs in, or the AX observer
+      // — which gates on bundle ids — drops everything and a fully consented
+      // install observes nothing at all. See `bundlesForDomains`.
+      allowlist_bundles: bundlesForDomains(selectedDomains, settings.allowlist_bundles),
       observation_paused: !observe,
       paused_until: null,
     });
@@ -121,7 +125,9 @@ export function Onboarding() {
           <h1 className="text-lg font-semibold">Choose what I may observe</h1>
           <Muted>
             These are suggestions for sales work — nothing is enabled until you check it. You can
-            change this list anytime in Privacy.
+            change this list anytime in Privacy. Allowing a site also lets me watch the browser it
+            runs in, at the level of which app and which kind of element — that is how I notice the
+            work itself.
           </Muted>
           <Card>
             <div className="space-y-1">

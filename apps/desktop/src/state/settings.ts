@@ -191,6 +191,38 @@ export const APP_PRESETS: Array<{ label: string; bundleId: string }> = [
   { label: "Apple Mail", bundleId: "com.apple.mail" },
 ];
 
+/**
+ * The browsers among APP_PRESETS. Allowing a SITE is meaningless to the AX
+ * observer, which gates on the bundle id of the app the work happens in — so
+ * consenting to sites has to imply consenting to the browsers they run in.
+ */
+export const BROWSER_BUNDLE_IDS = [
+  "com.google.Chrome",
+  "com.apple.Safari",
+  "company.thebrowser.Browser",
+  "com.microsoft.edgemac",
+] as const;
+
+/**
+ * Which app bundles a set of allowed SITES implies, unioned with whatever the
+ * user already allowed.
+ *
+ * THE BUG THIS EXISTS FOR: onboarding persisted `allowlist_domains` and never
+ * `allowlist_bundles`, and the Swift observer drops every event whose bundle is
+ * not allowlisted (an empty list matches nothing). So a user could complete the
+ * whole consent flow, check Salesforce and Gmail, click "Finish and start
+ * observing" — and Maman observed literally nothing, forever, while the home
+ * screen said "Watching your work". Allowing zero sites still implies zero
+ * bundles: "observe nothing" has to keep meaning nothing.
+ */
+export function bundlesForDomains(
+  domains: readonly string[],
+  existing: readonly string[] = [],
+): string[] {
+  if (domains.length === 0) return [...new Set(existing)];
+  return [...new Set([...existing, ...BROWSER_BUNDLE_IDS])];
+}
+
 /** Domain/bundle presets offered (never pre-enabled) during onboarding. */
 export const ALLOWLIST_PRESETS: Array<{ label: string; domain: string }> = [
   { label: "Salesforce", domain: "salesforce.com" },
