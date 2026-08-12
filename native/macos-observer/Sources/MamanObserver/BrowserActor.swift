@@ -20,6 +20,8 @@ enum BrowserActor {
 
     private static let maxNodesVisited = 6000
     private static let maxDepth = 48
+    /// Bounded polls while Chromium materialises its web-content tree.
+    private static let webAreaAttempts = 6
 
     /// Executes one contract request against the frontmost Chrome window and
     /// returns the contract's raw result object. Never throws: every failure
@@ -52,6 +54,10 @@ enum BrowserActor {
                 envelope, detail: "Chrome is not running, so there is no page to act on.")
         }
         let appElement = AXUIElementCreateApplication(chrome.processIdentifier)
+        // BEFORE any walk: Chromium exposes web content to AX clients only on
+        // request. Skipping this is why the lane read an empty page on every
+        // stock machine. See enableWebAccessibility.
+        enableWebAccessibility(on: appElement)
         guard let window = focusedWindow(of: appElement) else {
             return BrowserActuation.failedResult(
                 envelope, detail: "Chrome has no focused window to act on.")
@@ -60,9 +66,12 @@ enum BrowserActor {
             return BrowserActuation.refusedResult(
                 envelope, reason: "private_window", resolvedName: "", matchCount: 0, origin: nil)
         }
-        guard let webArea = findWebArea(in: window) else {
+        guard let webArea = awaitWebArea(in: window) else {
             return BrowserActuation.failedResult(
-                envelope, detail: "The Chrome window has no readable page.")
+                envelope,
+                detail:
+                    "Chrome did not expose the page to Accessibility. Grant Maman Accessibility "
+                    + "access in System Settings, or pair the Chrome extension.")
         }
         guard let origin = pageOrigin(of: webArea) else {
             return BrowserActuation.failedResult(
@@ -195,6 +204,49 @@ enum BrowserActor {
     }
 
     // ---- Chrome discovery ----
+
+    /**
+     * ASKS CHROMIUM TO BUILD ITS WEB-CONTENT ACCESSIBILITY TREE.
+     *
+     * Chromium keeps renderer accessibility OFF until an assistive client
+     * announces itself, because building that tree costs real memory and CPU
+     * per tab. Without this, `findWebArea` finds no AXWebArea (or an empty
+     * one) on a stock machine and EVERY native-lane action fails with "no
+     * readable page" — the lane looked implemented and could not read a single
+     * control. VoiceOver users never saw it because VoiceOver already flips
+     * this on.
+     *
+     * `AXManualAccessibility` is Chromium's own opt-in for exactly this
+     * (documented for automation clients); `AXEnhancedUserInterface` is the
+     * older AppKit convention some builds still honour, so both are set. The
+     * tree then materialises asynchronously, which is why callers give it a
+     * moment before walking.
+     *
+     * Idempotent and cheap: setting an already-set attribute is a no-op, so
+     * this runs per action rather than needing lifecycle bookkeeping.
+     */
+    private static func enableWebAccessibility(on appElement: AXUIElement) {
+        for attribute in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+            AXUIElementSetAttributeValue(appElement, attribute as CFString, kCFBooleanTrue)
+        }
+    }
+
+    /**
+     * Waits briefly for the web area to appear after enabling accessibility.
+     *
+     * Chromium answers the request asynchronously: the first walk immediately
+     * after enabling usually finds nothing. Polls a short, bounded number of
+     * times rather than sleeping a fixed pessimistic interval, so a page that
+     * is already instrumented costs nothing.
+     */
+    private static func awaitWebArea(in window: AXUIElement) -> AXUIElement? {
+        for attempt in 0..<webAreaAttempts {
+            if let area = findWebArea(in: window) { return area }
+            // 50ms, 100ms, 150ms… bounded by webAreaAttempts.
+            usleep(useconds_t(50_000 * (attempt + 1)))
+        }
+        return nil
+    }
 
     private static func frontmostChrome() -> NSRunningApplication? {
         let running = NSWorkspace.shared.runningApplications.filter { app in

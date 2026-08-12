@@ -657,3 +657,71 @@ changed-page abort), full gate green.
 Honest remainders: real-page visual dry-run overlay (panel mock only), typed
 readiness blocker report (lane+consent only today), Agents-screen legacy
 runs.ts arcs, autonomy as an enum, packaged Tauri+Chrome E2E.
+
+## 2026-08-12 — outcome-first journey + five of the ten autonomy breaks repaired
+
+The `/code-review` of the Chrome-agent path found ten structural breaks. This
+session reframed the user-facing journey around outcomes and repaired the five
+highest-leverage breaks, each pinned by a test that failed before its fix.
+
+**Outcome-first journey.** Primary suggestion action is "Automate this" (was
+"Create agent"); the evidence and plain-language time saved sit ON the card
+("Seen 6× across 3 days · saves about 35 min a week") rather than behind "Why
+this?"; navigation names what exists (Home / My automations / Privacy &
+access) instead of the builder; creation progress and failures are announced
+via `role="status"` + `aria-live`. `outcome-first-copy.test.ts` guards it at
+source level. No pipeline behaviour changed here — the one-click path already
+existed.
+
+**#1 Live browser events never reached trigger evaluation.** The bridge's
+`semantic_event` handler gated, inserted, and returned. Extension-relayed
+events are the ONLY live source carrying a domain, and every trace-compiled
+trigger names an origin — so the one source that could wake such an agent was
+stored and dropped. Now mirrors the observer ingest path.
+
+**#3 The matchers demanded an impossible category equality.** Both required
+`app_category` AND origin-host equality, but the compiler stamps "browser"
+while ingest maps the same domain to "crm"/"email"/"spreadsheet" — every SaaS
+agent rejected forever. The origin host is now the precise selector (exact
+comparison, no suffix match); without an origin, `app_category` still is.
+Applied identically in Rust and TS.
+
+**#5 The write-presence gate read the wrong thing.** `userIsPresent()` read the
+PANEL webview's `visibilityState`, inverting the question: a user typing in
+Chrome (panel hidden) was "absent"; a user at lunch (panel open) was "present".
+Presence now comes from macOS' idle clock (`user_idle_seconds`, CoreGraphics
+raw FFI). That reads a DURATION, never an input event — no key code, no
+content — so "nothing in this codebase reads a key event" holds unchanged.
+Cached (the actuator's `userPresent` is synchronous by contract), refreshed
+every 5s, and boot AWAITS the first reading, closing a real race where an early
+write failed closed on an unasked question. Stale or failed probe fails closed
+in the desktop app.
+
+**#6 A completed onboarding observed nothing.** Onboarding persisted
+`allowlist_domains` and never `allowlist_bundles`, while the observer drops
+every event whose bundle is not allowlisted. A fully consented install saw
+nothing, permanently, while the home screen said "Watching your work".
+Allowing a site now implies the browsers it runs in (`bundlesForDomains`, pure
+and tested); "observe nothing" still means nothing.
+
+**#10 Inline consent granted only half of itself.** Granting actuation left the
+agent's own site invisible to ingest, so the trigger installed for that site
+could never see it. One grant now records both halves.
+
+Evidence: desktop 367 (new: 6 presence, 4 onboarding, 4 copy guards, plus
+consent-syncs-observation and origin-beats-category assertions), agent-runtime
+219, Rust 182, Swift runner ALL CHECKS PASSED, full gate green.
+
+**#4 partially repaired, UNVERIFIED.** `BrowserActor` now sets
+`AXManualAccessibility` / `AXEnhancedUserInterface` on Chrome before walking
+(Chromium exposes web content to AX clients only on request — without it the
+lane read an empty page on every stock machine) and polls briefly for the tree
+to materialise. This cannot be verified in this environment: it needs a live
+Chrome and a granted Accessibility permission. The Privacy copy no longer
+promises extension-free actuation works, only that Maman asks Chrome to expose
+the page and that the extension is the reliable route.
+
+**Still open:** #7 extension lane unreachable in production (no pairing UI, no
+native-host manifest in the packaged app, no Web Store listing); #8 AX
+`set_value` does not fire page JS handlers (framework fields silently revert);
+#9 away-firing shadows discover against whatever page is frontmost at boot.
