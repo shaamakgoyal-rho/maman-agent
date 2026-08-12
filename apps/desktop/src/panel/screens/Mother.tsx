@@ -30,9 +30,10 @@ import type { PetStateName } from "../../pet/machine.js";
  *    do — never "candidate", "opportunity score", "replay", or "lane".
  *  - Evidence on demand, not by default: everything technical lives behind
  *    "Why this?", so a curious user can audit it and nobody else pays for it.
- *  - Create agent is ONE click into the one authoritative creation function
+ *  - "Automate this" is ONE click into the one authoritative creation function
  *    (`createAgentAndActivate`), which compiles → persists → registers →
- *    installs the trigger → shadow-runs. This screen adds no second path.
+ *    installs the trigger → shadow-runs. This screen adds no second path, and
+ *    the standard journey never says "agent" or shows a builder form.
  */
 export function Mother({ petState }: { petState: PetStateName }) {
   const { settings, update } = useSettings();
@@ -183,13 +184,29 @@ export function Mother({ petState }: { petState: PetStateName }) {
         <Card>
           <SectionTitle>{top.entry.custom_title ?? top.recommendation.title}</SectionTitle>
           <p className="mt-1 text-sm">{top.recommendation.summary}</p>
+          {/* Outcome-first: the evidence and the time it saves, in plain words,
+              ON the card — not hidden behind "Why this?". A nontechnical user
+              decides from this line, never from a builder form. */}
+          <p className="mt-2 text-xs text-muted">
+            Seen {top.candidate.occurrence_count}× across {top.candidate.distinct_day_count}{" "}
+            {top.candidate.distinct_day_count === 1 ? "day" : "days"}
+            {top.recommendation.projected_minutes_saved_weekly >= 1
+              ? ` · saves about ${Math.round(top.recommendation.projected_minutes_saved_weekly)} min a week`
+              : ""}
+          </p>
           {creation.length > 0 && (
-            <p className="mt-2 text-xs text-muted">{creation[creation.length - 1]!.detail}</p>
+            <p className="mt-2 text-xs text-muted" role="status" aria-live="polite">
+              {creation[creation.length - 1]!.detail}
+            </p>
           )}
-          {failure && <p className="mt-2 text-xs text-danger">{failure}</p>}
+          {failure && (
+            <p className="mt-2 text-xs text-danger" role="status" aria-live="polite">
+              {failure}
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <Button onClick={() => void create(top)} disabled={busy}>
-              {busy ? "Creating…" : "Create agent"}
+              {busy ? "Setting it up…" : "Automate this"}
             </Button>
             <Button variant="secondary" onClick={() => showDemo(top)} disabled={busy}>
               Demo run
