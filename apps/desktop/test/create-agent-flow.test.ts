@@ -1,3 +1,11 @@
+/**
+ * @vitest-environment jsdom
+ *
+ * jsdom because the actuator's PRESENCE GATE is real here: a consequential
+ * write requires a visible document, and in plain node every write is
+ * not_issued (user_absent) — the exact silent failure that made an "approved"
+ * run complete with zero changes.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /** The context handler is fire-and-forget off the event bus; wait for effects. */
@@ -24,6 +32,7 @@ const ORIGIN = "https://acme.example";
 
 /** In-memory stand-ins for the Rust commands, plus a local app-event bus. */
 let agentsJson: string | null = null;
+let persistedSettings: string | null = null;
 /** The representative trace the store would return, or null (legacy path). */
 let storedTrace: string | null = null;
 /** Traces retrievable BY ID — what action_trace_get serves. */
@@ -34,14 +43,24 @@ let relayConnected = true;
 /** Which lane the Rust status reports: "extension", "native", or "none". */
 let relayLane = "extension";
 const pageFields = new Map<string, string>([["Phone", "555-0100"]]);
+const pageClicks: string[] = [];
 type Listener = (e: unknown) => void;
 const listeners: Listener[] = [];
 const invokedCommands: string[] = [];
 
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
+  // PERSISTED settings, hydrated by boot — the in-memory store starts at
+  // DEFAULTS in these tests, exactly like production. The old shape
+  // (setState before boot) was how the empty-registry boot bug stayed
+  // invisible: tests preloaded what the runtime never actually had.
+  loadSettingsRaw: async () => persistedSettings,
+  saveSettingsRaw: async (json: string) => {
+    persistedSettings = json;
+  },
   invokeCommand: async (cmd: string, args?: Record<string, unknown>) => {
-    invokedCommands.push(cmd);
+    const actionKind = (args?.request as { action?: { kind?: string } } | undefined)?.action?.kind;
+    invokedCommands.push(cmd === "browser_action_dispatch" ? `dispatch:${actionKind}` : cmd);
     if (cmd === "agents_load") return agentsJson;
     if (cmd === "agents_save") {
       agentsJson = (args?.json as string) ?? null;
@@ -107,6 +126,41 @@ vi.mock("../src/lib/bridge.js", () => ({
           },
         };
       }
+      if (action.kind === "set_value" && pageFields.has(name)) {
+        const withValue = action as { value?: string; expect_current?: string };
+        if (
+          typeof withValue.expect_current === "string" &&
+          pageFields.get(name) !== withValue.expect_current
+        ) {
+          return {
+            ...base,
+            outcome: "refused",
+            refusal_reason: "precondition_failed",
+            observed: { resolved_name: name, match_count: 1, origin: ORIGIN },
+          };
+        }
+        const before = pageFields.get(name)!;
+        pageFields.set(name, withValue.value ?? "");
+        return {
+          ...base,
+          outcome: "applied",
+          observed: {
+            value_before: before,
+            value_after: pageFields.get(name),
+            resolved_name: name,
+            match_count: 1,
+            origin: ORIGIN,
+          },
+        };
+      }
+      if (action.kind === "click_control") {
+        pageClicks.push(name);
+        return {
+          ...base,
+          outcome: "applied",
+          observed: { resolved_name: name, match_count: 1, origin: ORIGIN },
+        };
+      }
       return {
         ...base,
         outcome: "refused",
@@ -126,11 +180,15 @@ vi.mock("../src/lib/bridge.js", () => ({
 }));
 
 const { useAgents } = await import("../src/lib/agents.js");
-const { useSettings } = await import("../src/state/settings.js");
+const { DEFAULT_SETTINGS, useSettings } = await import("../src/state/settings.js");
 const {
   bootAgentService,
   createAgentAndActivate,
   agentRuntime,
+  answerStagedRun,
+  approveStagedRun,
+  grantOriginAndRetry,
+  runAgentShadow,
   useAgentService,
   __resetAgentServiceForTests,
 } = await import("../src/lib/agentService.js");
@@ -186,6 +244,8 @@ function matchingContext() {
 
 beforeEach(async () => {
   agentsJson = null;
+  pageClicks.length = 0;
+  pageFields.set("Phone", "555-0100");
   storedTrace = null;
   exactTraces.clear();
   stagedRunsFile = "[]";
@@ -195,9 +255,10 @@ beforeEach(async () => {
   invokedCommands.length = 0;
   __resetAgentServiceForTests();
   useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
-  useSettings.setState((s) => ({
-    settings: { ...s.settings, browser_actuation_origins: [ORIGIN] },
-  }));
+  // Persisted on disk; the in-memory store is reset to DEFAULTS. Boot must
+  // hydrate before it builds the registry, or nothing below can act.
+  persistedSettings = JSON.stringify({ browser_actuation_origins: [ORIGIN] });
+  useSettings.setState({ settings: DEFAULT_SETTINGS, hydrated: false });
   await bootAgentService();
 });
 
@@ -213,7 +274,7 @@ describe("Create Agent is the whole verb", () => {
     // Registered with a runtime that can execute it.
     const registered = agentRuntime().get(result.agent_id);
     expect(registered).toBeDefined();
-    expect(invokedCommands).toContain("browser_action_dispatch");
+    expect(invokedCommands.some((c) => c.startsWith("dispatch:"))).toBe(true);
     expect(invokedCommands).not.toContain("agent_browser_evaluate");
 
     // The trigger is on the persisted spec — derived from the pattern, not manual.
@@ -250,7 +311,8 @@ describe("Create Agent is the whole verb", () => {
     // No actuation origins → the browser adapters exist but the compile-time
     // registry gate refuses, or registration names the gap. Either way: no
     // success, no shadow state, a specific message.
-    useSettings.setState((s) => ({ settings: { ...s.settings, browser_actuation_origins: [] } }));
+    persistedSettings = JSON.stringify({ browser_actuation_origins: [] });
+    useSettings.setState({ settings: DEFAULT_SETTINGS, hydrated: false });
     __resetAgentServiceForTests();
     await bootAgentService();
 
@@ -275,7 +337,7 @@ describe("Create Agent is the whole verb", () => {
     expect(result.message).toMatch(/optional Chrome extension/);
     const record = useAgents.getState().agents[0];
     if (record) expect(record.state).toBe("draft");
-    expect(invokedCommands).not.toContain("browser_action_dispatch");
+    expect(invokedCommands.some((c) => c.startsWith("dispatch:"))).toBe(false);
   });
 
   it("creates through the NATIVE lane alone — no extension anywhere", async () => {
@@ -283,7 +345,7 @@ describe("Create Agent is the whole verb", () => {
     relayLane = "native";
     const result = await createOne();
     if (!result.ok) throw new Error(`create failed: ${result.message}`);
-    expect(invokedCommands).toContain("browser_action_dispatch");
+    expect(invokedCommands.some((c) => c.startsWith("dispatch:"))).toBe(true);
     expect(result.shadow.status).toBe("needs_input");
   });
 });
@@ -498,6 +560,7 @@ describe("Create Agent compiles from the trace when one exists", () => {
     if (result.ok) throw new Error("unreachable");
     // The refusal names what was watched; nothing fell back to compile-learned.
     expect(result.message).toContain("drag and drop");
+    if ("needs_permission" in result) throw new Error("expected a compile refusal");
     expect(result.missing_configuration?.[0]?.kind).toBe("workflow_definition");
     expect(useAgents.getState().agents.filter((a) => a.state === "shadow")).toHaveLength(0);
   });
@@ -548,5 +611,190 @@ describe("Create Agent compiles from the trace when one exists", () => {
     const spec = record.versions[record.versions.length - 1]!.spec;
     // The newest observation of the same routine is the honest substitute.
     expect(spec.source_trace_id).toBe(TRACE.trace_id);
+  });
+});
+
+describe("capabilities follow permissions LIVE — no restart, no snapshot", () => {
+  const WRITE_TRACE = {
+    schema_version: 1,
+    trace_id: "018f0000-0000-7000-8000-00000000f1aa",
+    started_at: "2026-08-10T09:00:00.000Z",
+    ended_at: "2026-08-10T09:02:00.000Z",
+    apps: [{ category: "browser", origin: ORIGIN }],
+    steps: [
+      {
+        order: 1,
+        surface: "browser_dom",
+        origin: ORIGIN,
+        operation: "set_value",
+        target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+        value_binding: {
+          kind: "runtime_input",
+          input_id: "phone",
+          prompt: "Which number should go in Phone?",
+        },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "value_committed", readback: "reread_target" },
+      },
+      {
+        order: 2,
+        surface: "browser_dom",
+        origin: ORIGIN,
+        operation: "press",
+        target: { role: "button", accessible_name: "Save", ancestry: [], menu_path: [] },
+        value_binding: { kind: "none" },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "record_updated", readback: "reread_target" },
+      },
+    ],
+    protected_segments: [],
+    pattern_event_refs: [],
+    local_only: true,
+  };
+
+  it("REVOKING the origin immediately stops execution — the very next run", async () => {
+    // No runtime inputs here: the run must reach the ADAPTER gate, so the
+    // failure observed is the revocation, not an unanswered question.
+    storedTrace = JSON.stringify({
+      ...WRITE_TRACE,
+      steps: [
+        {
+          order: 1,
+          surface: "browser_dom",
+          origin: ORIGIN,
+          operation: "read_field",
+          target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+          value_binding: { kind: "none" },
+          preconditions: { requires_foreground: false, requires_user_presence: false },
+        },
+        WRITE_TRACE.steps[1],
+      ],
+    });
+    const created = await createOne();
+    if (!created.ok) throw new Error(`create failed: ${created.message}`);
+
+    // The user removes the origin in Privacy. No restart, no re-registration.
+    await useSettings.getState().update({ browser_actuation_origins: [] });
+    const outcome = await runAgentShadow(created.agent_id);
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") throw new Error("unreachable");
+    expect(outcome.detail.length).toBeGreaterThan(5);
+  });
+
+  it("asks ONE inline consent question for the trace's own origin, then continues", async () => {
+    // The persisted grant covers a DIFFERENT site than the one the workflow
+    // was watched on.
+    persistedSettings = JSON.stringify({ browser_actuation_origins: ["https://other.example"] });
+    useSettings.setState({ settings: DEFAULT_SETTINGS, hydrated: false });
+    __resetAgentServiceForTests();
+    await bootAgentService();
+    storedTrace = JSON.stringify(WRITE_TRACE);
+
+    const first = await createOne();
+    expect(first.ok).toBe(false);
+    if (first.ok || !("needs_permission" in first)) throw new Error("expected the question");
+    expect(first.needs_permission.origin).toBe(ORIGIN);
+    expect(first.message).toContain("only to that site");
+
+    // The grant persists EXACTLY that origin and the same click completes.
+    const second = await grantOriginAndRetry(
+      ORIGIN,
+      candidate(),
+      INTENT,
+      "Fill the phone field.",
+      "phone helper",
+    );
+    if (!second.ok) throw new Error(`retry failed: ${second.message}`);
+    expect(useSettings.getState().settings.browser_actuation_origins).toContain(ORIGIN);
+    expect(useSettings.getState().settings.browser_actuation_origins).not.toContain("*");
+  });
+});
+
+describe("the answer → approve → execute → readback loop, through the UI's own verbs", () => {
+  const INPUT_TRACE = {
+    schema_version: 1,
+    trace_id: "018f0000-0000-7000-8000-00000000f2aa",
+    started_at: "2026-08-10T09:00:00.000Z",
+    ended_at: "2026-08-10T09:02:00.000Z",
+    apps: [{ category: "browser", origin: ORIGIN }],
+    steps: [
+      {
+        order: 1,
+        surface: "browser_dom",
+        origin: ORIGIN,
+        operation: "set_value",
+        target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+        value_binding: {
+          kind: "runtime_input",
+          input_id: "phone",
+          prompt: "Which number should go in Phone?",
+        },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "value_committed", readback: "reread_target" },
+      },
+    ],
+    protected_segments: [],
+    pattern_event_refs: [],
+    local_only: true,
+  };
+
+  it("the user's answer reaches the browser adapter, the approval executes, readback verifies", async () => {
+    storedTrace = JSON.stringify(INPUT_TRACE);
+    const created = await createOne();
+    if (!created.ok) throw new Error(`create failed: ${created.message}`);
+    // Creation's own shadow honestly asks — the input has no value yet.
+    expect(created.shadow.status).toBe("needs_input");
+
+    // The trigger fires later; the staged card carries the SAME question.
+    await emitAppEvent(matchingContext());
+    await settled();
+    const suggested = useAgentService.getState().staged[0]!;
+    expect(suggested.outcome.kind).toBe("suggested");
+
+    // Answer it inline — the value flows into the proposal…
+    await answerStagedRun(suggested.staged_id, {});
+    const asking = useAgentService.getState().staged[0]!;
+    if (asking.outcome.kind !== "needs_input") throw new Error(JSON.stringify(asking.outcome));
+    expect(asking.outcome.missing[0]).toMatchObject({ key: "phone" });
+
+    await answerStagedRun(suggested.staged_id, { phone: "555-0199" });
+    const proposed = useAgentService.getState().staged[0]!;
+    if (proposed.outcome.kind !== "shadow" || !proposed.outcome.diff) {
+      throw new Error(`expected a proposal, got ${JSON.stringify(proposed.outcome)}`);
+    }
+    expect(proposed.outcome.diff.changes[0]).toMatchObject({
+      field: "Phone",
+      old_value: "555-0100",
+      new_value: "555-0199",
+    });
+    expect(proposed.outcome.sha).toBeTruthy();
+    // Nothing has been written yet.
+    expect(pageFields.get("Phone")).toBe("555-0100");
+
+    // …and approving the exact hash EXECUTES it and reads it back.
+    await approveStagedRun(suggested.staged_id);
+    const done = useAgentService.getState().staged[0]!;
+    if (done.outcome.kind !== "completed") throw new Error(JSON.stringify(done.outcome));
+    expect(pageFields.get("Phone")).toBe("555-0199");
+    expect(done.outcome.verified).toBe(true);
+  });
+
+  it("a page that changed after approval aborts with nothing written", async () => {
+    storedTrace = JSON.stringify(INPUT_TRACE);
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+    await emitAppEvent(matchingContext());
+    await settled();
+    const staged = useAgentService.getState().staged[0]!;
+    await answerStagedRun(staged.staged_id, { phone: "555-0199" });
+
+    // Someone edits the field between the user's look and their click.
+    pageFields.set("Phone", "555-7777");
+
+    await approveStagedRun(staged.staged_id);
+    const outcome = useAgentService.getState().staged[0]!;
+    expect(outcome.outcome.kind).toBe("stale");
+    // The write never happened — the field holds the OTHER edit, untouched.
+    expect(pageFields.get("Phone")).toBe("555-7777");
   });
 });

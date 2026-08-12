@@ -35,6 +35,9 @@ let currentOrigin = "https://app.hubspot.com";
 
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
+  // Boot hydrates settings FIRST now — the persisted form is what counts.
+  loadSettingsRaw: async () => JSON.stringify({ browser_actuation_origins: Object.keys(PAGES) }),
+  saveSettingsRaw: async () => {},
   invokeCommand: async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === "agents_load")
       return existsSync(AGENTS_PATH) ? readFileSync(AGENTS_PATH, "utf8") : null;

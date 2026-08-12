@@ -67,11 +67,36 @@ export type StagedRun = {
   agent_id: string;
   agent_name: string;
   at: string;
+  /** Answers already collected for this run's inputs — reused at execution. */
+  answers?: Record<string, string>;
   /** What autonomy allowed: a suggestion, or an already-run shadow result. */
   outcome:
     | { kind: "suggested" }
-    | { kind: "shadow"; diff: ProposedDiff | null; steps_run: number }
-    | { kind: "needs_input"; detail: string }
+    | {
+        kind: "shadow";
+        diff: ProposedDiff | null;
+        steps_run: number;
+        /**
+         * Hash of exactly the diff shown here — what "Approve" binds to. The
+         * runtime re-proposes fresh at execution and aborts on mismatch.
+         */
+        sha: string | null;
+      }
+    | {
+        kind: "needs_input";
+        detail: string;
+        /** The declared inputs still unanswered, for the inline question. */
+        missing: Array<{ key: string; label: string }>;
+      }
+    | { kind: "executing" }
+    | { kind: "completed"; diff: ProposedDiff; verified: boolean; verify_detail: string }
+    | {
+        kind: "stale";
+        detail: string;
+        /** The fresh diff, so the user can review and approve again. */
+        diff: ProposedDiff | null;
+        sha: string | null;
+      }
     | { kind: "failed"; detail: string };
 };
 
@@ -179,6 +204,14 @@ export async function bootAgentService(): Promise<void> {
   if (booted) return;
   booted = true;
 
+  // SETTINGS FIRST — the production-order bug this sequence exists to prevent:
+  // this service used to build the capability registry while the in-memory
+  // settings still held defaults (App.tsx hydrated them in a LATER effect), so
+  // the runtime snapshotted ZERO actuation origins → an EMPTY registry — and
+  // every restored agent spent the session unable to act, however many origins
+  // the user had persisted. Order is now: hydrate settings → build the
+  // registry from what the user really granted → restore agents against it.
+  await useSettings.getState().hydrate();
   await useAgents.getState().hydrate();
   const restore: RegisteredAgent[] = useAgents
     .getState()
@@ -193,6 +226,20 @@ export async function bootAgentService(): Promise<void> {
     { registry: realRegistry(), runtime_id: "local-real", onAgentChanged: persistAgentChange },
     restore,
   );
+
+  // THE REGISTRY IS NOT A SNAPSHOT. Granting an origin must work without
+  // restarting Maman, and revoking one must bite immediately — the very next
+  // step resolves against the rebuilt registry and finds nothing.
+  let knownOrigins = JSON.stringify(
+    useSettings.getState().settings.browser_actuation_origins ?? [],
+  );
+  useSettings.subscribe((state) => {
+    const origins = JSON.stringify(state.settings.browser_actuation_origins ?? []);
+    if (origins !== knownOrigins) {
+      knownOrigins = origins;
+      runtime?.replaceRegistry(realRegistry());
+    }
+  });
 
   await onAppEvent((event) => {
     if (event.type === "workflow_context") void handleContext(event.context);
@@ -314,12 +361,7 @@ function pumpShadowQueue(): void {
           agent_id: job.agent_id,
           agent_name: job.agent_name,
           at: job.at,
-          outcome:
-            outcome.status === "shadow_complete"
-              ? { kind: "shadow", diff: outcome.diff, steps_run: outcome.steps_run }
-              : outcome.status === "needs_input"
-                ? { kind: "needs_input", detail: outcome.detail }
-                : { kind: "failed", detail: outcome.detail },
+          outcome: stagedOutcomeFromShadow(outcome),
         });
       })
       .catch((error: unknown) => {
@@ -342,6 +384,98 @@ function pumpShadowQueue(): void {
         pumpShadowQueue();
       });
   }
+}
+
+/** One translation, used everywhere a shadow result becomes a staged card. */
+function stagedOutcomeFromShadow(outcome: ShadowOutcome): StagedRun["outcome"] {
+  if (outcome.status === "shadow_complete") {
+    return {
+      kind: "shadow",
+      diff: outcome.diff,
+      steps_run: outcome.steps_run,
+      // The hash the user's approval will bind to — of EXACTLY this diff.
+      sha: outcome.diff ? diffSha256(outcome.diff) : null,
+    };
+  }
+  if (outcome.status === "needs_input") {
+    return {
+      kind: "needs_input",
+      detail: outcome.detail,
+      missing: (outcome.readiness?.missing ?? []).map((m) => ({ key: m.key, label: m.label })),
+    };
+  }
+  return { kind: "failed", detail: outcome.detail };
+}
+
+/**
+ * The inline answer: run the proposal again WITH the user's values and update
+ * the same card — the question becomes the diff it was blocking.
+ */
+export async function answerStagedRun(
+  stagedId: string,
+  answers: Record<string, string>,
+): Promise<void> {
+  const entry = useAgentService.getState().staged.find((r) => r.staged_id === stagedId);
+  if (!entry) return;
+  const merged = { ...entry.answers, ...answers };
+  const record = useAgents.getState().agents.find((a) => a.agent_id === entry.agent_id);
+  const registered = agentRuntime().get(entry.agent_id);
+  if (!registered) {
+    updateStaged(stagedId, { outcome: { kind: "failed", detail: "agent is not registered" } });
+    return;
+  }
+  const inputs = await resolveShadowInputs(registered.spec, record?.source_candidate, merged);
+  const outcome = !inputs.ok
+    ? ({ status: "needs_input", detail: inputs.detail } satisfies ShadowOutcome)
+    : await agentRuntime().runShadow(entry.agent_id, inputs.values, {
+        run_id: uuidv7(),
+        organization_id: registered.spec.organization_id,
+        owner_user_id: registered.spec.owner_user_id,
+      });
+  updateStaged(stagedId, { answers: merged, outcome: stagedOutcomeFromShadow(outcome) });
+}
+
+/**
+ * THE APPROVAL, from the card the user is looking at: execute bound to the
+ * exact hash of the diff shown there. The runtime re-proposes fresh and aborts
+ * with nothing written if the page moved on — the card then shows the FRESH
+ * diff for a new approval instead of pretending the old one still holds.
+ */
+export async function approveStagedRun(stagedId: string): Promise<void> {
+  const entry = useAgentService.getState().staged.find((r) => r.staged_id === stagedId);
+  if (!entry || entry.outcome.kind !== "shadow" || !entry.outcome.sha) return;
+  const approvedSha = entry.outcome.sha;
+  updateStaged(stagedId, { outcome: { kind: "executing" } });
+
+  const result = await executeApproved(entry.agent_id, entry.answers ?? {}, approvedSha);
+  if (result.status === "completed") {
+    updateStaged(stagedId, {
+      outcome: {
+        kind: "completed",
+        diff: result.diff,
+        verified: result.verified,
+        verify_detail: result.verify_detail,
+      },
+    });
+  } else if (result.status === "aborted_stale") {
+    updateStaged(stagedId, {
+      outcome: {
+        kind: "stale",
+        detail:
+          "The page changed since you looked — nothing was written. Review and approve again.",
+        diff: result.fresh_diff,
+        sha: result.fresh_diff ? diffSha256(result.fresh_diff) : null,
+      },
+    });
+  } else {
+    updateStaged(stagedId, { outcome: { kind: "failed", detail: result.detail } });
+  }
+}
+
+function updateStaged(stagedId: string, patch: Partial<StagedRun>): void {
+  useAgentService.setState((s) => ({
+    staged: s.staged.map((r) => (r.staged_id === stagedId ? { ...r, ...patch } : r)),
+  }));
 }
 
 function pushStaged(run: StagedRun): void {
@@ -394,8 +528,20 @@ async function resolveShadowInputs(
   | { ok: true; values: Record<string, unknown> }
   | { ok: false; needs_input: boolean; detail: string }
 > {
+  // THE USER'S ANSWERS, first. A trace-compiled agent declares its runtime
+  // inputs as source "user" — the one inline question — and the answer used to
+  // be DISCARDED here (only discovery inputs were resolved), so answering the
+  // question changed nothing. Only keys the spec declares are accepted; an
+  // undeclared answer is dropped, never smuggled into a step.
+  const userValues: Record<string, unknown> = {};
+  for (const input of spec.inputs) {
+    if (input.source === "user" && typeof supplied[input.key] === "string") {
+      userValues[input.key] = supplied[input.key];
+    }
+  }
+
   const needsDiscovery = spec.inputs.some((i) => i.source === "discovered_on_surface");
-  if (!needsDiscovery) return { ok: true, values: {} };
+  if (!needsDiscovery) return { ok: true, values: userValues };
   if (!candidate) {
     return {
       ok: false,
@@ -442,6 +588,7 @@ async function resolveShadowInputs(
   return {
     ok: true,
     values: {
+      ...userValues,
       [DISCOVERED_FIELDS_INPUT]: resolution.fields,
       ...(value
         ? { [FIELD_VALUES_INPUT]: resolution.fields.map((f) => ({ ...f, value: value.value })) }
@@ -533,11 +680,42 @@ export function deriveTrigger(candidate: PatternCandidate): AgentSpec["trigger"]
 export type CreateAgentOutcome =
   | { ok: true; agent_id: string; state: "shadow"; shadow: ShadowOutcome }
   | {
+      /**
+       * Creation paused on ONE inline question: may Maman act on this exact
+       * origin? The caller shows it, persists a yes via `grantOriginAndRetry`,
+       * and creation continues — the user never visits another screen.
+       */
+      ok: false;
+      needs_permission: { origin: string };
+      message: string;
+    }
+  | {
       ok: false;
       message: string;
       /** Typed through from the compiler so the UI can route to Teach. */
       missing_configuration?: MissingConfigurationItem[];
     };
+
+/**
+ * The consent flow's second half: persist the granted origin (that origin
+ * exactly — never a wildcard), let the settings subscription rebuild the
+ * capability registry, and run the SAME creation again. One click, one grant,
+ * one flow.
+ */
+export async function grantOriginAndRetry(
+  origin: string,
+  candidate: PatternCandidate,
+  generalizedIntent: string,
+  desiredOutcome: string,
+  displayName?: string,
+): Promise<CreateAgentOutcome> {
+  const settings = useSettings.getState();
+  const existing = settings.settings.browser_actuation_origins ?? [];
+  if (!existing.includes(origin)) {
+    await settings.update({ browser_actuation_origins: [...existing, origin] });
+  }
+  return createAgentAndActivate(candidate, generalizedIntent, desiredOutcome, displayName);
+}
 
 /**
  * What clicking Create Agent now actually does:
@@ -552,6 +730,11 @@ export type CreateAgentOutcome =
 type TraceCompileAttempt =
   | { kind: "compiled"; agent_id: string; trigger: AgentSpec["trigger"] }
   | { kind: "refused"; message: string; missing_configuration: MissingConfigurationItem[] }
+  | {
+      /** The trace names its site and the user has not permitted acting there. */
+      kind: "needs_permission";
+      origin: string;
+    }
   | { kind: "no_trace" };
 
 /**
@@ -598,6 +781,22 @@ async function compileFromRepresentativeTrace(
   const parsed = parseLocalActionTrace(JSON.parse(raw));
   if (!parsed.ok) return { kind: "no_trace" }; // an unusable stored trace is not the user's problem to answer for
 
+  // INLINE CONSENT, before the capability gate can mask it. The trace itself
+  // says which site the routine runs on; if the user has not permitted acting
+  // there, the honest next step is ONE question about THAT origin — not a
+  // capability-missing refusal that sends them hunting through Privacy. The
+  // caller renders the question; a yes persists the origin (that origin only,
+  // never a wildcard), the registry rebuilds itself, and creation continues.
+  const traceOrigin = parsed.trace.steps.find((s) => s.origin)?.origin;
+  if (traceOrigin) {
+    const allowed = browserActuationOrigins(
+      useSettings.getState().settings.browser_actuation_origins ?? [],
+    );
+    if (!allowed.includes(traceOrigin)) {
+      return { kind: "needs_permission", origin: traceOrigin };
+    }
+  }
+
   const result = compileTraceToAgentSpec({
     trace: parsed.trace,
     pattern_id: candidate.pattern_id,
@@ -635,6 +834,17 @@ export async function createAgentAndActivate(
   let agentId: string;
   let compiledTrigger: AgentSpec["trigger"] | null = null;
   const fromTrace = await compileFromRepresentativeTrace(candidate, displayName);
+  if (fromTrace.kind === "needs_permission") {
+    progress(
+      "failed",
+      `This workflow runs on ${fromTrace.origin}, and Maman is not allowed to act there yet.`,
+    );
+    return {
+      ok: false,
+      needs_permission: { origin: fromTrace.origin },
+      message: `Allow Maman to act on ${fromTrace.origin}? Permission applies only to that site.`,
+    };
+  }
   if (fromTrace.kind === "refused") {
     progress("failed", fromTrace.message);
     return {
