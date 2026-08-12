@@ -215,8 +215,8 @@ export function Agents() {
   if (visible.length === 0) {
     return (
       <EmptyState
-        title="No agents yet"
-        body="Accept a suggestion and click Create agent — the draft appears here with its full plan, and nothing runs until you say so."
+        title="No automations yet"
+        body="When Maman spots something you repeat, it offers to take it over on the Home tab. Click Automate this and it shows up here — nothing runs until you say so."
       />
     );
   }

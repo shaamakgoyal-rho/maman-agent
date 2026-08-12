@@ -245,6 +245,21 @@ describe("the trigger is installed by registration and fires on context", () => 
     expect(runtime.handleContext(context({ domain: "acme.example.evil.test" }))).toHaveLength(0);
   });
 
+  it("fires on its origin even when ingest categorized the site differently (#3)", () => {
+    // The compiler stamps app_category "browser"; the live ingest categorizer
+    // maps the SAME domain to "crm". The origin is the precise selector, so the
+    // agent MUST still fire — this is the mismatch that kept every SaaS agent
+    // silent forever. Host matches, category is not required.
+    const spec = compiled({ app_category: "browser", origin: ORIGIN });
+    const runtime = new LocalAgentRuntime({
+      registry: realRegistry(page({})),
+      runtime_id: "local-real",
+      now,
+    });
+    runtime.registerAgent(spec);
+    expect(runtime.handleContext(context({ app_category: "crm" }))).toHaveLength(1);
+  });
+
   it("a disabled agent stays silent", () => {
     const spec = compiled({ app_category: "browser", origin: ORIGIN });
     const runtime = new LocalAgentRuntime({

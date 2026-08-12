@@ -1,10 +1,11 @@
 /**
  * @vitest-environment jsdom
  *
- * jsdom because the actuator's PRESENCE GATE is real here: `userIsPresent`
- * fails closed without a document, and a consequential write is refused when
- * nobody is watching. The test runs with a visible document — the gate stays
- * in force rather than being mocked away.
+ * jsdom because this suite drives the real service stack. The actuator's
+ * PRESENCE GATE is real and stays in force rather than being mocked away — it
+ * reads the SYSTEM IDLE CLOCK (`user_idle_seconds` → 0 below: the user just
+ * touched the machine), so a consequential write is still refused when nobody
+ * is there.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runPatternEngine } from "@maman/pattern-engine";
@@ -55,6 +56,9 @@ vi.mock("../src/lib/bridge.js", () => ({
       agentsJson = (args?.json as string) ?? null;
       return undefined;
     }
+    // The write-presence gate reads the system idle clock; 0 = the user just
+    // touched the machine. Panel visibility is no longer the signal.
+    if (cmd === "user_idle_seconds") return 0;
     if (cmd === "staged_runs_drain") return "[]";
     if (cmd === "browser_relay_status") return { connected: true, in_flight: 0 };
     // The signed Chrome relay — production's only browser transport. The page

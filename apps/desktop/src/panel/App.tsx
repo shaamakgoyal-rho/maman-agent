@@ -30,12 +30,16 @@ import { useLearnedWorkflows } from "../lib/learnedWorkflows.js";
  * mounted screen; trigger evaluation and firing already live in the native
  * daemon. React is a subscriber here, not the owner.
  */
-const TABS = ["Mother", "Agents", "Privacy & access"] as const;
+// Outcome-first labels: the standard journey never says "agent" or "create".
+// "My automations" is what exists and runs; the pet home is where suggestions
+// live. The word "Agents" is internal construction language and stays out of
+// the primary navigation.
+const TABS = ["Home", "My automations", "Privacy & access"] as const;
 type Tab = (typeof TABS)[number];
 
 export function App() {
   const { settings, hydrated, hydrate } = useSettings();
-  const [tab, setTab] = useState<Tab>("Mother");
+  const [tab, setTab] = useState<Tab>("Home");
   const [reportedPetState, setReportedPetState] = useState<PetStateName | null>(null);
   const petState: PetStateName =
     reportedPetState ?? (settings.observation_paused ? "sleeping" : "looking_around");
@@ -106,8 +110,8 @@ export function App() {
         ))}
       </nav>
       <div className="flex-1 overflow-y-auto p-4">
-        {tab === "Mother" && <Mother petState={petState} />}
-        {tab === "Agents" && <Agents />}
+        {tab === "Home" && <Mother petState={petState} />}
+        {tab === "My automations" && <Agents />}
         {tab === "Privacy & access" && <Privacy />}
       </div>
     </main>

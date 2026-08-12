@@ -27,7 +27,7 @@ import { emitAppEvent, invokeCommand, isTauri, onAppEvent } from "./bridge.js";
 import { browserActuationOrigins, browserDispatchDeps } from "./browserRun.js";
 import { useAgents } from "./agents.js";
 import { useSettings } from "../state/settings.js";
-import { userIsPresent } from "./presence.js";
+import { startPresenceTracking, userIsPresent } from "./presence.js";
 
 /**
  * THE AGENT SERVICE — module scope, booted from the panel ENTRY, not a screen.
@@ -203,6 +203,12 @@ export function agentRuntime(): LocalAgentRuntime {
 export async function bootAgentService(): Promise<void> {
   if (booted) return;
   booted = true;
+
+  // Presence tracking starts with the service, not with a screen: the write
+  // gate asks "is somebody at the machine" at the instant of every write, and
+  // the answer comes from the system idle clock rather than from whether
+  // Maman's own panel happens to be in front. See lib/presence.ts.
+  await startPresenceTracking();
 
   // SETTINGS FIRST — the production-order bug this sequence exists to prevent:
   // this service used to build the capability registry while the in-memory
@@ -711,10 +717,32 @@ export async function grantOriginAndRetry(
 ): Promise<CreateAgentOutcome> {
   const settings = useSettings.getState();
   const existing = settings.settings.browser_actuation_origins ?? [];
+  const host = originHost(origin);
+  const watched = settings.settings.allowlist_domains ?? [];
+  // ONE CONSENT, BOTH HALVES. Granting actuation without observation left the
+  // agent's own site invisible: Rust's ingest gate drops chrome-sourced events
+  // for a non-allowlisted domain, so the trigger could never see the very site
+  // it was installed for and the agent could only ever be run by hand. The
+  // question the user answered was "act on this site" — which is meaningless
+  // unless Maman can also notice the moment to act.
+  const patch: Parameters<typeof settings.update>[0] = {};
   if (!existing.includes(origin)) {
-    await settings.update({ browser_actuation_origins: [...existing, origin] });
+    patch.browser_actuation_origins = [...existing, origin];
   }
+  if (host && !watched.includes(host)) {
+    patch.allowlist_domains = [...watched, host];
+  }
+  if (Object.keys(patch).length > 0) await settings.update(patch);
   return createAgentAndActivate(candidate, generalizedIntent, desiredOutcome, displayName);
+}
+
+/** "https://app.acme.com/x" → "app.acme.com"; null when unparseable. */
+function originHost(origin: string): string | null {
+  try {
+    return new URL(origin).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 /**

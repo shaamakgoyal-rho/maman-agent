@@ -244,15 +244,22 @@ export class LocalAgentRuntime {
       const trigger = agent.spec.trigger;
       if (trigger.type !== "context") continue;
 
-      if (trigger.app_category !== context.app_category) continue;
+      // THE ORIGIN IS THE PRECISE SELECTOR. When a trigger names a full origin
+      // (every trace-compiled browser agent does), the host uniquely identifies
+      // the site and app_category is NOT also required — because the compiler
+      // stamps "browser" while the ingest categorizer maps the same domain to
+      // "crm"/"email"/"spreadsheet", so demanding both equalities rejected every
+      // SaaS agent forever. Host is compared EXACTLY (a suffix match is how
+      // evil-example.com would wake an agent meant for example.com). Without an
+      // origin (native/legacy triggers), app_category is the selector.
+      if (trigger.origin !== undefined) {
+        if (hostOf(trigger.origin) !== context.domain) continue;
+      } else if (trigger.app_category !== context.app_category) {
+        continue;
+      }
       if (trigger.object_type !== undefined && trigger.object_type !== context.object_type) {
         continue;
       }
-      // The trigger names a full origin (it came from the actuation
-      // allowlist); observation reports a bare host. Compare host-to-host,
-      // EXACTLY — a suffix match is how evil-example.com wakes an agent meant
-      // for example.com.
-      if (trigger.origin !== undefined && hostOf(trigger.origin) !== context.domain) continue;
 
       if (agent.last_triggered_at !== null) {
         const elapsed = nowMs - Date.parse(agent.last_triggered_at);
