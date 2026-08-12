@@ -125,19 +125,29 @@ pub fn parse_agents(json: &str) -> Vec<TriggerRecord> {
 }
 
 /// Does this context wake this trigger? Pure; exact comparisons only.
+///
+/// The origin host is the PRECISE selector: when a trigger names one (every
+/// trace-compiled browser agent does), the host alone gates the site and
+/// app_category is not required. The compiler stamps "browser" while ingest
+/// categorizes the same domain as "crm"/"email", so requiring both equalities
+/// rejected every SaaS agent. Without an origin, app_category is the selector.
 pub fn matches(record: &TriggerRecord, ctx: &ContextFields<'_>) -> bool {
-    if record.app_category != ctx.app_category {
-        return false;
+    match &record.origin_host {
+        Some(host) => match ctx.domain {
+            // A bare host compared EXACTLY — no suffix match, so
+            // evil-example.com cannot wake an agent meant for example.com.
+            Some(domain) if domain == host => {}
+            _ => return false,
+        },
+        None => {
+            if record.app_category != ctx.app_category {
+                return false;
+            }
+        }
     }
     if let Some(object_type) = &record.object_type {
         if object_type != ctx.object_type {
             return false;
-        }
-    }
-    if let Some(host) = &record.origin_host {
-        match ctx.domain {
-            Some(domain) if domain == host => {}
-            _ => return false,
         }
     }
     true
@@ -359,15 +369,45 @@ mod tests {
                 domain: Some("acme.example.evil.test")
             }
         ));
-        assert!(!matches(
+        // THE #3 FIX: an origin-scoped trigger fires regardless of the coarse
+        // app_category the ingest categorizer assigned. The compiler stamps
+        // "browser"; ingest maps acme.example → "crm"; the ORIGIN is the precise
+        // selector, so this now MATCHES where it used to be rejected forever.
+        assert!(matches(
             r,
             &ContextFields { app_category: "crm", object_type: "contact", domain: Some("acme.example") }
         ));
+        // object_type is still checked when the trigger names one.
         assert!(!matches(
             r,
             &ContextFields { app_category: "browser", object_type: "invoice", domain: Some("acme.example") }
         ));
         // A trigger that names a host does not fire for an event with none.
+        assert!(!matches(
+            r,
+            &ContextFields { app_category: "browser", object_type: "contact", domain: None }
+        ));
+    }
+
+    #[test]
+    fn a_triggerless_of_origin_still_matches_on_category() {
+        // Without an origin (native/legacy triggers), app_category remains the
+        // selector — the #3 fix narrows to origin-bearing triggers only.
+        let json = agents_json(
+            "shadow",
+            serde_json::json!({
+                "type": "context",
+                "app_category": "crm",
+                "object_type": "contact",
+                "cooldown_seconds": 300
+            }),
+        );
+        let records = parse_agents(&json);
+        let r = &records[0];
+        assert!(matches(
+            r,
+            &ContextFields { app_category: "crm", object_type: "contact", domain: None }
+        ));
         assert!(!matches(
             r,
             &ContextFields { app_category: "browser", object_type: "contact", domain: None }

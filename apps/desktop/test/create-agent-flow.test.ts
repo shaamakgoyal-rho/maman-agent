@@ -375,9 +375,13 @@ describe("the agent is proactive without any screen", () => {
 
   it("a non-matching context stages nothing", async () => {
     await createOne();
+    // The trigger names an origin, so the DOMAIN is the selector — a different
+    // site must not wake it. (Varying only app_category is no longer a
+    // non-match: ingest categorizes SaaS domains differently than the compiler
+    // stamps, so origin-bearing triggers deliberately ignore the category.)
     await emitAppEvent({
       ...matchingContext(),
-      context: { ...matchingContext().context, app_category: "email" },
+      context: { ...matchingContext().context, domain: "other.example" },
     });
     await settled();
     expect(useAgentService.getState().staged).toHaveLength(0);

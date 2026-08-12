@@ -1906,18 +1906,33 @@ fn handle_bridge_request<R: Runtime>(
             match gate_event(&settings, &event) {
                 Ok(None) => {
                     let app2 = app.clone();
+                    // Cloned into the insert task; `event` stays owned here so
+                    // trigger evaluation can read its context after the store.
+                    let event_for_insert = event.clone();
                     let result = tauri::async_runtime::block_on(async move {
                         let state = app2.state::<StoreState>();
                         let guard = store_guard(&app2, &state).await?;
                         guard
                             .as_ref()
                             .expect("initialized")
-                            .insert_event(&event, store::EVENT_RETENTION_DAYS_DEFAULT)
+                            .insert_event(&event_for_insert, store::EVENT_RETENTION_DAYS_DEFAULT)
                             .await
                             .map_err(|e| e.to_string())
                     });
                     match result {
-                        Ok(_) => serde_json::json!({"ok": true}),
+                        Ok(_) => {
+                            // TRIGGER EVALUATION, the half that was missing: an
+                            // extension-relayed browser event is the ONLY live
+                            // event that carries a domain, and a trace-compiled
+                            // browser agent's trigger names an origin — so
+                            // without evaluating here, the one event source that
+                            // could ever wake such an agent was stored and
+                            // dropped on the floor. Mirrors the observer path.
+                            if let Some(context) = emit_workflow_context(app, &event) {
+                                trigger_service::evaluate(app, &context);
+                            }
+                            serde_json::json!({"ok": true})
+                        }
                         Err(e) => serde_json::json!({"ok": false, "error": e}),
                     }
                 }
