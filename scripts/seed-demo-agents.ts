@@ -45,6 +45,10 @@ const ORG = "00000000-0000-7000-8000-000000000002";
 const CAPABILITIES = new Set([
   "browser.extract_structured_fields",
   "browser.propose_form_fill",
+  // Compiler v2 pairs every proposal with its executing write step, and
+  // refuses when the write half is missing — the set must match what the
+  // real registry serves or every set_value seed refuses.
+  "browser.supervised_form_fill",
   "browser.press_control",
 ]);
 
