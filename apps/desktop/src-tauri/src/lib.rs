@@ -2687,6 +2687,59 @@ fn open_accessibility_settings() -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// macOS' own idle clock — how long since the user last touched this machine.
+///
+/// NOT AN INPUT READER, and this distinction is the whole point:
+/// `CGEventSourceSecondsSinceLastEventType` returns a DURATION (a single f64,
+/// "seconds since any HID input"). It yields no event, no key code, no
+/// content, and cannot be asked for any — it is the same scalar a screensaver
+/// reads. The invariant "nothing in this codebase reads a key event" holds
+/// unchanged: there is no event here to read.
+///
+/// Raw FFI rather than a new crate: one C function and two constants do not
+/// justify a dependency (and its release-cooldown review).
+#[cfg(target_os = "macos")]
+mod hid_idle {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
+    }
+    /// kCGEventSourceStateHIDSystemState — the real hardware input stream.
+    const HID_SYSTEM_STATE: i32 = 1;
+    /// kCGAnyInputEventType — keyboard, mouse, trackpad, tablet: any of them.
+    const ANY_INPUT_EVENT: u32 = 0xFFFF_FFFF;
+
+    pub fn seconds() -> f64 {
+        // SAFETY: a pure C call taking two integers and returning a double,
+        // with no pointers, no allocation, and no ownership to get wrong.
+        unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT) }
+    }
+}
+
+/// Seconds since the user last touched this machine, for the write-presence
+/// gate. The honest signal: somebody typing in Chrome is PRESENT even though
+/// Maman's panel is hidden, and somebody at lunch is ABSENT even though the
+/// panel is wide open — which panel visibility got exactly backwards.
+///
+/// Fails CLOSED by reporting a large idle time when the platform cannot answer,
+/// so an unanswerable presence question refuses consequential writes.
+#[tauri::command]
+fn user_idle_seconds() -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        let seconds = hid_idle::seconds();
+        // A negative or NaN answer is not evidence of presence.
+        if seconds.is_finite() && seconds >= 0.0 {
+            return seconds;
+        }
+        f64::from(u16::MAX)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f64::from(u16::MAX)
+    }
+}
+
 /// Reads the observer gate (consent complete AND not paused) from settings.
 fn load_observer_gate<R: Runtime>(app: &AppHandle<R>) -> ObserverGate {
     let json = config_path(app, SETTINGS_FILE)
@@ -3218,6 +3271,7 @@ pub fn run() {
             resolve_dev_identity,
             connector_authorize,
             observer_status,
+            user_idle_seconds,
             store_status,
             packs_status,
             statusbar_set_visible,

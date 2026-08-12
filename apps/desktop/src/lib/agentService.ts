@@ -27,7 +27,7 @@ import { emitAppEvent, invokeCommand, isTauri, onAppEvent } from "./bridge.js";
 import { browserActuationOrigins, browserDispatchDeps } from "./browserRun.js";
 import { useAgents } from "./agents.js";
 import { useSettings } from "../state/settings.js";
-import { userIsPresent } from "./presence.js";
+import { startPresenceTracking, userIsPresent } from "./presence.js";
 
 /**
  * THE AGENT SERVICE — module scope, booted from the panel ENTRY, not a screen.
@@ -203,6 +203,12 @@ export function agentRuntime(): LocalAgentRuntime {
 export async function bootAgentService(): Promise<void> {
   if (booted) return;
   booted = true;
+
+  // Presence tracking starts with the service, not with a screen: the write
+  // gate asks "is somebody at the machine" at the instant of every write, and
+  // the answer comes from the system idle clock rather than from whether
+  // Maman's own panel happens to be in front. See lib/presence.ts.
+  await startPresenceTracking();
 
   // SETTINGS FIRST — the production-order bug this sequence exists to prevent:
   // this service used to build the capability registry while the in-memory

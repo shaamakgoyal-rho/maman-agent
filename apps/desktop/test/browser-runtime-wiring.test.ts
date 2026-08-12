@@ -17,17 +17,21 @@ import type { AgentSpec } from "@maman/contracts";
  */
 
 const invoked: string[] = [];
+/** What the system idle clock reports, in seconds — the presence signal. */
+let idleSeconds = 0;
 vi.mock("../src/lib/bridge.js", () => ({
   isTauri: () => true,
   invokeCommand: async (cmd: string) => {
     invoked.push(cmd);
     if (cmd === "agent_browser_origin") return "https://acme.example";
+    if (cmd === "user_idle_seconds") return idleSeconds;
     return undefined;
   },
   emitAppEvent: async () => undefined,
 }));
 
 const { useRuns, __testRegistryFor, userIsPresent } = await import("../src/lib/runs.js");
+const { refreshPresence, __resetPresenceForTests } = await import("../src/lib/presence.js");
 
 const ORIGIN = "https://acme.example";
 
@@ -149,32 +153,30 @@ describe("naming an origin makes the browser lane runnable", () => {
 });
 
 describe("presence is observed, never assumed", () => {
-  /** Runs `fn` with document.visibilityState forced to `state`. */
-  function withVisibility<T>(state: string, fn: () => T): T {
-    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
-    Object.defineProperty(document, "visibilityState", {
-      configurable: true,
-      get: () => state,
-    });
-    try {
-      return fn();
-    } finally {
-      if (original) Object.defineProperty(document, "visibilityState", original);
-    }
-  }
-
-  it("reports the user present only while the panel is visible", () => {
-    // A hardcoded `true` would REMOVE the presence check rather than satisfy it:
-    // the pure actuator refuses a consequential write without presence.
-    expect(withVisibility("visible", userIsPresent)).toBe(true);
-    expect(withVisibility("hidden", userIsPresent)).toBe(false);
+  /**
+   * Presence now comes from the SYSTEM IDLE CLOCK, not from whether Maman's
+   * panel is in front — panel visibility inverted the question (a user typing
+   * in Chrome read as absent; a user at lunch with the panel open read as
+   * present). Full semantics live in test/presence.test.ts; here we pin the
+   * two properties the actuator wiring depends on.
+   */
+  it("fails closed in the desktop app until the idle clock has answered", () => {
+    // A hardcoded `true` would REMOVE the presence check rather than satisfy
+    // it: the pure actuator refuses a consequential write without presence,
+    // and an unanswered presence question is not presence.
+    __resetPresenceForTests();
+    expect(userIsPresent()).toBe(false);
   });
 
-  it("is evaluated per call, so walking away between approval and write counts", () => {
+  it("is evaluated per call, so walking away between approval and write counts", async () => {
     // The predicate is captured as a FUNCTION, not a value: presence at
     // approval time must not authorise a write performed later.
-    expect(withVisibility("visible", userIsPresent)).toBe(true);
-    expect(withVisibility("hidden", userIsPresent)).toBe(false);
-    expect(withVisibility("visible", userIsPresent)).toBe(true);
+    idleSeconds = 2;
+    await refreshPresence();
+    expect(userIsPresent()).toBe(true);
+
+    idleSeconds = 60 * 60; // the user left
+    await refreshPresence();
+    expect(userIsPresent()).toBe(false);
   });
 });

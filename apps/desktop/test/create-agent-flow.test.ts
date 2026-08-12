@@ -1,10 +1,11 @@
 /**
  * @vitest-environment jsdom
  *
- * jsdom because the actuator's PRESENCE GATE is real here: a consequential
- * write requires a visible document, and in plain node every write is
- * not_issued (user_absent) — the exact silent failure that made an "approved"
- * run complete with zero changes.
+ * jsdom because this suite drives the real DOM-adjacent service stack. The
+ * actuator's PRESENCE GATE is also real here, but it now reads the SYSTEM IDLE
+ * CLOCK (mocked below as `user_idle_seconds` → 0), not document visibility:
+ * a user typing in Chrome with Maman's panel hidden is present, which panel
+ * visibility got backwards.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -68,6 +69,9 @@ vi.mock("../src/lib/bridge.js", () => ({
     }
     if (cmd === "action_trace_lookup") return storedTrace;
     if (cmd === "action_trace_get") return exactTraces.get(args?.traceId as string) ?? null;
+    // The write-presence gate reads the system idle clock; 0 = the user just
+    // touched the machine. Panel visibility is no longer the signal.
+    if (cmd === "user_idle_seconds") return 0;
     if (cmd === "staged_runs_drain") {
       const drained = stagedRunsFile;
       stagedRunsFile = "[]"; // drain semantics: read once, then gone
