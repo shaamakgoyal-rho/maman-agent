@@ -142,6 +142,7 @@ export function Privacy() {
 
   return (
     <div className="space-y-3">
+      <ConnectChrome />
       <Card>
         <SectionTitle>Current permissions</SectionTitle>
         <div className="space-y-1.5 text-sm">
@@ -453,5 +454,162 @@ export function Privacy() {
         {deleteResult && <p className="mt-2 text-xs text-success">{deleteResult}</p>}
       </Card>
     </div>
+  );
+}
+
+type HostStatus = {
+  host_available: boolean;
+  installed: boolean;
+  installed_browsers: string[];
+  paired: boolean;
+  extension_id: string;
+};
+
+/**
+ * CONNECT CHROME — the step that used to be impossible without a terminal.
+ *
+ * The relay lane was fully built and completely unreachable: `pairing_begin`
+ * had no caller in the whole app, so the token the extension asks for could not
+ * be produced; and Chrome's native-messaging manifest was written only by
+ * scripts/install-native-host-macos.sh, which builds from a repo checkout with
+ * cargo. Onboarding pointed at a "Settings → Connectors" screen that never
+ * existed. This card is that screen.
+ *
+ * Two buttons, in the order the browser needs them:
+ *  1. Set up — writes the manifest for every Chromium-family browser the user
+ *     actually has, pointing at the host bundled inside this app.
+ *  2. Show pairing code — mints the one-time token to paste into the
+ *     extension's popup. Nothing is paired by installing the manifest alone.
+ */
+function ConnectChrome() {
+  const [status, setStatus] = useState<HostStatus | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const refresh = async () => {
+    if (!isTauri()) return;
+    try {
+      setStatus(await invokeCommand<HostStatus>("browser_host_status"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invokeCommand("browser_host_install", {});
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mintToken = async () => {
+    setBusy(true);
+    setError(null);
+    setCopied(false);
+    try {
+      setToken(await invokeCommand<string>("pairing_begin"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!isTauri()) return null;
+
+  const paired = status?.paired ?? false;
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <SectionTitle>Chrome connection</SectionTitle>
+        <StatusPill tone={paired ? "success" : status?.installed ? "warning" : "muted"}>
+          {paired ? "Connected" : status?.installed ? "Ready to pair" : "Not set up"}
+        </StatusPill>
+      </div>
+      <Muted>
+        {paired
+          ? "Chrome is connected, so Maman can read the page it is working on and act there after you approve a change."
+          : "Maman can watch and act in Chrome on its own through Accessibility. The browser extension is optional — it reads pages more precisely and is what lets Maman learn a browser workflow well enough to automate it."}
+      </Muted>
+
+      {!paired && (
+        <ol className="mt-2 space-y-2 text-sm">
+          <li className="flex flex-wrap items-center gap-2">
+            <span className="text-muted">1.</span>
+            <span>Let Chrome talk to Maman</span>
+            {status?.installed ? (
+              <StatusPill tone="success">
+                done
+                {status.installed_browsers.length > 1
+                  ? ` (${status.installed_browsers.length})`
+                  : ""}
+              </StatusPill>
+            ) : (
+              <Button onClick={() => void install()} disabled={busy || !status?.host_available}>
+                {busy ? "Setting up…" : "Set up"}
+              </Button>
+            )}
+          </li>
+          <li className="flex flex-wrap items-center gap-2">
+            <span className="text-muted">2.</span>
+            <span>Install the extension, then open its icon in Chrome</span>
+          </li>
+          <li className="flex flex-wrap items-center gap-2">
+            <span className="text-muted">3.</span>
+            <span>Paste this code into it</span>
+            <Button variant="secondary" onClick={() => void mintToken()} disabled={busy}>
+              {token ? "New code" : "Show pairing code"}
+            </Button>
+          </li>
+        </ol>
+      )}
+
+      {token && !paired && (
+        <div className="mt-2 rounded-md border border-line bg-bg-soft p-2">
+          <p className="break-all font-mono text-xs">{token}</p>
+          <div className="mt-1 flex items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                void navigator.clipboard?.writeText(token);
+                setCopied(true);
+              }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </Button>
+            <span className="text-[11px] text-muted">
+              Single use, expires in five minutes. It authorises the extension and nothing else.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {!status?.host_available && (
+        <p className="mt-2 text-xs text-danger">
+          This build does not include the browser relay host, so Chrome cannot be connected.
+        </p>
+      )}
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      <div className="mt-2 flex items-center gap-2">
+        <Button variant="secondary" onClick={() => void refresh()}>
+          Check again
+        </Button>
+        {paired && (
+          <span className="text-[11px] text-muted">Extension id {status?.extension_id}</span>
+        )}
+      </div>
+    </Card>
   );
 }

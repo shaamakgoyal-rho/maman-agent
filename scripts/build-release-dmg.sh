@@ -40,6 +40,9 @@ fi
 
 echo "== 1/5 universal observer sidecar"
 UNIVERSAL=1 bash "$ROOT_DIR/apps/desktop/scripts/build-observer.sh"
+# The native-messaging host ships in the bundle too, so the app can install
+# Chrome's manifest itself instead of a user running a build script.
+UNIVERSAL=1 bash "$ROOT_DIR/apps/desktop/scripts/build-browser-host.sh"
 
 echo "== 2/5 universal app bundle"
 ( cd "$ROOT_DIR/apps/desktop" && pnpm tauri build --target universal-apple-darwin )
@@ -50,7 +53,7 @@ bash "$ROOT_DIR/scripts/dev-codesign.sh" "$APP" >/dev/null
 codesign --verify --deep --strict "$APP"
 
 echo "== 4/5 verify both binaries are fat before shipping"
-for bin in maman-desktop maman-observer; do
+for bin in maman-desktop maman-observer maman-browser-host; do
   archs="$(lipo -archs "$APP/Contents/MacOS/$bin")"
   case "$archs" in
     *arm64*x86_64* | *x86_64*arm64*) echo "   $bin: $archs" ;;

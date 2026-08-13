@@ -14,7 +14,8 @@
     "test:coverage": "vitest run --coverage",
     "build": "vite build",
     "build:observer": "bash scripts/build-observer.sh",
-    "build:desktop": "bash scripts/build-observer.sh && vite build"
+    "build:browser-host": "bash scripts/build-browser-host.sh",
+    "build:desktop": "bash scripts/build-observer.sh && bash scripts/build-browser-host.sh && vite build"
   },
   "dependencies": {
     "@maman/agent-runtime": "workspace:*",

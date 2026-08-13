@@ -70,7 +70,7 @@
     "active": true,
     "targets": ["app"],
     "icon": ["icons/icon.icns", "icons/icon.png"],
-    "externalBin": ["binaries/maman-observer"],
+    "externalBin": ["binaries/maman-observer", "binaries/maman-browser-host"],
     "macOS": {
       "minimumSystemVersion": "14.0"
     },

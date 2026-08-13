@@ -75,8 +75,9 @@ fn ids_from_manifest(text: &str) -> Vec<String> {
 /// authority: it is the same file Chrome consults before launching this host,
 /// and only the installer writes it (anyone who could rewrite it could already
 /// repoint `path` at their own binary, so reading it adds no trust). The
-/// MAMAN_ALLOWED_EXTENSION_IDS env var overrides it for tests; the documented
-/// development id is the last-resort fallback.
+/// MAMAN_ALLOWED_EXTENSION_IDS env var overrides it for tests; the PINNED
+/// extension id (derived from the committed public key, identical on every
+/// machine) is the last-resort fallback.
 ///
 /// Chrome cannot pass env vars to a native host, so the env var alone would
 /// always fall back and deny every real extension — an on-device pass caught
@@ -100,7 +101,10 @@ fn allowed_extension_ids() -> Vec<String> {
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        ids.push("maman-dev-extension-id".to_string());
+        // The pinned id from extensions/chrome/manifest.config.ts. A real
+        // placeholder here used to mean "deny every actual extension" whenever
+        // the manifest was unreadable.
+        ids.push("hcfbjnjejkcmcblkbbjkplgabnmianpf".to_string());
     }
     ids
 }
