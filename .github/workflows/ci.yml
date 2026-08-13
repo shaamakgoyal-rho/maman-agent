@@ -85,20 +85,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - name: Build + stage the observer sidecar (required by the Tauri build script)
-        run: bash apps/desktop/scripts/build-observer.sh
-      # build-observer.sh exits 0 when it skips (non-macOS, or no swift found).
+      - name: Build + stage the sidecars (required by the Tauri build script)
+        run: |
+          bash apps/desktop/scripts/build-observer.sh
+          bash apps/desktop/scripts/build-browser-host.sh
+      # Both scripts exit 0 when they skip (non-macOS, or a missing toolchain).
       # Without this guard a skip surfaces much later as Tauri's opaque
       # "resource path ... doesn't exist", so fail here with the real reason.
-      - name: Verify the sidecar was staged for the host triple
+      # EVERY externalBin needs staging: adding the browser host to the bundle
+      # is what broke this job once, with exactly that opaque message.
+      - name: Verify the sidecars were staged for the host triple
         run: |
           triple="$(rustc -vV | awk '/host:/ {print $2}')"
-          staged="apps/desktop/src-tauri/binaries/maman-observer-$triple"
-          if [[ ! -x "$staged" ]]; then
-            echo "observer sidecar missing at $staged — build-observer.sh skipped or failed" >&2
-            exit 1
-          fi
-          echo "staged: $staged"
+          for name in maman-observer maman-browser-host; do
+            staged="apps/desktop/src-tauri/binaries/$name-$triple"
+            if [[ ! -x "$staged" ]]; then
+              echo "$name sidecar missing at $staged — its build script skipped or failed" >&2
+              exit 1
+            fi
+            echo "staged: $staged"
+          done
       - name: Run Rust tests (desktop crate)
         run: bash scripts/test-rust.sh desktop
 
