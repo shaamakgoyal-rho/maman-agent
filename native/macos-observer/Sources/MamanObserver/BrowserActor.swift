@@ -256,6 +256,25 @@ enum BrowserActor {
         return running.first(where: { $0.isActive }) ?? running.first
     }
 
+    /// The focused page's origin for a Chrome-family app, or nil — the cheap
+    /// read the OBSERVER uses to attach page identity to events and traces.
+    /// Single-attempt (no polling): observation is passive, and the next
+    /// notification retries anyway. A private window yields nil — its identity
+    /// is exactly what must not be recorded.
+    static func observedPageOrigin(of app: NSRunningApplication) -> String? {
+        guard let bundle = app.bundleIdentifier,
+            chromeBundlePrefixes.contains(where: { bundle.hasPrefix($0) })
+        else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        enableWebAccessibility(on: appElement)
+        guard let window = focusedWindow(of: appElement) else { return nil }
+        if BrowserActuation.looksPrivate(windowTitle: stringAttribute(window, kAXTitleAttribute)) {
+            return nil
+        }
+        guard let webArea = findWebArea(in: window) else { return nil }
+        return pageOrigin(of: webArea)
+    }
+
     private static func focusedWindow(of appElement: AXUIElement) -> AXUIElement? {
         var ref: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &ref)

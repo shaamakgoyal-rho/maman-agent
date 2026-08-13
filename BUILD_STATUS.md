@@ -725,3 +725,32 @@ the page and that the extension is the reliable route.
 native-host manifest in the packaged app, no Web Store listing); #8 AX
 `set_value` does not fire page JS handlers (framework fields silently revert);
 #9 away-firing shadows discover against whatever page is frontmost at boot.
+
+## 2026-08-13 — native Chrome evidence: the extension-free journey is real
+
+The Swift observer now reads the focused Chrome page's ORIGIN off its AX web
+area (`BrowserActor.observedPageOrigin`, TTL-cached — a full walk per
+keystroke would be unaffordable) and attaches it to both halves of every
+browser observation: the event's `domain` (what origin-scoped triggers match)
+and the trace step's `origin` (what makes a native trace compilable). Browser
+steps translate AX roles to the contract vocabulary and record a focused
+button/link as the press it was — stated as the inference it is, browser-only,
+and never a dataflow source. Private windows yield no origin at all. The
+compiler accepts `macos_ax` steps WITH an origin and refuses only native steps
+with no page identity.
+
+LIVE BACKTEST, not a claim: `maman-observer --probe-chrome` ran the real
+list_controls path against this machine's actual Chrome and read
+`https://yc-s26-outreach-react.vercel.app` — 9 real controls ("Export
+Salesforce CSV", "Run sweep now", a search textbox) with correct roles,
+editability, and origin, no extension involved. The probe reports its own
+Accessibility state instead of guessing (the first run failed exactly there,
+which is what the probe is for).
+
+Evidence: Swift runner ALL CHECKS PASSED (5 new native-evidence checks, after
+recovering them from below the runner's exit — the trap its own comment
+warns about); agent-runtime 20 compiler tests (macos_ax+origin compiles,
+origin-less refuses by name); desktop 22 create-agent-flow tests incl. the
+full extension-free journey: native trace → compile (propose+write pairs) →
+register → trigger fires → inline answer → approved hash → page mutated +
+Save clicked, `lane: "native"` throughout. Full gate green.

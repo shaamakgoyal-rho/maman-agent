@@ -51,6 +51,12 @@ final class ObserverRuntime {
     /// True while a browser action executes — AX notifications fired by
     /// Maman's own actuation are dropped, never observed as the user's work.
     private var actuating = false
+    /// The frontmost Chrome page's origin, cached with a short TTL: resolving
+    /// it walks the window's AX tree (BFS to the web area), which is far too
+    /// heavy per keystroke-adjacent notification, while the URL itself changes
+    /// on the timescale of navigation. Cleared on app switch.
+    private var chromeOriginCache: (pid: pid_t, origin: String?, readAt: Date)?
+    private let chromeOriginTtl: TimeInterval = 2
 
     private let out = FileHandle.standardOutput
     /// Teach Mode capture. Lazy so `emit` exists first; the closure retain cycle
@@ -178,6 +184,26 @@ final class ObserverRuntime {
         out.write(Data((text + "\n").utf8))
     }
 
+    /// The current Chrome page origin for this app, through the TTL cache.
+    /// Non-browser apps answer nil without any AX work at all.
+    private func pageOrigin(for app: NSRunningApplication) -> String? {
+        let pid = app.processIdentifier
+        if let cached = chromeOriginCache, cached.pid == pid,
+            Date().timeIntervalSince(cached.readAt) < chromeOriginTtl
+        {
+            return cached.origin
+        }
+        let origin = BrowserActor.observedPageOrigin(of: app)
+        chromeOriginCache = (pid, origin, Date())
+        return origin
+    }
+
+    /// Host of an https origin ("https://a.example" → "a.example"), for the
+    /// event's `domain` field — the vocabulary triggers match on.
+    private func hostOf(_ origin: String) -> String? {
+        URL(string: origin)?.host
+    }
+
     private func handleAppActivated(_ app: NSRunningApplication) {
         // Switching apps does not end a routine (they cross apps), but going
         // idle does; the check lives in recordObservation so a switch mid-flow
@@ -202,14 +228,17 @@ final class ObserverRuntime {
             detachAx()
         case .emit:
             lastBoundaryReason = nil
-            emitSemantic(app: app, eventType: "app_activated", role: nil, label: nil)
+            chromeOriginCache = nil // an app switch invalidates the page identity
+            emitSemantic(
+                app: app, eventType: "app_activated", role: nil, label: nil,
+                domain: pageOrigin(for: app).flatMap { hostOf($0) })
             attachAx(to: app)
         }
     }
 
     private func emitSemantic(
         app: NSRunningApplication, eventType: String, role: String?, label: String?,
-        traceRef: String? = nil, traceStepOrder: Int? = nil
+        traceRef: String? = nil, traceStepOrder: Int? = nil, domain: String? = nil
     ) {
         eventsEmitted += 1
         let event = SemanticEvent(
@@ -219,7 +248,11 @@ final class ObserverRuntime {
             organizationId: identity.org,
             occurredAt: isoNow(),
             monotonicMs: monotonicMs(),
-            app: .init(bundleId: app.bundleIdentifier, displayName: app.localizedName ?? "Unknown"),
+            app: .init(
+                bundleId: app.bundleIdentifier,
+                displayName: app.localizedName ?? "Unknown",
+                domain: domain
+            ),
             eventType: eventType,
             target: .init(
                 role: role,
@@ -415,7 +448,8 @@ final class ObserverRuntime {
     @discardableResult
     private func recordObservation(
         app: NSRunningApplication, operation: String, role: String?, subrole: String?,
-        label: String?, windowTitle: String?, producesValue: Bool, refused: Bool = false
+        label: String?, windowTitle: String?, producesValue: Bool, refused: Bool = false,
+        origin: String? = nil
     ) -> (traceRef: String, stepOrder: Int)? {
         // Idle since the last one means the previous routine ended — flush it
         // before this observation joins a session it does not belong to.
@@ -444,7 +478,7 @@ final class ObserverRuntime {
                 at: isoNow(), operation: operation, bundleId: app.bundleIdentifier,
                 role: role, subrole: subrole, label: label, identifier: nil, ancestry: [],
                 menuPath: [], windowTitle: windowTitle, producesValue: producesValue,
-                stepOrder: stepOrder))
+                stepOrder: stepOrder, origin: origin))
         lastObservationAt = Date()
         return stamp
     }
@@ -543,6 +577,13 @@ final class ObserverRuntime {
             case kAXValueChangedNotification: eventType = "value_committed" // metadata only, never the value
             default: return
             }
+            // THE PAGE'S OWN IDENTITY, for browsers. Read through the TTL cache
+            // (a full AX walk per keystroke would be unaffordable) and attached
+            // to BOTH halves of the observation: the event's `domain` is what
+            // origin-scoped triggers match, and the trace step's `origin` is
+            // what makes a native trace compilable at all — the evidence that
+            // used to exist only when the extension recorded it.
+            let origin = pageOrigin(for: app)
             // The trace observation is recorded FIRST so its stamp can ride on
             // the event for the same interaction — the join the compiler
             // follows. A focus change READS (it is where a value is taken
@@ -552,10 +593,12 @@ final class ObserverRuntime {
                 app: app,
                 operation: notification == kAXValueChangedNotification ? "commit" : "read",
                 role: role, subrole: subrole, label: title, windowTitle: title,
-                producesValue: notification == kAXFocusedUIElementChangedNotification)
+                producesValue: notification == kAXFocusedUIElementChangedNotification,
+                origin: origin)
             emitSemantic(
                 app: app, eventType: eventType, role: role, label: title,
-                traceRef: stamp?.traceRef, traceStepOrder: stamp?.stepOrder)
+                traceRef: stamp?.traceRef, traceStepOrder: stamp?.stepOrder,
+                domain: origin.flatMap { hostOf($0) })
             if notification == kAXFocusedWindowChangedNotification {
                 trackWindowFrames(pid: app.processIdentifier)
             } else {
@@ -563,6 +606,52 @@ final class ObserverRuntime {
             }
         }
     }
+}
+
+/// LIVE BACKTEST MODE: `maman-observer --probe-chrome` runs one read-only
+/// probe against the real frontmost Chrome and prints the raw results —
+/// page origin, then list_controls through the exact code path agent runs
+/// use. This exists so "the native lane works on this machine" is a command
+/// whose output can be read, not a claim. Reads only; exits immediately.
+if CommandLine.arguments.contains("--probe-chrome") {
+    let chrome = NSWorkspace.shared.runningApplications.first { app in
+        guard let bundle = app.bundleIdentifier else { return false }
+        return BrowserActor.chromeBundlePrefixes.contains { bundle.hasPrefix($0) }
+    }
+    guard let chrome else {
+        print(#"{"probe":"chrome","ok":false,"detail":"Chrome is not running"}"#)
+        exit(1)
+    }
+    // The single most common failure is the probe binary itself lacking the
+    // Accessibility grant (TCC is per-signature) — say THAT, not a guess.
+    guard AXIsProcessTrusted() else {
+        print(
+            #"{"probe":"chrome","ok":false,"detail":"this binary has no Accessibility grant — run the probe from the installed app's sidecar, or grant this binary in System Settings"}"#
+        )
+        exit(1)
+    }
+    guard let origin = BrowserActor.observedPageOrigin(of: chrome) else {
+        print(
+            #"{"probe":"chrome","ok":false,"detail":"no page origin — AX tree not exposed, no focused window, or a private window"}"#
+        )
+        exit(1)
+    }
+    let request: [String: Any] = [
+        "request_id": UUID().uuidString.lowercased(),
+        "run_id": UUID().uuidString.lowercased(),
+        "step_id": "probe-1",
+        "action": ["kind": "list_controls", "roles": ["textbox", "button", "link"], "limit": 12],
+        "allowed_origins": [origin],
+        "expires_at": isoNow(Date().addingTimeInterval(60)),
+    ]
+    let requestJson = String(
+        data: try! JSONSerialization.data(withJSONObject: request), encoding: .utf8)!
+    let result = BrowserActor.execute(requestJson: requestJson)
+    var report: [String: Any] = ["probe": "chrome", "origin": origin]
+    report["result"] = result
+    let data = try! JSONSerialization.data(withJSONObject: report)
+    print(String(data: data, encoding: .utf8)!)
+    exit(0)
 }
 
 // A named, process-lifetime binding, not a temporary: the runtime registers
