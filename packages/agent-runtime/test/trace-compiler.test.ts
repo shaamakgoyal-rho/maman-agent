@@ -249,13 +249,27 @@ describe("it refuses rather than guessing", () => {
     expect(result.missing_configuration[0]!.kind).toBe("target");
   });
 
-  it("refuses a native step instead of silently doing half the routine", () => {
+  it("COMPILES a native (macos_ax) step whose page identified itself", () => {
+    // The extension-free path: the AX observer read the page's origin off the
+    // live web area, so the evidence is complete — site, contract role, label —
+    // and the same native lane that observed it can execute it.
     const t = trace();
-    t.steps[1] = { ...t.steps[1]!, surface: "macos_ax" };
+    t.steps = t.steps.map((s) => ({ ...s, surface: "macos_ax" }));
+    const result = compile(t);
+    if (!result.ok) throw new Error(`expected a spec: ${result.detail}`);
+    expect(result.spec.trigger).toMatchObject({ origin: "https://leads.example" });
+    expect(validateAgentSpec(result.spec).valid).toBe(true);
+  });
+
+  it("refuses a native step with NO page identity instead of guessing its site", () => {
+    const t = trace();
+    const { origin: _dropped, ...noOrigin } = t.steps[1]!;
+    t.steps[1] = { ...noOrigin, surface: "macos_ax" };
     const result = compile(t);
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
     expect(result.detail).toContain("macos_ax");
+    expect(result.missing_configuration[0]!.detail).toContain("without a page identity");
   });
 
   it("refuses when a capability is not available on this device", () => {

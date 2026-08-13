@@ -47,6 +47,12 @@ public enum ActionTrace {
         /// trace flushes. Monotonic per session — survives the drop-oldest cap
         /// without shifting, which positional numbering would not.
         public let stepOrder: Int?
+        /// The page origin ("https://host") when this interaction happened in
+        /// a browser whose AX tree exposes its URL. THE fact that makes a
+        /// native trace compilable: with it the compiler knows which site the
+        /// routine belongs to and the executor knows where it may act — the
+        /// evidence only the extension used to record.
+        public let origin: String?
 
         public init(
             at: String,
@@ -60,7 +66,8 @@ public enum ActionTrace {
             menuPath: [String] = [],
             windowTitle: String? = nil,
             producesValue: Bool = false,
-            stepOrder: Int? = nil
+            stepOrder: Int? = nil,
+            origin: String? = nil
         ) {
             self.at = at
             self.operation = operation
@@ -74,6 +81,7 @@ public enum ActionTrace {
             self.windowTitle = windowTitle
             self.producesValue = producesValue
             self.stepOrder = stepOrder
+            self.origin = origin
         }
     }
 
@@ -131,6 +139,10 @@ public enum ActionTrace {
         public let order: Int
         public let surface: String
         public let app_bundle_id: String?
+        /// Present for browser interactions whose page identified itself via
+        /// AXURL. `nil` never encodes (Encodable omits it), so non-browser
+        /// steps stay exactly as before.
+        public let origin: String?
         public let operation: String
         public let target: Target
         public var value_binding: Binding
@@ -235,9 +247,28 @@ public enum ActionTrace {
 
             let order = observation.stepOrder ?? maxOrder + 1
             maxOrder = max(maxOrder, order)
-            let writes = observation.operation == "commit" || observation.operation == "set_value"
+            // BROWSER STEPS SPEAK THE CONTRACT'S ROLE VOCABULARY. A step whose
+            // page identified itself (origin present) translates its AX role to
+            // the same contract role both executor lanes resolve — "AXTextField"
+            // becomes "textbox" — so the compiler's role gates and the runtime's
+            // target resolution read one language. Non-browser steps keep their
+            // raw AX role; nothing can execute them yet, and translating would
+            // fake a precision the evidence does not have.
+            let isBrowser = observation.origin != nil
+            let contractRole = isBrowser
+                ? BrowserActuation.contractRole(axRole: observation.role) : nil
+            // FOCUSING A PRESSABLE IS A PRESS, in a browser. Chromium reports a
+            // click on a button/link as a focus change — there is no AX "press"
+            // notification to hear — so a focused button is the closest honest
+            // reading of "the user pressed it". Stated here because it is an
+            // INFERENCE: fields stay reads, only pressable roles become presses.
+            let pressed =
+                isBrowser && observation.operation == "read"
+                && (contractRole == "button" || contractRole == "link")
+            let operation = pressed ? "press" : observation.operation
+            let writes = operation == "commit" || operation == "set_value"
             var binding: Binding = .none
-            if observation.producesValue {
+            if observation.producesValue && !pressed {
                 lastRead = (order, observation.label ?? observation.identifier ?? "value")
             } else if writes {
                 if let source = lastRead {
@@ -258,9 +289,10 @@ public enum ActionTrace {
                     order: order,
                     surface: "macos_ax",
                     app_bundle_id: observation.bundleId,
-                    operation: writes ? "set_value" : observation.operation,
+                    origin: observation.origin,
+                    operation: writes ? "set_value" : operation,
                     target: Target(
-                        role: observation.role ?? "generic",
+                        role: contractRole ?? observation.role ?? "generic",
                         accessible_name: observation.label,
                         identifier: observation.identifier,
                         ancestry: Array(observation.ancestry.prefix(12)),

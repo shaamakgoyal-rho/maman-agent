@@ -727,6 +727,70 @@ do {
     }
 }
 
+// ------------------------------------------------- NATIVE BROWSER EVIDENCE
+// A Chrome AX observation that carries the page's origin assembles into
+// browser-grade trace steps: contract roles, the origin on every step, and
+// the focused-pressable-is-a-press inference — the evidence that makes a
+// native trace compilable with no extension anywhere.
+do {
+    func obs(
+        _ at: String, _ operation: String, role: String?, label: String?,
+        produces: Bool = false, origin: String? = "https://leads.example"
+    ) -> ActionTrace.Observation {
+        ActionTrace.Observation(
+            at: at, operation: operation, bundleId: "com.google.Chrome", role: role, subrole: nil,
+            label: label, identifier: nil, ancestry: [], menuPath: [], windowTitle: nil,
+            producesValue: produces, stepOrder: nil, origin: origin)
+    }
+    func assemble(_ o: [ActionTrace.Observation]) -> ActionTrace.Trace? {
+        ActionTrace.assemble(
+            observations: o, traceId: "018f0000-0000-7000-8000-0000000000ff",
+            appCategory: "browser", allowlistBundles: ["com.google.Chrome"],
+            privateApps: [], paused: false)
+    }
+
+    let trace = assemble([
+        obs("2026-08-13T09:00:00.000Z", "read", role: "AXTextField", label: "Company", produces: true),
+        obs("2026-08-13T09:00:03.000Z", "commit", role: "AXTextField", label: "Website"),
+        obs("2026-08-13T09:00:06.000Z", "read", role: "AXButton", label: "Save", produces: true),
+    ])
+    check(
+        trace?.steps.allSatisfy { $0.origin == "https://leads.example" } == true,
+        "every browser step carries the page's origin")
+    check(
+        trace?.steps.map(\.target.role) == ["textbox", "textbox", "button"],
+        "AX roles translate to the contract vocabulary on browser steps")
+    check(
+        trace?.steps[2].operation == "press",
+        "a focused button is recorded as the press it was — the inference is browser-only")
+    if case let .fromStep(step, output)? = trace?.steps[1].value_binding {
+        check(step == 1 && output == "Company", "dataflow still binds through translated steps")
+    } else {
+        check(false, "dataflow still binds through translated steps")
+    }
+    // The press consumed no read: the button focus must NOT become the source
+    // of a later write's value.
+    let pressThenWrite = assemble([
+        obs("2026-08-13T09:00:00.000Z", "read", role: "AXButton", label: "Save", produces: true),
+        obs("2026-08-13T09:00:02.000Z", "commit", role: "AXTextField", label: "Phone"),
+    ])
+    if case .runtimeInput? = pressThenWrite?.steps[1].value_binding {
+        check(true, "a press never becomes a dataflow source")
+    } else {
+        check(false, "a press never becomes a dataflow source")
+    }
+
+    // Without an origin the old behaviour stands exactly: raw AX roles, reads
+    // stay reads, no origin encodes.
+    let native = assemble([
+        obs("2026-08-13T09:00:00.000Z", "read", role: "AXButton", label: "Export", origin: nil)
+    ])
+    check(
+        native?.steps[0].target.role == "AXButton" && native?.steps[0].operation == "read"
+            && native?.steps[0].origin == nil,
+        "non-browser steps keep raw AX roles and stay reads")
+}
+
 // The summary MUST stay at the very end of this file: it exits the process, so
 // any check written below it never runs (that silently disabled the
 // label-pattern and date checks until 2026-08-03).

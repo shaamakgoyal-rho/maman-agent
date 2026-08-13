@@ -29,12 +29,18 @@ public struct SemanticEvent: Encodable, Sendable {
     public struct App: Encodable, Sendable {
         public var bundleId: String?
         public var displayName: String
+        /// The page HOST when the app is a browser whose focused page
+        /// identified itself via AXURL — the field origin-scoped triggers
+        /// match on. Host only, never a path or query, and absent entirely
+        /// for private windows and non-browser apps.
+        public var domain: String?
         enum CodingKeys: String, CodingKey {
-            case bundleId = "bundle_id", displayName = "display_name"
+            case bundleId = "bundle_id", displayName = "display_name", domain
         }
-        public init(bundleId: String?, displayName: String) {
+        public init(bundleId: String?, displayName: String, domain: String? = nil) {
             self.bundleId = bundleId
             self.displayName = displayName
+            self.domain = domain
         }
     }
     public struct Target: Encodable, Sendable {

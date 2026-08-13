@@ -811,3 +811,83 @@ describe("the answer → approve → execute → readback loop, through the UI's
     expect(pageFields.get("Phone")).toBe("555-7777");
   });
 });
+
+describe("EXTENSION-FREE: a native (macos_ax) trace is the whole journey", () => {
+  // What the Swift observer now records from real Chrome with no extension
+  // anywhere: macos_ax surface, the page's own origin off AXURL, contract
+  // roles, and the focused-button-is-a-press inference.
+  const NATIVE_TRACE = {
+    schema_version: 1,
+    trace_id: "018f0000-0000-7000-8000-00000000axa1".replace("x", "f"),
+    started_at: "2026-08-13T09:00:00.000Z",
+    ended_at: "2026-08-13T09:02:00.000Z",
+    apps: [{ category: "browser", bundle_id: "com.google.Chrome" }],
+    steps: [
+      {
+        order: 1,
+        surface: "macos_ax",
+        origin: ORIGIN,
+        operation: "set_value",
+        target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+        value_binding: {
+          kind: "runtime_input",
+          input_id: "phone",
+          prompt: "Which number should go in Phone?",
+        },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "value_committed", readback: "reread_target" },
+      },
+      {
+        order: 2,
+        surface: "macos_ax",
+        origin: ORIGIN,
+        operation: "press",
+        target: { role: "button", accessible_name: "Save", ancestry: [], menu_path: [] },
+        value_binding: { kind: "none" },
+        preconditions: { requires_foreground: true, requires_user_presence: true },
+        expected_effect: { kind: "record_updated", readback: "reread_target" },
+      },
+    ],
+    protected_segments: [],
+    pattern_event_refs: [],
+    local_only: true,
+  };
+
+  it("one click compiles, registers, triggers, answers, approves, EXECUTES — no extension", async () => {
+    storedTrace = JSON.stringify(NATIVE_TRACE);
+    // The status honestly reports the NATIVE lane, not the extension relay.
+    relayLane = "native";
+
+    const created = await createOne();
+    if (!created.ok) throw new Error(`create failed: ${created.message}`);
+    const record = useAgents.getState().agents.find((a) => a.agent_id === created.agent_id)!;
+    const spec = record.versions[record.versions.length - 1]!.spec;
+    expect(spec.source_trace_id).toBe(NATIVE_TRACE.trace_id);
+    expect(spec.trigger).toMatchObject({ type: "context", origin: ORIGIN });
+    expect(spec.steps.map((s) => s.mode)).toEqual([
+      "propose_write",
+      "write",
+      "propose_write",
+      "write",
+    ]);
+
+    // The trigger fires from a live context, the question is answered inline,
+    // the exact hash approved, and the write EXECUTES with readback.
+    await emitAppEvent(matchingContext());
+    await settled();
+    const staged = useAgentService.getState().staged[0]!;
+    await answerStagedRun(staged.staged_id, { phone: "555-0199" });
+    const proposed = useAgentService.getState().staged[0]!;
+    if (proposed.outcome.kind !== "shadow" || !proposed.outcome.sha) {
+      throw new Error(`expected a proposal, got ${JSON.stringify(proposed.outcome)}`);
+    }
+    // The merged diff shows the whole routine: the fill AND the press.
+    expect(proposed.outcome.diff!.changes.map((c) => c.field)).toEqual(["Phone", "Save"]);
+
+    await approveStagedRun(staged.staged_id);
+    const done = useAgentService.getState().staged[0]!;
+    if (done.outcome.kind !== "completed") throw new Error(JSON.stringify(done.outcome));
+    expect(pageFields.get("Phone")).toBe("555-0199");
+    expect(pageClicks).toEqual(["Save"]);
+  });
+});

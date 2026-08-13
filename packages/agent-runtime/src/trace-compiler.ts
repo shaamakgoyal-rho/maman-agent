@@ -149,15 +149,15 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
     };
   }
 
-  // 2. Every step must come from BROWSER observation. Stated truthfully
-  //    rather than hidden behind a capability error: macOS-Accessibility
-  //    traces record labels but not the page URLs and dataflow evidence this
-  //    compiler needs, so a routine watched only through Accessibility cannot
-  //    compile yet. (EXECUTION does not need the extension — the native AX
-  //    lane acts fine; it is trace-quality OBSERVATION that still does.) A
-  //    native step is named rather than silently dropped, which would produce
-  //    an agent that does part of the user's routine without saying so.
-  const nativeStep = trace.steps.find((s) => s.surface !== "browser_dom");
+  // 2. Every step must be BROWSER evidence — which no longer means "extension
+  //    evidence". A macOS-Accessibility step whose page identified itself
+  //    (origin present: the observer read AXURL off the live web area) carries
+  //    everything this compiler needs — site, role in the contract vocabulary,
+  //    label — and executes on the same native lane that observed it. What
+  //    still refuses is a native step with NO origin: a desktop app, or a page
+  //    that would not identify itself — there the honest answer names the gap
+  //    rather than guessing which site a routine belongs to.
+  const nativeStep = trace.steps.find((s) => s.surface !== "browser_dom" && !s.origin);
   if (nativeStep) {
     return {
       ok: false,
@@ -165,9 +165,8 @@ export function compileTraceToAgentSpec(request: TraceCompileRequest): TraceComp
         {
           kind: "workflow_definition",
           detail:
-            `Step ${nativeStep.order} was watched through macOS Accessibility (${nativeStep.surface}). ` +
-            `Compiling a browser workflow needs the browser-observed trace the Chrome extension records — ` +
-            `enable it for this site and repeat the workflow once.`,
+            `Step ${nativeStep.order} happened in ${nativeStep.surface} without a page identity, ` +
+            `and only browser workflows can be executed today.`,
         },
       ],
       detail: `unsupported surface: ${nativeStep.surface}`,
