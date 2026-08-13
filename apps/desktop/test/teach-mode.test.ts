@@ -159,7 +159,12 @@ describe("eventFromReading", () => {
     // The store's own guard is the authority here; running it means this event
     // could not be rejected at insert time for a forbidden field.
     expect(containsForbiddenEventField(event)).toBeNull();
-    const serialized = JSON.stringify(event);
+    // Random UUIDs are hex, and hex occasionally CONTAINS a forbidden
+    // substring by chance ("…eb644e" failed this test in CI once). Ids carry
+    // no content, so they are pinned before the scan — the scan is about what
+    // the event SAYS, not about the dice.
+    const scannable = { ...event, event_id: "id" };
+    const serialized = JSON.stringify(scannable);
     for (const forbidden of ["jpeg", "b64", "screenshot", "pixel", "keystroke"]) {
       expect(serialized.toLowerCase(), forbidden).not.toContain(forbidden);
     }
