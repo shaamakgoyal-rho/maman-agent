@@ -11,10 +11,12 @@ BIN_DST="$BIN_DIR/maman-browser-host"
 MANIFEST_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
 MANIFEST_DST="$MANIFEST_DIR/$HOST_NAME.json"
 
-# Extension IDs allowed to talk to the host. The production ID is passed as
-# $1 once the extension is packed; the development ID is documented in
-# docs/architecture/extension-pairing.md.
-EXTENSION_ID="${1:-maman-dev-extension-id}"
+# Extension IDs allowed to talk to the host. Defaults to the PINNED id Chrome
+# derives from the committed public key in extensions/chrome/manifest.config.ts,
+# which is the same on every machine — pass $1 only for a differently-keyed
+# build. Normal users never run this: the app installs the manifest itself
+# (Privacy & access → Chrome connection).
+EXTENSION_ID="${1:-hcfbjnjejkcmcblkbbjkplgabnmianpf}"
 
 if [[ ! -f "$BIN_SRC" ]]; then
   echo "building native host (release)…"

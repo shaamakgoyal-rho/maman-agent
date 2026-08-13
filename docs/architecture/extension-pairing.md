@@ -1,18 +1,45 @@
 # Browser extension pairing
 
-## Development extension ID
+## The extension ID is pinned
 
-Unpacked development builds use the placeholder allowlist entry
-`maman-dev-extension-id`. After loading `extensions/chrome/dist` unpacked,
-Chrome assigns a real ID — pass it to the installer:
+`extensions/chrome/manifest.config.ts` ships a `key` (a public RSA SPKI), so
+Chrome derives the SAME extension id on every machine and for every load path:
 
-```bash
-scripts/install-native-host-macos.sh <your-dev-extension-id>
-```
+    hcfbjnjejkcmcblkbbjkplgabnmianpf
 
-The production extension ID is set the same way once the extension is packed
-and published; it also lands in `packages/config/src/product.ts`
-(`chrome.productionExtensionId`).
+Before this was pinned, Chrome derived an unpacked extension's id from its
+absolute path, so the native-host manifest could only be written by a human
+running a script with their own id pasted in — which is why the relay lane was
+unreachable for anyone who was not a developer. `extension-identity.test.ts`
+derives the id from the committed key with Chrome's own algorithm and fails if
+the two ever drift; a Rust test pins the same constant on the desktop side.
+
+The matching PRIVATE key was never kept. It is needed only to pack a
+self-distributed `.crx`, and the Web Store issues its own identity on upload,
+so there is no secret to store and none is committed.
+
+## Setup, from inside the app
+
+Privacy & access → **Chrome connection** does the whole thing:
+
+1. **Set up** (`browser_host_install`) writes
+   `com.maman.browser_host.json` into the NativeMessagingHosts directory of
+   every Chromium-family browser that is actually installed (Chrome, Chromium,
+   Brave), pointing `path` at the `maman-browser-host` binary **bundled inside
+   the app** and `allowed_origins` at the pinned extension id. No terminal, no
+   cargo, no repo checkout.
+2. **Show pairing code** (`pairing_begin`) mints the one-time token to paste
+   into the extension's popup.
+
+`browser_host_status` reports what is actually true: whether the bundled host
+exists, which browsers have a manifest pointing at a binary that still exists,
+and whether pairing has completed. A manifest left behind by a moved or
+replaced app reads as NOT installed, because Chrome would fail to launch it.
+
+Installing the manifest grants nothing on its own — the channel still requires
+the pairing token, and the manifest carries no secret (a Rust test asserts it).
+
+`scripts/install-native-host-macos.sh` remains for CI and headless development.
 
 The installed manifest's `allowed_origins` is the **single source of truth** for
 which extensions may reach the host: Chrome checks it before launching the host,

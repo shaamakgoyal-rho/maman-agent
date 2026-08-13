@@ -2760,6 +2760,172 @@ fn load_observer_gate<R: Runtime>(app: &AppHandle<R>) -> ObserverGate {
     ObserverGate { consent_complete: consent, observation_paused: paused }
 }
 
+// ---------- Chrome native-messaging host install ----------
+
+/// The pinned id Chrome derives from the extension's committed public key
+/// (extensions/chrome/manifest.config.ts). Because the key is pinned, this is
+/// the id on EVERY machine — which is the only reason the app can write a
+/// correct manifest without asking the user to find it in chrome://extensions.
+pub const EXTENSION_ID: &str = "hcfbjnjejkcmcblkbbjkplgabnmianpf";
+const NATIVE_HOST_NAME: &str = "com.maman.browser_host";
+
+/// Chromium-family manifest directories, per browser, relative to $HOME.
+/// Chrome first because that is the browser the actuation lane drives.
+const HOST_MANIFEST_DIRS: [&str; 3] = [
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+    "Library/Application Support/Chromium/NativeMessagingHosts",
+    "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+];
+
+/// The manifest body Chrome reads before it will launch the host. Pure so the
+/// shape — especially `allowed_origins`, which is what actually gates the
+/// channel — is unit-testable without touching a real browser profile.
+fn native_host_manifest(host_path: &str, extension_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "name": NATIVE_HOST_NAME,
+        "description": "Maman browser relay host",
+        "path": host_path,
+        "type": "stdio",
+        "allowed_origins": extension_ids
+            .iter()
+            .map(|id| format!("chrome-extension://{id}/"))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Resolves the bundled native-messaging host: alongside the app executable in
+/// a packaged bundle, or the cargo release build during development.
+fn resolve_browser_host_binary() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("maman-browser-host");
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../native/browser-host/target/release/maman-browser-host");
+    if dev.exists() {
+        return Some(dev);
+    }
+    None
+}
+
+/// Whether Chrome could launch our host right now, and for which extension.
+///
+/// Panel-only, and read-only: the UI uses this to show "Chrome is connected" vs
+/// "set this up" honestly rather than claiming a lane that cannot run.
+#[tauri::command]
+fn browser_host_status<R: Runtime>(window: Window<R>) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let host = resolve_browser_host_binary();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut installed_for: Vec<String> = Vec::new();
+    for dir in HOST_MANIFEST_DIRS {
+        let path = PathBuf::from(&home).join(dir).join(format!("{NATIVE_HOST_NAME}.json"));
+        let Ok(raw) = fs::read_to_string(&path) else { continue };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        // A manifest that points at a binary which no longer exists (an app
+        // moved or replaced) is NOT installed — reporting it as such is how the
+        // user ends up staring at a lane that silently cannot start.
+        let points_at_live_binary = parsed
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|p| PathBuf::from(p).exists())
+            .unwrap_or(false);
+        let allows_our_extension = parsed
+            .get("allowed_origins")
+            .and_then(|o| o.as_array())
+            .map(|origins| {
+                origins.iter().filter_map(|o| o.as_str()).any(|o| o.contains(EXTENSION_ID))
+            })
+            .unwrap_or(false);
+        if points_at_live_binary && allows_our_extension {
+            installed_for.push(dir.split('/').nth(3).unwrap_or(dir).to_string());
+        }
+    }
+    Ok(serde_json::json!({
+        "host_available": host.is_some(),
+        "installed_browsers": installed_for,
+        "installed": !installed_for.is_empty(),
+        "paired": browser_relay_paired(),
+        "extension_id": EXTENSION_ID,
+    }))
+}
+
+/// Installs the native-messaging manifest for every Chromium-family browser
+/// whose profile directory exists, pointing at the host bundled inside this
+/// app. This is what replaces "run scripts/install-native-host-macos.sh with
+/// your extension id" — a step no real user could perform.
+///
+/// Writes ONLY into the user's own browser profile directories, needs no
+/// elevation, and carries no secret: the manifest names a binary and an
+/// extension id. Pairing still requires the one-time token, so installing the
+/// manifest alone grants nothing.
+#[tauri::command]
+fn browser_host_install<R: Runtime>(
+    window: Window<R>,
+    extra_extension_ids: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    require_panel(&window)?;
+    let host = resolve_browser_host_binary()
+        .ok_or("The browser relay host is missing from this build.".to_string())?;
+    let host_path = host.to_string_lossy().to_string();
+
+    // The pinned id always; extras only if they look like Chrome ids (a
+    // Web-Store id later, or a differently-keyed local build).
+    let mut ids = vec![EXTENSION_ID.to_string()];
+    for id in extra_extension_ids.unwrap_or_default() {
+        let valid = id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b));
+        if valid && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let manifest = native_host_manifest(&host_path, &ids);
+    let body = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+
+    let home = std::env::var("HOME").map_err(|_| "no HOME".to_string())?;
+    let mut written: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for dir in HOST_MANIFEST_DIRS {
+        let browser_root = PathBuf::from(&home).join(dir).parent().map(|p| p.to_path_buf());
+        // Only install for browsers the user actually has: creating profile
+        // trees for absent browsers litters the disk and claims more than it
+        // should.
+        match browser_root {
+            Some(root) if root.exists() => {}
+            _ => {
+                skipped.push(dir.to_string());
+                continue;
+            }
+        }
+        let dir_path = PathBuf::from(&home).join(dir);
+        if let Err(e) = fs::create_dir_all(&dir_path) {
+            skipped.push(format!("{dir}: {e}"));
+            continue;
+        }
+        let path = dir_path.join(format!("{NATIVE_HOST_NAME}.json"));
+        match fs::write(&path, &body) {
+            Ok(()) => written.push(path.to_string_lossy().to_string()),
+            Err(e) => skipped.push(format!("{dir}: {e}")),
+        }
+    }
+    if written.is_empty() {
+        return Err(
+            "No Chromium-family browser profile was found to install the relay host into."
+                .to_string(),
+        );
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "written": written,
+        "skipped": skipped,
+        "extension_id": EXTENSION_ID,
+        "host_path": host_path,
+    }))
+}
+
 /// Resolves the observer sidecar binary: alongside the app executable in a
 /// bundle, or the local Swift release build during development.
 fn resolve_observer_binary<R: Runtime>(_app: &AppHandle<R>) -> Option<PathBuf> {
@@ -3255,6 +3421,8 @@ pub fn run() {
             observation_stats,
             device_data_wipe,
             pairing_begin,
+            browser_host_status,
+            browser_host_install,
             device_enroll,
             sync_now,
             device_enrolled,
@@ -4029,5 +4197,65 @@ mod statusbar_clamp_tests {
         let (x, y) = clamp_into_area((-2000, 800), BAR, left);
         assert_eq!((x, y), (-2000, 800));
         assert_eq!(clamp_into_area((-5000, 800), BAR, left).0, -2940);
+    }
+}
+
+#[cfg(test)]
+mod native_host_install_tests {
+    //! THE MANIFEST CHROME READS. If `allowed_origins` or `path` is wrong,
+    //! Chrome refuses to launch the host and the relay lane dies with no
+    //! symptom the user can act on — so the shape is pinned here.
+    use super::*;
+
+    #[test]
+    fn manifest_names_the_host_the_binary_and_the_pinned_extension() {
+        let m = native_host_manifest("/Applications/Maman.app/Contents/MacOS/maman-browser-host",
+                                     &[EXTENSION_ID.to_string()]);
+        assert_eq!(m["name"], "com.maman.browser_host");
+        assert_eq!(m["type"], "stdio");
+        assert_eq!(m["path"], "/Applications/Maman.app/Contents/MacOS/maman-browser-host");
+        // Chrome matches this string EXACTLY, trailing slash included.
+        assert_eq!(
+            m["allowed_origins"][0],
+            format!("chrome-extension://{EXTENSION_ID}/")
+        );
+    }
+
+    #[test]
+    fn the_pinned_id_is_a_valid_chrome_id() {
+        // 32 chars in Chrome's a–p alphabet. The TS side derives this same id
+        // from the committed public key (extension-identity.test.ts), so a
+        // mismatch between the two is caught on both sides of the wire.
+        assert_eq!(EXTENSION_ID.len(), 32);
+        assert!(EXTENSION_ID.bytes().all(|b| (b'a'..=b'p').contains(&b)));
+    }
+
+    #[test]
+    fn extra_ids_may_be_added_but_never_arbitrary_strings() {
+        // A Web-Store id later, or a differently-keyed local build — accepted.
+        let store_id = "abcdefghijklmnopabcdefghijklmnop".to_string();
+        let m = native_host_manifest("/bin/host", &[EXTENSION_ID.to_string(), store_id.clone()]);
+        let origins = m["allowed_origins"].as_array().unwrap();
+        assert_eq!(origins.len(), 2);
+        assert!(origins.iter().any(|o| o.as_str().unwrap().contains(&store_id)));
+
+        // The command's own validation (mirrored here) refuses anything that is
+        // not a Chrome id, so a typo or an injected value cannot widen the
+        // channel to an extension the user never installed.
+        for bad in ["", "short", "zzzz", "../../etc/passwd", "ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP"] {
+            let valid = bad.len() == 32 && bad.bytes().all(|b| (b'a'..=b'p').contains(&b));
+            assert!(!valid, "{bad} must be refused as an extension id");
+        }
+    }
+
+    #[test]
+    fn manifest_carries_no_secret() {
+        // The manifest lands in a world-readable profile directory. It may name
+        // a binary and an extension; it must never carry pairing material.
+        let m = native_host_manifest("/bin/host", &[EXTENSION_ID.to_string()]);
+        let body = serde_json::to_string(&m).unwrap().to_lowercase();
+        for forbidden in ["secret", "token", "password", "key"] {
+            assert!(!body.contains(forbidden), "manifest leaked {forbidden}");
+        }
     }
 }
