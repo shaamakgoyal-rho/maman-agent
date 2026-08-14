@@ -891,3 +891,38 @@ describe("EXTENSION-FREE: a native (macos_ax) trace is the whole journey", () =>
     expect(pageClicks).toEqual(["Save"]);
   });
 });
+
+describe("a later origin grant revives agents that failed registration at boot", () => {
+  it("boot with ZERO origins → grant → the persisted agent registers and fires", async () => {
+    // First, create an agent while origins exist (it persists to agentsJson).
+    storedTrace = null;
+    const created = await createOne();
+    if (!created.ok) throw new Error("create failed");
+
+    // "Restart" the app with NOTHING granted: the registry is empty, so the
+    // restored agent FAILS registration — the state a fresh device (or a
+    // seeded store) boots into. This is what a live device demo surfaced:
+    // the daemon fired while the panel had nobody registered to run.
+    persistedSettings = JSON.stringify({ browser_actuation_origins: [] });
+    useSettings.setState({ settings: DEFAULT_SETTINGS, hydrated: false });
+    __resetAgentServiceForTests();
+    listeners.length = 0;
+    useAgents.setState({ agents: [], hydrated: false, loadFailure: null, discarded: 0 });
+    await bootAgentService();
+    expect(agentRuntime().get(created.agent_id)).toBeUndefined();
+    await emitAppEvent(matchingContext());
+    await settled();
+    expect(useAgentService.getState().staged).toHaveLength(0);
+
+    // The user grants the origin (the inline consent path does exactly this).
+    // No restart: the registry rebuilds AND the persisted agent re-registers.
+    await useSettings.getState().update({ browser_actuation_origins: [ORIGIN] });
+    expect(agentRuntime().get(created.agent_id)).toBeDefined();
+
+    // And the very next live context wakes it.
+    await emitAppEvent(matchingContext());
+    await settled();
+    expect(useAgentService.getState().staged.length).toBeGreaterThan(0);
+    expect(useAgentService.getState().staged[0]!.agent_id).toBe(created.agent_id);
+  });
+});
