@@ -236,6 +236,15 @@ export async function bootAgentService(): Promise<void> {
   // THE REGISTRY IS NOT A SNAPSHOT. Granting an origin must work without
   // restarting Maman, and revoking one must bite immediately — the very next
   // step resolves against the rebuilt registry and finds nothing.
+  //
+  // AND NEITHER IS THE REGISTRATION SET — revocation's mirror image, caught by
+  // a live device demo: an app that booted with ZERO origins restored an empty
+  // registry, so every persisted agent FAILED registration, and a later grant
+  // swapped the registry while the runtime's agent map stayed empty — the
+  // daemon fired, the panel had nobody to run, and every staged card failed
+  // with "not registered" until a restart. After a registry rebuild, any live
+  // persisted agent the runtime does not hold is re-offered; ones the new
+  // registry still cannot execute fail exactly as before, visibly.
   let knownOrigins = JSON.stringify(
     useSettings.getState().settings.browser_actuation_origins ?? [],
   );
@@ -244,6 +253,13 @@ export async function bootAgentService(): Promise<void> {
     if (origins !== knownOrigins) {
       knownOrigins = origins;
       runtime?.replaceRegistry(realRegistry());
+      for (const record of useAgents.getState().agents) {
+        if (record.state === "archived" || record.state === "revoked") continue;
+        if (runtime?.get(record.agent_id)) continue;
+        runtime?.registerAgent(record.versions[record.versions.length - 1]!.spec, {
+          enabled: record.state !== "paused",
+        });
+      }
     }
   });
 
