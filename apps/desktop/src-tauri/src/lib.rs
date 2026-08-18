@@ -2645,6 +2645,25 @@ pub struct NativeActionWaiters(
 /// hang the run.
 const NATIVE_ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Promotes the status to `Observing` on evidence the sidecar is actually
+/// observing. `Starting` always promotes (hello/heartbeat/boundary prove the
+/// protocol is alive). `PermissionRequired` promotes only on DEFINITIVE
+/// evidence — a real observed event — which is how the status recovers once
+/// the user grants Accessibility. Nothing here ever touches `Failed` (the
+/// supervisor's restart path owns that) and a boundary line can never repaint
+/// a permission failure as healthy: Maman lists itself in private_apps, so
+/// clicking the pet emits boundaries even while observation is broken.
+fn promote_observer_observing<R: Runtime>(app: &AppHandle<R>, definitive: bool) {
+    let current = app.try_state::<ObserverState>().and_then(|s| s.0.lock().ok().map(|g| *g));
+    match current {
+        Some(ObserverStatus::Starting) => set_observer_status(app, ObserverStatus::Observing),
+        Some(ObserverStatus::PermissionRequired) if definitive => {
+            set_observer_status(app, ObserverStatus::Observing);
+        }
+        _ => {}
+    }
+}
+
 fn set_observer_status<R: Runtime>(app: &AppHandle<R>, status: ObserverStatus) {
     if let Some(state) = app.try_state::<ObserverState>() {
         if let Ok(mut guard) = state.0.lock() {
@@ -3185,7 +3204,10 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                 let _ = stdin.flush().await;
             }
 
-            set_observer_status(&app, ObserverStatus::Observing);
+            // Deliberately stays `Starting` here: the status doc says "waiting
+            // for the first hello/heartbeat", and that is the spec. Promotion
+            // to Observing happens below, on actual protocol output — setting
+            // it optimistically after spawn hid a sidecar that never spoke.
             let started = std::time::Instant::now();
             // Distinguishes a deliberate stop (pause / consent revoked) from a
             // crash so an intentional stop never burns the restart budget.
@@ -3239,7 +3261,13 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                     .await
                     {
                         Ok(Ok(Some(line))) => match observer::parse_observer_line(&line) {
-                            observer::ObserverLine::Event(ev) => ingest_observer_value(&app, &ev).await,
+                            observer::ObserverLine::Event(ev) => {
+                                // A real observed event is definitive proof
+                                // observation works — this is also the recovery
+                                // path out of PermissionRequired after a grant.
+                                promote_observer_observing(&app, true);
+                                ingest_observer_value(&app, &ev).await;
+                            }
                             observer::ObserverLine::ActionTrace(trace) => {
                                 // The observer gated every notification and
                                 // ActionTrace re-gated the whole session;
@@ -3277,10 +3305,17 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                                 }
                             }
                             observer::ObserverLine::Boundary { .. } => {
-                                set_observer_status(&app, ObserverStatus::Observing);
+                                // A boundary proves the protocol is alive, not
+                                // that observation is healthy: Maman is in its
+                                // own private_apps, so pet/panel clicks emit
+                                // boundaries even with Accessibility denied.
+                                // Never let one erase PermissionRequired/Failed.
+                                promote_observer_observing(&app, false);
                             }
                             observer::ObserverLine::Error { code, fatal } => {
-                                set_observer_status(&app, observer::status_for_error(&code, fatal));
+                                if let Some(status) = observer::status_for_error(&code, fatal) {
+                                    set_observer_status(&app, status);
+                                }
                             }
                             observer::ObserverLine::WindowFrame { frame } => {
                                 // Transient UI state only: dock the subtitle bar
@@ -3327,8 +3362,13 @@ fn start_observer_supervisor<R: Runtime>(app: AppHandle<R>) {
                                 }
                             }
                             observer::ObserverLine::Heartbeat { .. }
-                            | observer::ObserverLine::Hello { .. }
-                            | observer::ObserverLine::Ignored => {}
+                            | observer::ObserverLine::Hello { .. } => {
+                                // The handshake the Starting doc promises to
+                                // wait for — this is where Starting becomes
+                                // Observing.
+                                promote_observer_observing(&app, false);
+                            }
+                            observer::ObserverLine::Ignored => {}
                         },
                         Ok(_) => break, // stdout closed → child exiting
                         Err(_) => {}    // 2s idle tick: re-check gate + config

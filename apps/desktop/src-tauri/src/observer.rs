@@ -188,15 +188,17 @@ pub fn parse_observer_line(line: &str) -> ObserverLine {
     }
 }
 
-/// Maps an observer error line to the status the UI should show.
-pub fn status_for_error(code: &str, fatal: bool) -> ObserverStatus {
+/// Maps an observer error line to the status the UI should show, or `None`
+/// when the current status must stay as it is. A non-fatal error (e.g.
+/// teach-mode-unavailable) says nothing about observation health, so it must
+/// never repaint an honest `PermissionRequired`/`Failed` as `Observing`.
+pub fn status_for_error(code: &str, fatal: bool) -> Option<ObserverStatus> {
     if code == ACCESSIBILITY_PERMISSION_CODE {
-        ObserverStatus::PermissionRequired
+        Some(ObserverStatus::PermissionRequired)
     } else if fatal {
-        ObserverStatus::Failed
+        Some(ObserverStatus::Failed)
     } else {
-        // Non-fatal error (e.g. teach-mode-unavailable) — keep observing.
-        ObserverStatus::Observing
+        None
     }
 }
 
@@ -469,13 +471,16 @@ mod tests {
     fn missing_accessibility_permission_surfaces_permission_required() {
         assert_eq!(
             status_for_error(ACCESSIBILITY_PERMISSION_CODE, false),
-            ObserverStatus::PermissionRequired
+            Some(ObserverStatus::PermissionRequired)
         );
     }
 
     #[test]
-    fn a_fatal_error_surfaces_failed_a_nonfatal_one_keeps_observing() {
-        assert_eq!(status_for_error("some_crash", true), ObserverStatus::Failed);
-        assert_eq!(status_for_error("teach_mode_unavailable", false), ObserverStatus::Observing);
+    fn a_fatal_error_surfaces_failed_a_nonfatal_one_changes_nothing() {
+        assert_eq!(status_for_error("some_crash", true), Some(ObserverStatus::Failed));
+        // A non-fatal error must leave the current status untouched — returning
+        // Observing here used to erase PermissionRequired while the user was
+        // still being asked to grant Accessibility.
+        assert_eq!(status_for_error("teach_mode_unavailable", false), None);
     }
 }
