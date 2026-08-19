@@ -230,14 +230,20 @@ pub fn schedule_due(
 /// categorizes the same domain as "crm"/"email", so requiring both equalities
 /// rejected every SaaS agent. Without an origin, app_category is the selector.
 pub fn matches(record: &TriggerRecord, ctx: &ContextFields<'_>) -> bool {
-    match &record.origin_host {
-        Some(host) => match ctx.domain {
-            // A bare host compared EXACTLY — no suffix match, so
-            // evil-example.com cannot wake an agent meant for example.com.
-            Some(domain) if domain == host => {}
-            _ => return false,
-        },
-        None => {
+    match (&record.origin_host, ctx.domain) {
+        // A bare host compared EXACTLY — no suffix match, so
+        // evil-example.com cannot wake an agent meant for example.com.
+        (Some(host), Some(domain)) => {
+            if domain != host {
+                return false;
+            }
+        }
+        // A context with NO domain (the observation lane could not read the
+        // page identity) falls back to the category comparison — the same
+        // rule as the panel runtime, so daemon and panel cannot disagree.
+        // The shadow's own discovery still verifies the real page against
+        // the origin allowlist before anything is proposed.
+        (Some(_), None) | (None, _) => {
             if record.app_category != ctx.app_category {
                 return false;
             }
@@ -345,11 +351,13 @@ fn announce_firing<R: Runtime>(
     );
     // The status bar is a separate window and survives the panel closing —
     // this beat is what makes a daemon firing VISIBLE with no panel open.
+    // "suggested", not "running": the daemon only MATCHES and ANNOUNCES —
+    // nothing is executing, and the beat must not claim otherwise.
     let _ = app.emit(
         "maman-app-events",
         serde_json::json!({
             "type": "status_beat",
-            "beat": { "kind": "running", "title": agent_name, "phase": "reading" }
+            "beat": { "kind": "suggested", "title": agent_name }
         }),
     );
     append_staged(app, &firing);
@@ -598,10 +606,17 @@ mod tests {
             r,
             &ContextFields { app_category: "browser", object_type: "invoice", domain: Some("acme.example") }
         ));
-        // A trigger that names a host does not fire for an event with none.
-        assert!(!matches(
+        // A domain-less context (the lane could not read the page identity)
+        // falls back to the CATEGORY comparison rather than a flat refusal —
+        // the trigger's own category still gates it…
+        assert!(matches(
             r,
             &ContextFields { app_category: "browser", object_type: "contact", domain: None }
+        ));
+        // …so the wrong kind of work still cannot wake it.
+        assert!(!matches(
+            r,
+            &ContextFields { app_category: "email", object_type: "contact", domain: None }
         ));
     }
 

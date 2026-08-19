@@ -333,16 +333,27 @@ async function stageFiring(
   opts: { quiet?: boolean } = {},
 ): Promise<void> {
   const record = useAgents.getState().agents.find((a) => a.agent_id === agentId);
-  if (!opts.quiet) {
-    await emitAppEvent({
-      type: "status_beat",
-      beat: { kind: "running", title: agentName, phase: "reading" },
-    });
-  }
 
   if (record?.draft_autonomy) {
+    if (!opts.quiet) {
+      await emitAppEvent({
+        type: "status_beat",
+        beat: { kind: "running", title: agentName, phase: "reading" },
+      });
+    }
     enqueueAutonomousShadow(agentId, agentName, at);
   } else {
+    // HONEST BEAT: nothing is running — a firing without autonomy is a
+    // suggestion awaiting the user. The old {kind:"running", phase:"reading"}
+    // claimed activity that was not happening, and nothing moved the pet, so
+    // a staged card's only surface was a panel that opens hidden.
+    if (!opts.quiet) {
+      await emitAppEvent({
+        type: "status_beat",
+        beat: { kind: "suggested", title: agentName },
+      });
+      await emitAppEvent({ type: "simulate_pet_event", event: "APPROVAL_REQUIRED" });
+    }
     pushStaged({
       staged_id: uuidv7(),
       agent_id: agentId,
@@ -680,21 +691,25 @@ export async function executeApproved(
 // ---- Create Agent, the whole verb ----
 
 /**
- * Derives the context trigger from the pattern the agent came from: the same
- * category-level vocabulary detection matched on, plus the first actuation
- * origin when one is configured. Manual stays available as the fallback.
+ * Derives the context trigger from the pattern the agent came from: exactly
+ * the category-level vocabulary detection matched on, NOTHING more. A trigger
+ * origin comes only from real evidence — the compiled trace's own steps stamp
+ * it (`compiledTrigger`). This function used to weld
+ * `browser_actuation_origins[0]` onto every derived trigger: the first site
+ * the user ever GRANTED, unrelated to the pattern, which both fired site-B
+ * agents on site A and (because an origin is the sole selector) made every
+ * desktop-observed agent unable to match its own category again. The
+ * candidate carries no domain evidence, so honesty here is: no origin.
  */
 export function deriveTrigger(candidate: PatternCandidate): AgentSpec["trigger"] {
   const first = candidate.canonical_sequence[0]?.split(":");
   const appCategory = first?.[1];
   if (!appCategory || appCategory === "-") return { type: "manual" };
   const objectType = first?.[5];
-  const origin = (useSettings.getState().settings.browser_actuation_origins ?? [])[0];
   return {
     type: "context",
     app_category: appCategory,
     ...(objectType && objectType !== "-" ? { object_type: objectType } : {}),
-    ...(origin ? { origin } : {}),
     cooldown_seconds: 300,
   };
 }
@@ -809,17 +824,11 @@ async function compileFromRepresentativeTrace(
     }
   }
 
-  if (!raw) {
-    const derived = deriveTrigger(candidate);
-    const origin = derived.type === "context" ? derived.origin : undefined;
-    if (!origin) return { kind: "no_trace" };
-    const host = origin.replace(/^https?:\/\//, "").split("/")[0]!;
-    try {
-      raw = await invokeCommand<string | null>("action_trace_lookup", { host });
-    } catch {
-      return { kind: "no_trace" }; // lookup unavailable ≠ refusal
-    }
-  }
+  // No stamped trace (or it expired): fall through to the legacy pattern
+  // path. The old fallback here looked a trace up BY HOST — but the host it
+  // used came from deriveTrigger's invented origin (the first GRANTED site,
+  // not anything this pattern was observed on), so it could compile an agent
+  // from an unrelated site's trace. No evidence means no trace, honestly.
   if (!raw) return { kind: "no_trace" };
 
   const parsed = parseLocalActionTrace(JSON.parse(raw));
