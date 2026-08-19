@@ -415,9 +415,15 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
 
     const proactiveInputs: ProactiveInput[] = [...items, ...forming].map((entry) => {
       const verification = entry.verification;
+      // Usable runs (tested minus insufficient) — the same arithmetic as
+      // evaluateVerification. Raw runs_tested counted comparisons of nothing
+      // toward the floor.
+      const usable = verification
+        ? verification.runs_tested - verification.runs_insufficient
+        : 0;
       const verified =
-        verification && verification.runs_tested >= replayThresholds.min_runs
-          ? { runs_matched: verification.runs_matched, runs_tested: verification.runs_tested }
+        verification && usable >= replayThresholds.min_runs
+          ? { runs_matched: verification.runs_matched, runs_tested: usable }
           : null;
       return {
         pattern_id: entry.candidate.pattern_id,

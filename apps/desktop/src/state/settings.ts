@@ -96,7 +96,12 @@ export const localSettingsSchema = z
     // Replay-verification gate: a pattern becomes a suggestion card only after
     // the compiled candidate has been tested against the worker's own recorded
     // runs and cleared this bar. Tunable so the demo can adjust honestly.
-    verify_min_runs: z.number().int().min(1).max(100).default(10),
+    // Default 5, not 10: detection needs only detect_min_occurrences (3)
+    // repetitions, so a 10-run floor parked every eligible pattern in Forming
+    // for 7 MORE repetitions with no other route to a card. Five usable runs
+    // still demands real independent evidence (leave-one-out needs ≥2) without
+    // making the wait longer than the workflow's own detection.
+    verify_min_runs: z.number().int().min(1).max(100).default(5),
     verify_min_match_pct: z.number().min(0).max(1).default(0.85),
     /** How many of the most recent recorded runs to replay against. */
     verify_window: z.number().int().min(1).max(100).default(21),

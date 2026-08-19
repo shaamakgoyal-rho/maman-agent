@@ -24,11 +24,19 @@ import { representativeSequence } from "../src/scoring.js";
  * These tests make that outcome unreachable.
  */
 
-/** The live device's pattern 019fc4d0 — every token lacks semantic AND object. */
+/**
+ * Tokens with NOTHING to compare — no role, no semantic, no object. Only this
+ * shape is a no-op now. The live device's pattern 019fc4d0 (role present,
+ * semantic/object absent) used to sit here too, but treating it as nothing
+ * meant the primary observer could never verify anything; those tokens now
+ * compare on the (role, event_type) fallback basis — see replay.test.ts.
+ * The invariant THIS file pins is unchanged: a comparison of genuinely
+ * nothing is never a match.
+ */
 const NOTHING_SPECIFIC = [
-  "macos_ax:browser:element_focused:AXGroup:-:-",
-  "macos_ax:browser:value_committed:AXStaticText:-:-",
-  "macos_ax:browser:value_committed:AXTextField:-:-",
+  "macos_ax:browser:app_activated:-:-:-",
+  "macos_ax:browser:idle_started:-:-:-",
+  "macos_ax:browser:app_activated:-:-:-",
 ];
 
 /** A sequence with real semantic/object information — genuinely comparable. */
