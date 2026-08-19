@@ -80,6 +80,16 @@ export function planForState(state: MamanAnimationState, reducedMotion: boolean)
     // the state ends when movement stops (drag settles).
     return { kind: "loop", frames: framesFor(mapped) };
   }
+  if (mapped === "waving") {
+    // A SUGGESTION BEACON, not a one-shot. The machine holds `waving` until
+    // the suggestion is handled, but the transient plan played ~2s once and
+    // settled into idle forever — after which the pet was indistinguishable
+    // from having nothing to say. Loop a wave burst separated by one quiet
+    // slow-idle cycle: recurring and noticeable, never frantic. Frame
+    // timings are the locked atlas timings; only the sequence is composed.
+    const burst = Array.from({ length: TRANSIENT_CYCLES }, () => framesFor(mapped)).flat();
+    return { kind: "loop", frames: [...burst, ...slowIdleFrames()] };
+  }
   // Every other animation is transient: play three complete cycles, then
   // settle into the quiet slow-idle loop until another state is requested.
   return {

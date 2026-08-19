@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { emitAppEvent } from "./bridge.js";
 import { useRecommendations } from "./recommendations.js";
-import { useSettings } from "../state/settings.js";
+import { expirePauseIfDue, useSettings } from "../state/settings.js";
 
 /**
  * THE PROACTIVE LOOP, OUT OF REACT.
@@ -69,6 +69,12 @@ export async function motherTick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
+    // A lapsed TIMED pause resumes here — "Pause for 15 minutes" must not be
+    // forever. The loop is the clock: this runs every 60s regardless of what
+    // screens exist, and the resume persists to the file Rust's gate reads.
+    if (await expirePauseIfDue()) {
+      record(true, "timed pause lapsed — observation resumed");
+    }
     if (useSettings.getState().settings.observation_paused) {
       record(true, "skipped: observation paused");
       return;

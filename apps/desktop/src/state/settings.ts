@@ -257,6 +257,10 @@ export const useSettings = create<SettingsStore>((set, get) => ({
         const parsed = localSettingsSchema.safeParse(JSON.parse(raw));
         if (parsed.success) {
           set({ settings: parsed.data, hydrated: true });
+          // A TIMED pause that has lapsed resumes here (and on every
+          // motherTick — see expirePauseIfDue). paused_until had writers and
+          // no readers, so "Pause for 15 minutes" was actually forever.
+          await expirePauseIfDue();
           return;
         }
       }
@@ -272,6 +276,22 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     await emitAppEvent({ type: "settings_changed" });
   },
 }));
+
+/**
+ * THE READER paused_until never had: if a timed pause has lapsed, resume —
+ * persist the resume (JS owns the settings file Rust's ingest gate reads) and
+ * announce it. Called from hydrate and from every motherTick, so the longest
+ * a lapsed pause can outlive its own deadline is one tick (~60s). A pause
+ * with no deadline (plain "pause") is untouched: only the user resumes that.
+ */
+export async function expirePauseIfDue(now: Date = new Date()): Promise<boolean> {
+  const { settings, update } = useSettings.getState();
+  if (!settings.observation_paused || !settings.paused_until) return false;
+  if (now.toISOString() < settings.paused_until) return false;
+  await update({ observation_paused: false, paused_until: null });
+  await emitAppEvent({ type: "observation_changed" });
+  return true;
+}
 
 /** Pause helpers (one-click reachable from the pet menu). */
 export function pauseUntil(minutes: number | "tomorrow"): { paused_until: string } {

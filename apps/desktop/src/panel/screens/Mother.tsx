@@ -56,9 +56,23 @@ export function Mother({ petState }: { petState: PetStateName }) {
     void refresh();
   }, [refresh]);
 
+  // ONE suggestion at a time (computed below); this effect marks it VIEWED the
+  // moment it renders. Nothing dispatched "viewed" before, so a surfaced
+  // suggestion stayed status:"new" forever — hasNew never released, the
+  // waving latch never reset, and no later suggestion could ever surface.
+  const topSignature = items.find((i) => i.entry.status === "new")?.signature;
+  useEffect(() => {
+    if (topSignature) void act(topSignature, { type: "viewed" });
+  }, [topSignature, act]);
+
   const paused = settings.observation_paused;
   // ONE suggestion: the freshest thing Maman has not been told to ignore.
-  const top: RecommendationWithState | undefined = items.find((i) => i.entry.status === "new");
+  // "viewed" stays visible — it means "seen, not yet decided". Only an actual
+  // decision (accept/snooze/dismiss) clears the card; the viewed transition
+  // exists to release the mother loop's waving latch, not to hide anything.
+  const top: RecommendationWithState | undefined = items.find(
+    (i) => i.entry.status === "new" || i.entry.status === "viewed",
+  );
   // Layer 5: pack workflows the calendar says are due, already policy-gated
   // (budget, quiet hours, quiet periods, per-pattern snoozes) by the store.
   const proactiveDue = gatedProactive();
