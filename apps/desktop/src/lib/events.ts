@@ -89,16 +89,14 @@ export async function ingestEvents(
   opts: { observationPaused: boolean },
 ): Promise<IngestResult> {
   if (isTauri()) {
-    const result = await invokeCommand<IngestResult>("events_ingest", {
+    // Rust's events_ingest emits workflow_context PER STORED EVENT and runs
+    // trigger evaluation itself (mirroring the live observer path), so JS must
+    // not emit here. The old loop emitted for EVERY event in the batch when
+    // result.stored > 0 — including the dropped ones — which both over-fired
+    // (denied events woke agents) and double-fired against the Rust daemon.
+    return invokeCommand<IngestResult>("events_ingest", {
       eventsJson: JSON.stringify(events),
     });
-    // Trigger evaluation hears what was STORED, not what was attempted: a
-    // paused or denied event never wakes an agent.
-    if (result.stored > 0) {
-      for (const e of events)
-        void emitAppEvent({ type: "workflow_context", context: contextOf(e) });
-    }
-    return result;
   }
   if (opts.observationPaused) {
     return {

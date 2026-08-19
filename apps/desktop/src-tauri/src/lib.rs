@@ -1006,7 +1006,17 @@ async fn events_ingest<R: Runtime>(
     for event in &events {
         match gate_event(&settings, event)? {
             None => match store.insert_event(event, store::EVENT_RETENTION_DAYS_DEFAULT).await {
-                Ok(_) => result.stored += 1,
+                Ok(_) => {
+                    result.stored += 1;
+                    // Mirror of the observer path (`ingest_observer_value`):
+                    // trigger evaluation hears each STORED event — per event,
+                    // never per batch, so a dropped event cannot wake an agent
+                    // and a stored one always can. The JS side no longer emits
+                    // for Tauri ingests; this is the single emitter.
+                    if let Some(context) = emit_workflow_context(&app, event) {
+                        trigger_service::evaluate(&app, &context);
+                    }
+                }
                 Err(store::StoreError::ForbiddenField(_)) => result.rejected_forbidden += 1,
                 Err(e) => return Err(e.to_string()),
             },
@@ -3508,6 +3518,21 @@ pub fn run() {
             }
             start_sync_loop(app.handle().clone());
             start_observer_supervisor(app.handle().clone());
+
+            // The schedule scheduler. Cron agents were silently dead: nothing
+            // anywhere ticked them. A 30s sweep bounds firing latency to well
+            // under any cron granularity (minutes).
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tick.tick().await;
+                        trigger_service::evaluate_schedules(&handle);
+                    }
+                });
+            }
 
             // Global shortcut: Control+Option+P toggles the panel.
             {

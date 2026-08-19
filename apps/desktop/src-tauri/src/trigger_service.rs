@@ -42,6 +42,17 @@ pub struct TriggerRecord {
     pub cooldown_seconds: u64,
 }
 
+/// One agent's SCHEDULE trigger (`{type:"schedule", cron, timezone}`). These
+/// used to be silently discarded — a cron agent was dead the moment it was
+/// created, with nothing anywhere that could ever tick it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduleRecord {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub cron: String,
+    pub timezone: String,
+}
+
 /// The redacted context fields evaluation needs.
 pub struct ContextFields<'a> {
     pub app_category: &'a str,
@@ -52,7 +63,11 @@ pub struct ContextFields<'a> {
 #[derive(Default)]
 struct Inner {
     records: Vec<TriggerRecord>,
+    schedules: Vec<ScheduleRecord>,
     last_fired: HashMap<String, Instant>,
+    /// End of the last schedule sweep — the next sweep looks for cron
+    /// occurrences in (last_schedule_sweep, now].
+    last_schedule_sweep: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Tauri-managed daemon state.
@@ -96,8 +111,19 @@ pub fn parse_agents(json: &str) -> Vec<TriggerRecord> {
         else {
             continue;
         };
-        if trigger.get("type").and_then(|t| t.as_str()) != Some("context") {
-            continue;
+        // Every trigger type is handled EXPLICITLY. The old code continued on
+        // anything non-context, which silently discarded every schedule agent.
+        match trigger.get("type").and_then(|t| t.as_str()) {
+            Some("context") => {}
+            // Schedule triggers are parsed by `parse_schedules` below.
+            Some("schedule") => continue,
+            // Manual is by design (the user runs it); event triggers are the
+            // server's business, not this daemon's.
+            other => {
+                #[cfg(debug_assertions)]
+                eprintln!("trigger_service: skipping trigger type {other:?} for {agent_id}");
+                continue;
+            }
         }
         let Some(app_category) = trigger.get("app_category").and_then(|c| c.as_str()) else {
             continue;
@@ -122,6 +148,78 @@ pub fn parse_agents(json: &str) -> Vec<TriggerRecord> {
         });
     }
     records
+}
+
+/// Parses agents.json into SCHEDULE records — the same liveness and
+/// latest-version rules as `parse_agents`, for `{type:"schedule"}` triggers.
+pub fn parse_schedules(json: &str) -> Vec<ScheduleRecord> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(agents) = value.get("agents").and_then(|a| a.as_array()) else {
+        return Vec::new();
+    };
+    let mut schedules = Vec::new();
+    for agent in agents {
+        let state = agent.get("state").and_then(|s| s.as_str()).unwrap_or("");
+        if !LIVE_STATES.contains(&state) {
+            continue;
+        }
+        let (Some(agent_id), Some(name)) = (
+            agent.get("agent_id").and_then(|v| v.as_str()),
+            agent.get("name").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Some(trigger) = agent
+            .get("versions")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.last())
+            .and_then(|v| v.get("spec"))
+            .and_then(|s| s.get("trigger"))
+        else {
+            continue;
+        };
+        if trigger.get("type").and_then(|t| t.as_str()) != Some("schedule") {
+            continue;
+        }
+        let (Some(cron), Some(timezone)) = (
+            trigger.get("cron").and_then(|c| c.as_str()),
+            trigger.get("timezone").and_then(|t| t.as_str()),
+        ) else {
+            continue;
+        };
+        schedules.push(ScheduleRecord {
+            agent_id: agent_id.to_string(),
+            agent_name: name.to_string(),
+            cron: cron.to_string(),
+            timezone: timezone.to_string(),
+        });
+    }
+    schedules
+}
+
+/// Whether the cron expression has an occurrence in `(window_start, now]`,
+/// evaluated in the trigger's own timezone (the contract requires one). Pure —
+/// this is the whole scheduling decision, so it is unit-testable without time.
+/// An unparseable cron or unknown timezone is FALSE, never a fire: a broken
+/// schedule must not become an agent that runs at every tick.
+pub fn schedule_due(
+    cron: &str,
+    timezone: &str,
+    window_start: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Ok(tz) = timezone.parse::<chrono_tz::Tz>() else {
+        return false;
+    };
+    let Ok(parsed) = cron.parse::<croner::Cron>() else {
+        return false;
+    };
+    match parsed.find_next_occurrence(&window_start.with_timezone(&tz), false) {
+        Ok(next) => next.with_timezone(&chrono::Utc) <= now,
+        Err(_) => false,
+    }
 }
 
 /// Does this context wake this trigger? Pure; exact comparisons only.
@@ -168,12 +266,19 @@ struct Firing<'a> {
 /// not reset every agent's cooldown and unleash a burst.
 pub fn reload<R: Runtime>(app: &AppHandle<R>, agents_json: Option<&str>) {
     let records = agents_json.map(parse_agents).unwrap_or_default();
+    let schedules = agents_json.map(parse_schedules).unwrap_or_default();
     let state = app.state::<TriggerServiceState>();
     let mut inner = state.0.lock().expect("trigger state poisoned");
     inner.records = records;
+    inner.schedules = schedules;
     // Drop cooldown history for agents that no longer exist; the survivors keep
     // theirs, so re-saving the file cannot reset every cooldown at once.
-    let keep: Vec<String> = inner.records.iter().map(|r| r.agent_id.clone()).collect();
+    let keep: Vec<String> = inner
+        .records
+        .iter()
+        .map(|r| r.agent_id.clone())
+        .chain(inner.schedules.iter().map(|s| s.agent_id.clone()))
+        .collect();
     inner.last_fired.retain(|id, _| keep.iter().any(|k| k == id));
 }
 
@@ -219,26 +324,87 @@ pub fn evaluate<R: Runtime>(app: &AppHandle<R>, context: &serde_json::Value) {
     };
 
     for (agent_id, agent_name) in fired {
-        let firing = Firing {
-            agent_id: &agent_id,
-            agent_name: &agent_name,
-            at: &occurred_at,
-            context,
+        announce_firing(app, &agent_id, &agent_name, &occurred_at, context);
+    }
+}
+
+/// Emits one firing on the app-event channel, beats the status bar, and
+/// appends it to the staged-runs spool — the shared tail of both the context
+/// path and the schedule path.
+fn announce_firing<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_id: &str,
+    agent_name: &str,
+    at: &str,
+    context: &serde_json::Value,
+) {
+    let firing = Firing { agent_id, agent_name, at, context };
+    let _ = app.emit(
+        "maman-app-events",
+        serde_json::json!({ "type": "agent_trigger_fired", "firing": &firing }),
+    );
+    // The status bar is a separate window and survives the panel closing —
+    // this beat is what makes a daemon firing VISIBLE with no panel open.
+    let _ = app.emit(
+        "maman-app-events",
+        serde_json::json!({
+            "type": "status_beat",
+            "beat": { "kind": "running", "title": agent_name, "phase": "reading" }
+        }),
+    );
+    append_staged(app, &firing);
+}
+
+/// One schedule sweep: fires every schedule trigger with a cron occurrence in
+/// (last sweep, now], honoring the SAME per-agent cooldown map as the context
+/// path (default 300s — a sweep overlap must not double-fire). Called from a
+/// ~30s tokio interval in `.setup()`; the first sweep only opens the window,
+/// so a restart never back-fires occurrences from before the app was running.
+pub fn evaluate_schedules<R: Runtime>(app: &AppHandle<R>) {
+    let now_utc = chrono::Utc::now();
+    let at = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // Synthetic context: a schedule firing observed nothing — no domain, no
+    // role, no object. The shape mirrors the context path so every consumer
+    // (status bar, panel drain) reads one vocabulary.
+    let context = serde_json::json!({
+        "source": "schedule",
+        "app_category": "-",
+        "event_type": "schedule_due",
+        "target_role": "-",
+        "semantic_type": "-",
+        "object_type": "-",
+        "occurred_at": at,
+    });
+
+    let fired: Vec<(String, String)> = {
+        let state = app.state::<TriggerServiceState>();
+        let mut inner = state.0.lock().expect("trigger state poisoned");
+        let Some(window_start) = inner.last_schedule_sweep.replace(now_utc) else {
+            return; // first sweep: open the window, fire nothing retroactively
         };
-        let _ = app.emit(
-            "maman-app-events",
-            serde_json::json!({ "type": "agent_trigger_fired", "firing": &firing }),
-        );
-        // The status bar is a separate window and survives the panel closing —
-        // this beat is what makes a daemon firing VISIBLE with no panel open.
-        let _ = app.emit(
-            "maman-app-events",
-            serde_json::json!({
-                "type": "status_beat",
-                "beat": { "kind": "running", "title": agent_name, "phase": "reading" }
-            }),
-        );
-        append_staged(app, &firing);
+        let now = Instant::now();
+        let due: Vec<ScheduleRecord> = inner
+            .schedules
+            .iter()
+            .filter(|s| schedule_due(&s.cron, &s.timezone, window_start, now_utc))
+            .cloned()
+            .collect();
+        let mut fired = Vec::new();
+        for record in due {
+            let cool = std::time::Duration::from_secs(300);
+            if let Some(last) = inner.last_fired.get(&record.agent_id) {
+                if now.duration_since(*last) < cool {
+                    continue;
+                }
+            }
+            inner.last_fired.insert(record.agent_id.clone(), now);
+            fired.push((record.agent_id, record.agent_name));
+        }
+        fired
+    };
+
+    for (agent_id, agent_name) in fired {
+        announce_firing(app, &agent_id, &agent_name, &at, &context);
     }
 }
 
@@ -325,11 +491,61 @@ mod tests {
     }
 
     #[test]
-    fn manual_and_schedule_triggers_are_not_the_daemon_s_business() {
+    fn manual_triggers_are_not_the_daemon_s_business() {
         assert!(
             parse_agents(&agents_json("shadow", serde_json::json!({ "type": "manual" })))
                 .is_empty()
         );
+    }
+
+    fn schedule_trigger() -> serde_json::Value {
+        serde_json::json!({
+            "type": "schedule",
+            "cron": "0 9 * * 1",
+            "timezone": "America/New_York"
+        })
+    }
+
+    #[test]
+    fn a_schedule_trigger_becomes_a_schedule_record_not_a_context_one() {
+        let json = agents_json("active", schedule_trigger());
+        assert!(parse_agents(&json).is_empty());
+        let schedules = parse_schedules(&json);
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].cron, "0 9 * * 1");
+        assert_eq!(schedules[0].timezone, "America/New_York");
+    }
+
+    #[test]
+    fn a_draft_schedule_agent_never_fires_either() {
+        assert!(parse_schedules(&agents_json("draft", schedule_trigger())).is_empty());
+    }
+
+    #[test]
+    fn schedule_due_finds_an_occurrence_inside_the_window_only() {
+        use chrono::TimeZone;
+        // Monday 2026-08-17 09:00 America/New_York == 13:00 UTC (EDT).
+        let before = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 12, 59, 0).unwrap();
+        let after = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 13, 0, 30).unwrap();
+        assert!(schedule_due("0 9 * * 1", "America/New_York", before, after));
+        // A window that ends before the occurrence: not due.
+        let too_early = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 12, 59, 30).unwrap();
+        assert!(!schedule_due("0 9 * * 1", "America/New_York", before, too_early));
+        // The window is EXCLUSIVE of its start: an occurrence exactly at the
+        // last sweep was already that sweep's business.
+        let at_occurrence = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 13, 0, 0).unwrap();
+        assert!(!schedule_due("0 9 * * 1", "America/New_York", at_occurrence, after));
+    }
+
+    #[test]
+    fn broken_cron_or_timezone_is_never_due_rather_than_always_due() {
+        use chrono::TimeZone;
+        let a = chrono::Utc.with_ymd_and_hms(2026, 8, 17, 0, 0, 0).unwrap();
+        let b = chrono::Utc.with_ymd_and_hms(2026, 8, 18, 0, 0, 0).unwrap();
+        assert!(!schedule_due("not a cron", "America/New_York", a, b));
+        assert!(!schedule_due("0 9 * * 1", "Not/A_Zone", a, b));
+        // Sanity: a real daily cron IS due across a full day.
+        assert!(schedule_due("0 9 * * *", "America/New_York", a, b));
     }
 
     #[test]
