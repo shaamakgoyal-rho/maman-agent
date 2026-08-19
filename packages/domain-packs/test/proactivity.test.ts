@@ -584,7 +584,10 @@ describe("every shipped workflow has a reachable cadence", () => {
             `${pack.domain}/${wf.id} needs a pre-close lead`,
           ).toBeDefined();
         } else if (wf.cadence === "weekly" || wf.cadence === "continuous") {
-          expect(timing, `${pack.domain}/${wf.id} needs ${wf.cadence}_workflows timing`).toBeDefined();
+          expect(
+            timing,
+            `${pack.domain}/${wf.id} needs ${wf.cadence}_workflows timing`,
+          ).toBeDefined();
         } else {
           // date/event driven: some trigger must carry a schedulable lead.
           const lead = pack.proactivity.event_triggers.some((t) => t.lead_days !== undefined);

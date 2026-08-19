@@ -23,9 +23,8 @@ vi.mock("../src/lib/bridge.js", () => ({
   onAppEvent: async () => () => {},
 }));
 
-const { DEFAULT_SETTINGS, expirePauseIfDue, pauseUntil, useSettings } = await import(
-  "../src/state/settings.js"
-);
+const { DEFAULT_SETTINGS, expirePauseIfDue, pauseUntil, useSettings } =
+  await import("../src/state/settings.js");
 
 beforeEach(() => {
   persisted = null;

@@ -457,9 +457,7 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
       // Usable runs (tested minus insufficient) — the same arithmetic as
       // evaluateVerification. Raw runs_tested counted comparisons of nothing
       // toward the floor.
-      const usable = verification
-        ? verification.runs_tested - verification.runs_insufficient
-        : 0;
+      const usable = verification ? verification.runs_tested - verification.runs_insufficient : 0;
       const verified =
         verification && usable >= replayThresholds.min_runs
           ? { runs_matched: verification.runs_matched, runs_tested: usable }
