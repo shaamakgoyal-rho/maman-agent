@@ -36,6 +36,13 @@ export type FormingProgress = {
 export type ReplayGateInput = {
   runs_tested: number;
   runs_matched: number;
+  /**
+   * Runs that carried nothing comparable. The real gate
+   * (`evaluateVerification`) counts only usable runs
+   * (`runs_tested - runs_insufficient`); this display must agree with it, or
+   * the Forming card claims a different bar than the one actually applied.
+   */
+  runs_insufficient?: number;
   min_runs: number;
   min_match_pct: number;
 };
@@ -117,17 +124,21 @@ export function patternGates(
   ];
 
   // The headline gate: the compiled candidate must prove itself against the
-  // worker's own recorded runs before it may become a card.
+  // worker's own recorded runs before it may become a card. Counts USABLE
+  // runs (tested minus insufficient), the same arithmetic as
+  // evaluateVerification — displaying raw runs_tested here made the card
+  // claim progress the real gate would refuse.
   if (replay) {
-    const ratio = replay.runs_tested > 0 ? replay.runs_matched / replay.runs_tested : 0;
+    const usable = replay.runs_tested - (replay.runs_insufficient ?? 0);
+    const ratio = usable > 0 ? replay.runs_matched / usable : 0;
     gates.push({
       key: "replay",
       label: "Proven against your own runs",
-      met: replay.runs_tested >= replay.min_runs && ratio >= replay.min_match_pct,
+      met: usable >= replay.min_runs && ratio >= replay.min_match_pct,
       detail:
-        replay.runs_tested === 0
-          ? "no recorded runs to test yet"
-          : `matched ${replay.runs_matched} of ${replay.runs_tested} (needs ${pct(replay.min_match_pct)} of ≥${replay.min_runs})`,
+        usable === 0
+          ? "no usable recorded runs to test yet"
+          : `matched ${replay.runs_matched} of ${usable} (needs ${pct(replay.min_match_pct)} of ≥${replay.min_runs})`,
     });
   } else {
     gates.push({

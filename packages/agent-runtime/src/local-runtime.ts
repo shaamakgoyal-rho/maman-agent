@@ -250,9 +250,15 @@ export class LocalAgentRuntime {
       // stamps "browser" while the ingest categorizer maps the same domain to
       // "crm"/"email"/"spreadsheet", so demanding both equalities rejected every
       // SaaS agent forever. Host is compared EXACTLY (a suffix match is how
-      // evil-example.com would wake an agent meant for example.com). Without an
-      // origin (native/legacy triggers), app_category is the selector.
-      if (trigger.origin !== undefined) {
+      // evil-example.com would wake an agent meant for example.com).
+      //
+      // A context with NO domain (an observation lane that could not read the
+      // page identity) falls back to the app_category comparison instead of a
+      // flat refusal: the trigger still fires only for the right KIND of work,
+      // and the shadow's own discovery re-verifies the actual page against the
+      // origin allowlist before anything is even proposed. Without an origin
+      // (native/legacy triggers), app_category is the selector.
+      if (trigger.origin !== undefined && context.domain !== undefined) {
         if (hostOf(trigger.origin) !== context.domain) continue;
       } else if (trigger.app_category !== context.app_category) {
         continue;

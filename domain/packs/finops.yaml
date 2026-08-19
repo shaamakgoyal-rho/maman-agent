@@ -97,7 +97,10 @@ workflows:
     min_reps_with_template: 2
   - id: spend_anomaly_triage
     name: Cost anomaly triage
-    cadence: event_driven
+    # continuous, not event_driven: an anomaly has no date to watch, so an
+    # event cadence had no trigger that could ever fire. It now surfaces the
+    # moment the user's own triage pattern is verified (after_verification).
+    cadence: continuous
     signature:
       - [open, cost_anomaly, "*"]
       - [extract_field, cost_anomaly, "*"]
@@ -146,6 +149,8 @@ proactivity:
       }
     continuous_workflows: { surface: after_verification }
     event_driven_workflows: { surface: on_trigger }
+    # expense_review is weekly; without this key it could never become due.
+    weekly_workflows: { surface: same_weekday_observed }
   dismissal_learning:
     source: suggestion_history
     never_means: suppress_workflow_family # not just this pattern instance

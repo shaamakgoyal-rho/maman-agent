@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { hidePanel, onAppEvent, emitAppEvent } from "../lib/bridge.js";
 import type { PetStateName } from "../pet/machine.js";
+import { useAgentService } from "../lib/agentService.js";
 import { useSettings } from "../state/settings.js";
 import { Onboarding } from "./screens/Onboarding.js";
 import { Mother } from "./screens/Mother.js";
@@ -43,7 +44,17 @@ export function App() {
   const [reportedPetState, setReportedPetState] = useState<PetStateName | null>(null);
   const petState: PetStateName =
     reportedPetState ?? (settings.observation_paused ? "sleeping" : "looking_around");
-  const [blockingApproval] = useState(false);
+  // A staged run awaiting the user's decision holds the panel open: it was
+  // `useState(false)` with no setter, so blur/Escape hid the panel under every
+  // open approval — the guards below existed but could never engage.
+  const staged = useAgentService((s) => s.staged);
+  const blockingApproval = staged.some(
+    (run) =>
+      run.outcome.kind === "suggested" ||
+      run.outcome.kind === "shadow" ||
+      run.outcome.kind === "needs_input" ||
+      run.outcome.kind === "stale",
+  );
 
   useEffect(() => {
     void hydrate();

@@ -96,7 +96,12 @@ export const localSettingsSchema = z
     // Replay-verification gate: a pattern becomes a suggestion card only after
     // the compiled candidate has been tested against the worker's own recorded
     // runs and cleared this bar. Tunable so the demo can adjust honestly.
-    verify_min_runs: z.number().int().min(1).max(100).default(10),
+    // Default 5, not 10: detection needs only detect_min_occurrences (3)
+    // repetitions, so a 10-run floor parked every eligible pattern in Forming
+    // for 7 MORE repetitions with no other route to a card. Five usable runs
+    // still demands real independent evidence (leave-one-out needs ≥2) without
+    // making the wait longer than the workflow's own detection.
+    verify_min_runs: z.number().int().min(1).max(100).default(5),
     verify_min_match_pct: z.number().min(0).max(1).default(0.85),
     /** How many of the most recent recorded runs to replay against. */
     verify_window: z.number().int().min(1).max(100).default(21),
@@ -252,6 +257,10 @@ export const useSettings = create<SettingsStore>((set, get) => ({
         const parsed = localSettingsSchema.safeParse(JSON.parse(raw));
         if (parsed.success) {
           set({ settings: parsed.data, hydrated: true });
+          // A TIMED pause that has lapsed resumes here (and on every
+          // motherTick — see expirePauseIfDue). paused_until had writers and
+          // no readers, so "Pause for 15 minutes" was actually forever.
+          await expirePauseIfDue();
           return;
         }
       }
@@ -267,6 +276,22 @@ export const useSettings = create<SettingsStore>((set, get) => ({
     await emitAppEvent({ type: "settings_changed" });
   },
 }));
+
+/**
+ * THE READER paused_until never had: if a timed pause has lapsed, resume —
+ * persist the resume (JS owns the settings file Rust's ingest gate reads) and
+ * announce it. Called from hydrate and from every motherTick, so the longest
+ * a lapsed pause can outlive its own deadline is one tick (~60s). A pause
+ * with no deadline (plain "pause") is untouched: only the user resumes that.
+ */
+export async function expirePauseIfDue(now: Date = new Date()): Promise<boolean> {
+  const { settings, update } = useSettings.getState();
+  if (!settings.observation_paused || !settings.paused_until) return false;
+  if (now.toISOString() < settings.paused_until) return false;
+  await update({ observation_paused: false, paused_until: null });
+  await emitAppEvent({ type: "observation_changed" });
+  return true;
+}
 
 /** Pause helpers (one-click reachable from the pet menu). */
 export function pauseUntil(minutes: number | "tomorrow"): { paused_until: string } {

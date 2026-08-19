@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { emitAppEvent } from "./bridge.js";
 import { useRecommendations } from "./recommendations.js";
-import { useSettings } from "../state/settings.js";
+import { expirePauseIfDue, useSettings } from "../state/settings.js";
 
 /**
  * THE PROACTIVE LOOP, OUT OF REACT.
@@ -69,6 +69,12 @@ export async function motherTick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
+    // A lapsed TIMED pause resumes here — "Pause for 15 minutes" must not be
+    // forever. The loop is the clock: this runs every 60s regardless of what
+    // screens exist, and the resume persists to the file Rust's gate reads.
+    if (await expirePauseIfDue()) {
+      record(true, "timed pause lapsed — observation resumed");
+    }
     if (useSettings.getState().settings.observation_paused) {
       record(true, "skipped: observation paused");
       return;
@@ -79,17 +85,21 @@ export async function motherTick(): Promise<void> {
 
     const state = useRecommendations.getState();
     const hasNew = state.items.some((i) => i.entry.status === "new");
-    if (hasNew && !waving && (await state.maybeSurface())) {
+    // A due Layer-5 card is a reason to wave too — the pack calendar noticing
+    // a renewal or a close week is exactly the "mother noticing something"
+    // moment. Both paths share maybeSurface's single daily budget.
+    const hasDueProactive = state.gatedProactive().length > 0;
+    if ((hasNew || hasDueProactive) && !waving && (await state.maybeSurface())) {
       waving = true;
       await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_READY" });
-      record(true, "surfaced a suggestion");
+      record(true, hasNew ? "surfaced a suggestion" : "surfaced a due workflow");
       return;
     }
-    if (!hasNew && waving) {
+    if (!hasNew && !hasDueProactive && waving) {
       waving = false;
       await emitAppEvent({ type: "simulate_pet_event", event: "SUGGESTION_HANDLED" });
     }
-    record(true, hasNew ? "suggestion held by policy" : "nothing new");
+    record(true, hasNew || hasDueProactive ? "suggestion held by policy" : "nothing new");
   } catch (error) {
     // NOT swallowed. A background failure the user can never see is a failure
     // that never gets fixed; this is the diagnostic the Advanced view shows.

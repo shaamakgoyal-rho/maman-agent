@@ -13,9 +13,18 @@
  * Alignment model (deliberately simple, documented, and tested):
  * - Steps compare on the (target_role, semantic_type, object_type) tuple of
  *   the canonical token — timing and counts are ignored by construction.
- * - "No-op" steps (navigation/focus noise: no semantic_type AND no object_type)
- *   are skippable on both sides, so harmless reordering of no-ops never fails
- *   a run.
+ * - COMPARISON-BASIS DEGRADATION: the live AX observer emits neither
+ *   semantic_type nor object_type, so on the primary source every token ends
+ *   ":-:-". Requiring the semantic tuple there filtered BOTH sides of every
+ *   comparison to zero and parked every live pattern in `insufficient_evidence`
+ *   forever. When semantic and object are both "-" but a role or event_type is
+ *   present, steps fall back to comparing on (target_role, event_type) — a
+ *   coarser but real basis. This degrades the COMPARISON, never the gates:
+ *   the honesty refusals below (zero-step, self-referential, thresholds) are
+ *   untouched.
+ * - "No-op" steps (role, semantic AND object all absent — app activations and
+ *   navigation noise) are skippable on both sides, so harmless reordering of
+ *   no-ops never fails a run.
  * - The agent's meaningful steps must appear in order in the trace: match =
  *   every step aligned; partial = a real prefix aligned before diverging
  *   (reported with the first divergent step); miss = diverged immediately.
@@ -83,26 +92,48 @@ export type EpisodeTrace = {
   tokens: string[];
 };
 
-/** Canonical token → the comparison tuple (target_role, semantic_type, object_type). */
-function tupleOf(token: string): { role: string; semantic: string; object: string } {
+/** Canonical token → the comparison tuple (event_type, target_role, semantic_type, object_type). */
+function tupleOf(token: string): {
+  eventType: string;
+  role: string;
+  semantic: string;
+  object: string;
+} {
   const parts = token.split(":");
   return {
+    eventType: parts[2] ?? "-",
     role: parts[3] ?? "-",
     semantic: parts[4] ?? "-",
     object: parts[5] ?? "-",
   };
 }
 
-function sameStep(a: string, b: string): boolean {
-  const ta = tupleOf(a);
-  const tb = tupleOf(b);
-  return ta.role === tb.role && ta.semantic === tb.semantic && ta.object === tb.object;
+/**
+ * The comparison key for one step. Semantic tokens compare on
+ * (role, semantic, object); tokens with no semantic fields — every live AX
+ * token today — fall back to (role, event_type). The two bases are prefixed
+ * so a semantic step can never accidentally equal a fallback step.
+ */
+function comparisonKey(token: string): string {
+  const t = tupleOf(token);
+  if (t.semantic === "-" && t.object === "-") {
+    return `f|${t.role}|${t.eventType}`;
+  }
+  return `s|${t.role}|${t.semantic}|${t.object}`;
 }
 
-/** Navigation/focus noise: nothing semantic to compare. Skippable on both sides. */
+function sameStep(a: string, b: string): boolean {
+  return comparisonKey(a) === comparisonKey(b);
+}
+
+/**
+ * A true no-op: role, semantic AND object all absent (pure app_activated /
+ * navigation noise). A role-bearing token with no semantics is NOT a no-op —
+ * it is comparable on the fallback basis and counts as a meaningful step.
+ */
 function isNoOp(token: string): boolean {
   const t = tupleOf(token);
-  return t.semantic === "-" && t.object === "-";
+  return t.role === "-" && t.semantic === "-" && t.object === "-";
 }
 
 const APP_WORDS: Record<string, string> = {

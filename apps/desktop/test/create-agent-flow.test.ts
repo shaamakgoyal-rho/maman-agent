@@ -226,9 +226,49 @@ function candidate(overrides: Partial<PatternCandidate> = {}): PatternCandidate 
 
 const INTENT = "automate_record_workflow";
 
-async function createOne() {
-  return createAgentAndActivate(candidate(), INTENT, "Fill the phone field.", "phone helper");
+async function createOne(overrides: Partial<PatternCandidate> = {}) {
+  return createAgentAndActivate(
+    candidate(overrides),
+    INTENT,
+    "Fill the phone field.",
+    "phone helper",
+  );
 }
+
+/**
+ * Stamps a trace as retrievable BY ITS ID — the representative-trace join.
+ * This is the ONLY path from a candidate to a trace now: the old by-host
+ * lookup keyed on an origin deriveTrigger invented from settings, so it could
+ * compile an agent from an unrelated site's trace, and it is gone.
+ */
+function stampTrace(trace: { trace_id: string; [key: string]: unknown }): string {
+  exactTraces.set(trace.trace_id, JSON.stringify(trace));
+  return trace.trace_id;
+}
+
+/** A minimal replayable browser trace on ORIGIN, for tests that need the
+ * trace-backed (origin-bearing) creation path outside the trace describe. */
+const REP_TRACE = {
+  schema_version: 1,
+  trace_id: "018f0000-0000-7000-8000-00000000ceed",
+  started_at: "2026-08-10T09:00:00.000Z",
+  ended_at: "2026-08-10T09:02:00.000Z",
+  apps: [{ category: "browser", origin: ORIGIN }],
+  steps: [
+    {
+      order: 1,
+      surface: "browser_dom",
+      origin: ORIGIN,
+      operation: "read_field",
+      target: { role: "textbox", accessible_name: "Phone", ancestry: [], menu_path: [] },
+      value_binding: { kind: "none" },
+      preconditions: { requires_foreground: false, requires_user_presence: false },
+    },
+  ],
+  protected_segments: [],
+  pattern_event_refs: [],
+  local_only: true,
+};
 
 function matchingContext() {
   return {
@@ -281,14 +321,18 @@ describe("Create Agent is the whole verb", () => {
     expect(invokedCommands.some((c) => c.startsWith("dispatch:"))).toBe(true);
     expect(invokedCommands).not.toContain("agent_browser_evaluate");
 
-    // The trigger is on the persisted spec — derived from the pattern, not manual.
+    // The trigger is on the persisted spec — derived from the pattern, not
+    // manual, and with NO origin: this creation had no trace, and the pattern
+    // itself carries no domain evidence, so stamping one would be invention
+    // (the removed behavior welded the first GRANTED site onto every trigger).
+    // Trace-backed creations get their real origin from the compiled spec.
     const spec = record.versions[record.versions.length - 1]!.spec;
     expect(spec.trigger).toMatchObject({
       type: "context",
       app_category: "browser",
       object_type: "contact",
-      origin: ORIGIN,
     });
+    expect((spec.trigger as { origin?: string }).origin).toBeUndefined();
 
     // The shadow ran. This agent writes, and no one has supplied the value, so
     // the honest immediate outcome is the ASK — not a fixture-backed success.
@@ -378,7 +422,10 @@ describe("the agent is proactive without any screen", () => {
   });
 
   it("a non-matching context stages nothing", async () => {
-    await createOne();
+    // Trace-backed creation: the trigger's origin comes from the trace's own
+    // steps (the only honest source now — nothing invents one from settings).
+    stampTrace(REP_TRACE);
+    await createOne({ representative_trace_ref: REP_TRACE.trace_id });
     // The trigger names an origin, so the DOMAIN is the selector — a different
     // site must not wake it. (Varying only app_category is no longer a
     // non-match: ingest categorizes SaaS domains differently than the compiler
@@ -540,8 +587,8 @@ describe("Create Agent compiles from the trace when one exists", () => {
   };
 
   it("produces a spec with trace provenance, registers it, and shadows", async () => {
-    storedTrace = JSON.stringify(TRACE);
-    const result = await createOne();
+    stampTrace(TRACE);
+    const result = await createOne({ representative_trace_ref: TRACE.trace_id });
     if (!result.ok) throw new Error(`create failed: ${result.message}`);
 
     const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
@@ -559,11 +606,8 @@ describe("Create Agent compiles from the trace when one exists", () => {
   });
 
   it("refuses with the typed question when the trace cannot compile — no recipe fallback", async () => {
-    storedTrace = JSON.stringify({
-      ...TRACE,
-      steps: [{ ...TRACE.steps[0], operation: "drag_and_drop" }],
-    });
-    const result = await createOne();
+    stampTrace({ ...TRACE, steps: [{ ...TRACE.steps[0], operation: "drag_and_drop" }] });
+    const result = await createOne({ representative_trace_ref: TRACE.trace_id });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
     // The refusal names what was watched; nothing fell back to compile-learned.
@@ -605,9 +649,13 @@ describe("Create Agent compiles from the trace when one exists", () => {
     expect(spec.compiler).toBe("deterministic-local");
   });
 
-  it("a stamped candidate whose exact trace expired falls back to the origin heuristic", async () => {
-    // Nothing in exactTraces: the stamped trace was deleted or aged out.
-    storedTrace = JSON.stringify(TRACE);
+  it("a stamped candidate whose exact trace expired falls back to the LEGACY path, never a guessed host", async () => {
+    // Nothing in exactTraces: the stamped trace was deleted or aged out. The
+    // old behavior looked up "the newest trace for the origin" — but the
+    // origin it used came from settings (the first GRANTED site), not from
+    // this pattern, so it could compile from an unrelated site's evidence.
+    // No evidence now means the legacy pattern path, honestly traceless.
+    storedTrace = JSON.stringify(TRACE); // would have been the heuristic's answer
     const result = await createAgentAndActivate(
       candidate({ representative_trace_ref: "018f0000-0000-7000-8000-00000000dead" }),
       INTENT,
@@ -617,8 +665,8 @@ describe("Create Agent compiles from the trace when one exists", () => {
     if (!result.ok) throw new Error(`create failed: ${result.message}`);
     const record = useAgents.getState().agents.find((a) => a.agent_id === result.agent_id)!;
     const spec = record.versions[record.versions.length - 1]!.spec;
-    // The newest observation of the same routine is the honest substitute.
-    expect(spec.source_trace_id).toBe(TRACE.trace_id);
+    expect(spec.source_trace_id).toBeUndefined();
+    expect(invokedCommands).not.toContain("action_trace_lookup");
   });
 });
 
@@ -696,9 +744,9 @@ describe("capabilities follow permissions LIVE — no restart, no snapshot", () 
     useSettings.setState({ settings: DEFAULT_SETTINGS, hydrated: false });
     __resetAgentServiceForTests();
     await bootAgentService();
-    storedTrace = JSON.stringify(WRITE_TRACE);
+    stampTrace(WRITE_TRACE);
 
-    const first = await createOne();
+    const first = await createOne({ representative_trace_ref: WRITE_TRACE.trace_id });
     expect(first.ok).toBe(false);
     if (first.ok || !("needs_permission" in first)) throw new Error("expected the question");
     expect(first.needs_permission.origin).toBe(ORIGIN);
@@ -707,7 +755,7 @@ describe("capabilities follow permissions LIVE — no restart, no snapshot", () 
     // The grant persists EXACTLY that origin and the same click completes.
     const second = await grantOriginAndRetry(
       ORIGIN,
-      candidate(),
+      candidate({ representative_trace_ref: WRITE_TRACE.trace_id }),
       INTENT,
       "Fill the phone field.",
       "phone helper",
@@ -752,8 +800,8 @@ describe("the answer → approve → execute → readback loop, through the UI's
   };
 
   it("the user's answer reaches the browser adapter, the approval executes, readback verifies", async () => {
-    storedTrace = JSON.stringify(INPUT_TRACE);
-    const created = await createOne();
+    stampTrace(INPUT_TRACE);
+    const created = await createOne({ representative_trace_ref: INPUT_TRACE.trace_id });
     if (!created.ok) throw new Error(`create failed: ${created.message}`);
     // Creation's own shadow honestly asks — the input has no value yet.
     expect(created.shadow.status).toBe("needs_input");
@@ -793,8 +841,8 @@ describe("the answer → approve → execute → readback loop, through the UI's
   });
 
   it("a page that changed after approval aborts with nothing written", async () => {
-    storedTrace = JSON.stringify(INPUT_TRACE);
-    const created = await createOne();
+    stampTrace(INPUT_TRACE);
+    const created = await createOne({ representative_trace_ref: INPUT_TRACE.trace_id });
     if (!created.ok) throw new Error("create failed");
     await emitAppEvent(matchingContext());
     await settled();
@@ -854,11 +902,11 @@ describe("EXTENSION-FREE: a native (macos_ax) trace is the whole journey", () =>
   };
 
   it("one click compiles, registers, triggers, answers, approves, EXECUTES — no extension", async () => {
-    storedTrace = JSON.stringify(NATIVE_TRACE);
+    stampTrace(NATIVE_TRACE);
     // The status honestly reports the NATIVE lane, not the extension relay.
     relayLane = "native";
 
-    const created = await createOne();
+    const created = await createOne({ representative_trace_ref: NATIVE_TRACE.trace_id });
     if (!created.ok) throw new Error(`create failed: ${created.message}`);
     const record = useAgents.getState().agents.find((a) => a.agent_id === created.agent_id)!;
     const spec = record.versions[record.versions.length - 1]!.spec;

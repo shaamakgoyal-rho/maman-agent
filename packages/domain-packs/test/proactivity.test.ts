@@ -524,3 +524,79 @@ describe("outcome rows are privacy-safe training features", () => {
     expect(o.workflow_id).toBeNull();
   });
 });
+
+describe("continuous workflows are due after verification, unreachable before", () => {
+  // Every shipped continuous workflow used to return not_due unconditionally —
+  // "surface: after_verification" was declared by both packs and honored by
+  // nothing. These pin the new semantics: verified evidence makes it due,
+  // no evidence refuses with the honest reason.
+  const continuous = [...finops.workflows, ...revops.workflows].filter(
+    (w) => w.cadence === "continuous",
+  );
+
+  it("the packs still ship continuous workflows (else these tests go stale)", () => {
+    expect(continuous.length).toBeGreaterThan(0);
+  });
+
+  it("fires with after_verification surface once the signal carries evidence", () => {
+    for (const pack of [finops, revops]) {
+      const decisions = evaluateProactivity([pack], {
+        now: at(2026, 8, 10), // mid-period: nothing calendar-driven fires
+        calendar: CAL,
+        quiet_periods: [],
+        signals: pack.workflows
+          .filter((w) => w.cadence === "continuous")
+          .map((w) => ({ workflow_id: w.id, runs_matched: 9, runs_tested: 10 })),
+      });
+      const fired = decisions.filter((d) => d.fires);
+      expect(fired.length).toBeGreaterThan(0);
+      for (const d of fired) {
+        if (d.fires) expect(d.card.surface).toBe("after_verification");
+      }
+    }
+  });
+
+  it("refuses an unverified signal as 'unverified', never as due", () => {
+    const decisions = evaluateProactivity([finops], {
+      now: at(2026, 8, 10),
+      calendar: CAL,
+      quiet_periods: [],
+      signals: finops.workflows
+        .filter((w) => w.cadence === "continuous")
+        .map((w) => ({ workflow_id: w.id })), // no replay evidence
+    });
+    expect(decisions.some((d) => d.fires)).toBe(false);
+    expect(decisions.some((d) => !d.fires && d.reason === "unverified")).toBe(true);
+  });
+});
+
+describe("every shipped workflow has a reachable cadence", () => {
+  // The cross-check that found 8 of 12 workflows dead: a workflow whose
+  // cadence has no timing/trigger/calendar to schedule against can never fire.
+  it("no workflow is structurally unreachable", () => {
+    for (const pack of [finops, revops]) {
+      for (const wf of pack.workflows) {
+        const timing = pack.proactivity.suggestion_timing[`${wf.cadence}_workflows`];
+        if (wf.cadence === "fiscal_monthly") {
+          expect(pack.proactivity.calendar, `${pack.domain}/${wf.id}`).toBe("fiscal");
+          expect(
+            timing?.days_before ?? wf.pre_stage?.days_before_close,
+            `${pack.domain}/${wf.id} needs a pre-close lead`,
+          ).toBeDefined();
+        } else if (wf.cadence === "weekly" || wf.cadence === "continuous") {
+          expect(
+            timing,
+            `${pack.domain}/${wf.id} needs ${wf.cadence}_workflows timing`,
+          ).toBeDefined();
+        } else {
+          // date/event driven: some trigger must carry a schedulable lead.
+          const lead = pack.proactivity.event_triggers.some((t) => t.lead_days !== undefined);
+          expect(
+            lead || wf.pre_stage?.days_before_renewal !== undefined,
+            `${pack.domain}/${wf.id} needs an event trigger with lead_days`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+});

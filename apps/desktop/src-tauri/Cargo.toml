@@ -27,6 +27,14 @@ rand = "0.8"
 thiserror = "2"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Schedule triggers: cron parsing + IANA timezones. Versions taken from the
+# crates.io resolver on 2026-08-18; every release is past the 3-day cooldown
+# (croner 3.0.1 2025-10-27, chrono 0.4.45 2026-06-04, chrono-tz 0.10.4
+# 2025-07-11). Cargo has no cooldown config key, so the age check is manual
+# and the committed Cargo.lock pins the resolution.
+croner = "3.0.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tempfile = "3"

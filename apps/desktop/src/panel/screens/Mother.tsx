@@ -37,7 +37,7 @@ import type { PetStateName } from "../../pet/machine.js";
  */
 export function Mother({ petState }: { petState: PetStateName }) {
   const { settings, update } = useSettings();
-  const { items, forming, hydrated, refresh, act } = useRecommendations();
+  const { items, forming, hydrated, refresh, act, gatedProactive } = useRecommendations();
   const { creation, staged } = useAgentService();
   const agents = useAgents((s) => s.agents);
   const [busy, setBusy] = useState(false);
@@ -56,9 +56,26 @@ export function Mother({ petState }: { petState: PetStateName }) {
     void refresh();
   }, [refresh]);
 
+  // ONE suggestion at a time (computed below); this effect marks it VIEWED the
+  // moment it renders. Nothing dispatched "viewed" before, so a surfaced
+  // suggestion stayed status:"new" forever — hasNew never released, the
+  // waving latch never reset, and no later suggestion could ever surface.
+  const topSignature = items.find((i) => i.entry.status === "new")?.signature;
+  useEffect(() => {
+    if (topSignature) void act(topSignature, { type: "viewed" });
+  }, [topSignature, act]);
+
   const paused = settings.observation_paused;
   // ONE suggestion: the freshest thing Maman has not been told to ignore.
-  const top: RecommendationWithState | undefined = items.find((i) => i.entry.status === "new");
+  // "viewed" stays visible — it means "seen, not yet decided". Only an actual
+  // decision (accept/snooze/dismiss) clears the card; the viewed transition
+  // exists to release the mother loop's waving latch, not to hide anything.
+  const top: RecommendationWithState | undefined = items.find(
+    (i) => i.entry.status === "new" || i.entry.status === "viewed",
+  );
+  // Layer 5: pack workflows the calendar says are due, already policy-gated
+  // (budget, quiet hours, quiet periods, per-pattern snoozes) by the store.
+  const proactiveDue = gatedProactive();
   const liveAgents = agents.filter((a) => a.state !== "archived" && a.state !== "revoked");
 
   const create = async (item: RecommendationWithState) => {
@@ -297,6 +314,40 @@ export function Mother({ petState }: { petState: PetStateName }) {
           </div>
         </Card>
       )}
+
+      {/* --------------------------------- due now (pack-calendar workflows) */}
+      {/* Layer 5 used to be computed and thrown away: `proactive` had no
+          reader, so a renewal 23 days out or a close-week checklist never
+          reached the person it was computed for. One card per due workflow,
+          copy from the pack (or the honest date fact when the pack copy could
+          not be rendered), actions wired to the same suggestion ledger. */}
+      {proactiveDue.map((item) => (
+        <Card key={`${item.card.pack_domain}:${item.card.workflow_id}`}>
+          <SectionTitle>{item.card.workflow_name}</SectionTitle>
+          <p className="mt-1 text-sm">
+            {item.card.copy ??
+              (item.card.days_out !== undefined
+                ? `Coming up in ${item.card.days_out} ${item.card.days_out === 1 ? "day" : "days"}.`
+                : `Due ${item.card.due_date}.`)}
+          </p>
+          {item.signature && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => void act(item.signature!, { type: "snoozed", option: "1w" })}
+              >
+                Not now
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => void act(item.signature!, { type: "never_suggest" })}
+              >
+                Never suggest this
+              </Button>
+            </div>
+          )}
+        </Card>
+      ))}
 
       {/* ------------------------- proposals, questions, approvals, receipts */}
       {staged.length > 0 && (

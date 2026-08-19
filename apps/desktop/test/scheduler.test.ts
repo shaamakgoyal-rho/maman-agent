@@ -43,20 +43,24 @@ describe("slow idle (acceptance 8)", () => {
 });
 
 describe("transient playback (acceptance 9)", () => {
-  it("plays a transient three complete cycles, then enters slow idle", () => {
+  it("waving is a BEACON: three wave cycles, one quiet idle cycle, then waves AGAIN", () => {
     const { scheduler, frames } = makeScheduler();
     scheduler.play(planForState("waving", false));
     const cycleMs = 140 + 140 + 140 + 280;
-    // run all three wave cycles
+    // run all three wave cycles of the burst
     vi.advanceTimersByTime(cycleMs * 3 - 1);
     const waveFrames = frames.filter((f) => f.row === ANIMATIONS.waving.row);
     expect(waveFrames.length).toBe(3 * 4);
-    // next tick lands in slow idle
+    // next tick lands in the quiet rest (slow idle)
     vi.advanceTimersByTime(1);
     expect(frames.at(-1)).toEqual({ row: 0, column: 0 });
-    // and slow idle keeps looping (never returns to the wave row)
-    vi.advanceTimersByTime(20_000);
-    expect(frames.slice(3 * 4).every((f) => f.row === 0)).toBe(true);
+    // …and after ONE slow-idle cycle the wave row RETURNS. The machine holds
+    // `waving` until the suggestion is handled; the old one-shot transient
+    // settled into idle forever, leaving the pet indistinguishable from
+    // having nothing to say.
+    const idleMs = 1680 + 660 + 660 + 840 + 840 + 1920;
+    vi.advanceTimersByTime(idleMs);
+    expect(frames.at(-1)!.row).toBe(ANIMATIONS.waving.row);
     scheduler.cancel();
   });
 

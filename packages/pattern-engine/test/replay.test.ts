@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  evaluateVerification,
   humanizeToken,
   replayAgainstTrace,
   replayCandidate,
+  replayCandidateLeaveOneOut,
   type EpisodeTrace,
 } from "../src/replay.js";
 
@@ -111,5 +113,68 @@ describe("humanizeToken", () => {
   it("renders card-ready plain language", () => {
     expect(humanizeToken(EDIT_CRM)).toBe("update record on account records in your CRM");
     expect(humanizeToken(EXPORT)).toBe("export table on account records in your spreadsheet");
+  });
+});
+
+/**
+ * COMPARISON-BASIS DEGRADATION for the primary source. The live AX observer
+ * emits neither semantic_type nor object_type, so every real token ends
+ * ":-:-". These tests pin that such tokens compare on (role, event_type)
+ * instead of being discarded — the old isNoOp filtered BOTH sides of every
+ * live comparison to zero, every fold returned insufficient_evidence, and no
+ * novel pattern could ever verify at any occurrence count.
+ */
+describe("live AX tokens (no semantic/object) verify on the fallback basis", () => {
+  const LIVE_OPEN = "macos_ax:crm:element_focused:textbox:-:-";
+  const LIVE_EDIT = "macos_ax:crm:value_changed:textbox:-:-";
+  const LIVE_SAVE = "macos_ax:crm:element_pressed:button:-:-";
+  const PURE_NOISE = "macos_ax:crm:app_activated:-:-:-";
+  const LIVE_RUN = [LIVE_OPEN, LIVE_EDIT, LIVE_SAVE];
+
+  it("role+event tokens are meaningful steps, not no-ops", () => {
+    const r = replayAgainstTrace(LIVE_RUN, trace("l1", [PURE_NOISE, ...LIVE_RUN, PURE_NOISE]));
+    expect(r.verdict).toBe("match");
+    expect(r.expected_steps).toBe(3);
+    expect(r.aligned_steps).toBe(3);
+  });
+
+  it("the fallback basis still detects divergence (different role/event)", () => {
+    const r = replayAgainstTrace(
+      LIVE_RUN,
+      trace("l2", [LIVE_OPEN, "macos_ax:crm:element_pressed:link:-:-"]),
+    );
+    expect(r.verdict).toBe("partial");
+    expect(r.divergence_step).toBe(2);
+  });
+
+  it("≥5 live-shaped episodes reach verified: true under leave-one-out", () => {
+    const traces = Array.from({ length: 5 }, (_, i) =>
+      trace(`l${i}`, LIVE_RUN, `2026-07-3${0 + (i % 2)}T1${i}:00:00.000Z`),
+    );
+    const report = replayCandidateLeaveOneOut(traces, (training) => training[0]!.tokens, 21);
+    expect(report.runs_tested - report.runs_insufficient).toBe(5);
+    expect(report.meaningful_expected_steps).toBe(3);
+    const outcome = evaluateVerification(report, { min_runs: 5, min_match_pct: 0.85 });
+    expect(outcome).toEqual({ verified: true });
+  });
+
+  it("pure-noise tokens (no role either) still refuse as insufficient", () => {
+    const noise = [PURE_NOISE, PURE_NOISE, PURE_NOISE];
+    const traces = Array.from({ length: 5 }, (_, i) =>
+      trace(`n${i}`, noise, `2026-07-30T1${i}:00:00.000Z`),
+    );
+    const report = replayCandidateLeaveOneOut(traces, (training) => training[0]!.tokens, 21);
+    expect(report.runs_insufficient).toBe(5);
+    expect(report.meaningful_expected_steps).toBe(0);
+    const outcome = evaluateVerification(report, { min_runs: 5, min_match_pct: 0.85 });
+    expect(outcome.verified).toBe(false);
+  });
+
+  it("a semantic step never equals a fallback step of the same role", () => {
+    // Same role "field", but one side carries semantics and the other does not:
+    // the two bases must not cross-match.
+    const semantic = ["macos_ax:crm:record_update:textbox:update_record:account"];
+    const r = replayAgainstTrace(semantic, trace("x1", ["macos_ax:crm:record_update:textbox:-:-"]));
+    expect(r.verdict).toBe("miss");
   });
 });

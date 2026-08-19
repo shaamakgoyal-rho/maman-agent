@@ -95,7 +95,10 @@ workflows:
     notes: bulk_update policy applies when >10 records in one episode
   - id: meeting_logging
     name: Post-meeting CRM logging
-    cadence: event_driven
+    # continuous, not event_driven: no watchable date exists for "a meeting
+    # ended", so the event cadence had no trigger that could ever fire. It now
+    # surfaces once the user's own logging pattern is verified.
+    cadence: continuous
     signature:
       - [open, activity_log, "*"]
       - [extract_field, activity_log, "*"]
@@ -132,7 +135,9 @@ policy:
 
 # ---------- Layer 5: proactivity tuning ----------
 proactivity:
-  calendar: none # RevOps is event/date-driven, not fiscal-periodic
+  # fiscal, not none: commission_reconciliation is a fiscal_monthly workflow,
+  # and with calendar "none" it could never become due at all.
+  calendar: fiscal
   event_triggers:
     - {
         watch: renewal,
@@ -140,10 +145,18 @@ proactivity:
         lead_days: 30,
         copy: "{account}'s renewal is {days} out. I can draft the renewal packet — matched {runs_matched}/{runs_tested} on past renewals.",
       }
-    - { watch: lead, condition: new_unrouted, surface: on_trigger }
+    # lead_days makes the trigger schedulable: without it the lead trigger
+    # could never compute a due window and lead_routing was unreachable.
+    - { watch: lead, condition: new_unrouted, surface: on_trigger, lead_days: 1 }
   suggestion_timing:
     weekly_workflows: { surface: same_weekday_observed } # suggest the sweep when they usually do it
     continuous_workflows: { surface: after_verification }
+    fiscal_monthly_workflows:
+      {
+        surface: pre_close,
+        days_before: 3,
+        copy: "Close starts {date}. I can pre-stage {workflow} — last cycle matched {runs_matched}/{runs_tested}.",
+      }
   dismissal_learning:
     source: suggestion_history
     never_means: suppress_workflow_family
