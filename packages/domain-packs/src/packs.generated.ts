@@ -367,7 +367,7 @@ export const SHIPPED_PACKS: DomainPack[] = [
       {
         "id": "spend_anomaly_triage",
         "name": "Cost anomaly triage",
-        "cadence": "event_driven",
+        "cadence": "continuous",
         "signature": [
           [
             "open",
@@ -501,6 +501,9 @@ export const SHIPPED_PACKS: DomainPack[] = [
         },
         "event_driven_workflows": {
           "surface": "on_trigger"
+        },
+        "weekly_workflows": {
+          "surface": "same_weekday_observed"
         }
       },
       "dismissal_learning": {
@@ -873,7 +876,7 @@ export const SHIPPED_PACKS: DomainPack[] = [
       {
         "id": "meeting_logging",
         "name": "Post-meeting CRM logging",
-        "cadence": "event_driven",
+        "cadence": "continuous",
         "signature": [
           [
             "open",
@@ -994,7 +997,7 @@ export const SHIPPED_PACKS: DomainPack[] = [
       }
     },
     "proactivity": {
-      "calendar": "none",
+      "calendar": "fiscal",
       "quiet_periods": [],
       "event_triggers": [
         {
@@ -1005,6 +1008,7 @@ export const SHIPPED_PACKS: DomainPack[] = [
         },
         {
           "watch": "lead",
+          "lead_days": 1,
           "condition": "new_unrouted",
           "surface": "on_trigger"
         }
@@ -1015,6 +1019,11 @@ export const SHIPPED_PACKS: DomainPack[] = [
         },
         "continuous_workflows": {
           "surface": "after_verification"
+        },
+        "fiscal_monthly_workflows": {
+          "surface": "pre_close",
+          "days_before": 3,
+          "copy": "Close starts {date}. I can pre-stage {workflow} — last cycle matched {runs_matched}/{runs_tested}."
         }
       },
       "dismissal_learning": {

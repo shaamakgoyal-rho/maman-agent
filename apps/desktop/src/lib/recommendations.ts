@@ -16,9 +16,15 @@ import { create } from "zustand";
 import { z } from "zod";
 import { emitAppEvent, invokeCommand, isTauri } from "./bridge.js";
 import { getMemoryRawEvents } from "./events.js";
-import { canSurfaceSuggestion, snoozeUntil, type SnoozeOption } from "./suggestion-policy.js";
+import {
+  canSurfaceSuggestion,
+  snoozeUntil,
+  type SnoozeOption,
+  type SurfacingContext,
+} from "./suggestion-policy.js";
 import {
   familySuppressed,
+  gateProactiveCard,
   nearestWatchedDates,
   outcomeFor,
   proactiveCards,
@@ -162,9 +168,42 @@ type RecommendationsStore = {
   ) => Promise<void>;
   /** Whether the pet may wave right now (policy-gated); records surfacing. */
   maybeSurface: () => Promise<boolean>;
+  /**
+   * The proactive (Layer 5) cards that pass the surfacing gate RIGHT NOW —
+   * quiet periods (queued_until), daily budget, quiet hours and per-pattern
+   * snoozes all respected. This is the list a screen may render; `proactive`
+   * is the raw computation.
+   */
+  gatedProactive: () => ProactiveItem[];
 };
 
 const DEFAULT_STATE: SuggestionState = suggestionStateSchema.parse({});
+
+/**
+ * The ONE SurfacingContext both surfacing paths share. `maybeSurface` (the
+ * pet's wave) and `gatedProactive` (the rendered Layer-5 cards) must apply the
+ * same policy with the same numbers, or the pet waves about a card the panel
+ * refuses to show.
+ */
+function surfacingContext(state: SuggestionState, snoozedUntil: string | null): SurfacingContext {
+  const settings = useSettings.getState().settings;
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    now: new Date(),
+    observation_paused: settings.observation_paused,
+    private_context: false,
+    fullscreen_or_presenting: false,
+    screen_sharing: false,
+    surfaced_today: state.surfaced_dates.filter((d) => d === today).length,
+    daily_budget: settings.suggestion_budget_daily,
+    quiet_hours_start: settings.quiet_hours_start,
+    quiet_hours_end: settings.quiet_hours_end,
+    attention_required: false,
+    idle_seconds: 60,
+    just_completed_workflow: true,
+    snoozed_until: snoozedUntil,
+  };
+}
 
 /**
  * The closed reason vocabulary the outcome ledger accepts. A dismissal reason
@@ -662,27 +701,16 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
 
   maybeSurface: async () => {
     const { state, items } = get();
-    const settings = useSettings.getState().settings;
     const fresh = items.filter((i) => i.entry.status === "new");
-    if (fresh.length === 0) return false;
-    const today = new Date().toISOString().slice(0, 10);
-    const surfacedToday = state.surfaced_dates.filter((d) => d === today).length;
-    const decision = canSurfaceSuggestion({
-      now: new Date(),
-      observation_paused: settings.observation_paused,
-      private_context: false,
-      fullscreen_or_presenting: false,
-      screen_sharing: false,
-      surfaced_today: surfacedToday,
-      daily_budget: settings.suggestion_budget_daily,
-      quiet_hours_start: settings.quiet_hours_start,
-      quiet_hours_end: settings.quiet_hours_end,
-      attention_required: false,
-      idle_seconds: 60,
-      just_completed_workflow: true,
-      snoozed_until: fresh[0]!.entry.snoozed_until,
-    });
+    // A due proactive card is a surfacing too: it draws on the SAME daily
+    // budget, so a chatty pack cannot spend attention a real pattern earned.
+    const dueProactive = get().gatedProactive();
+    if (fresh.length === 0 && dueProactive.length === 0) return false;
+    const decision = canSurfaceSuggestion(
+      surfacingContext(state, fresh[0]?.entry.snoozed_until ?? null),
+    );
     if (!decision.allowed) return false;
+    const today = new Date().toISOString().slice(0, 10);
     const next = suggestionStateSchema.parse({
       ...state,
       surfaced_dates: [...state.surfaced_dates, today].slice(-50),
@@ -690,5 +718,22 @@ export const useRecommendations = create<RecommendationsStore>((set, get) => ({
     await saveStateRaw(JSON.stringify(next));
     set({ state: next });
     return true;
+  },
+
+  gatedProactive: () => {
+    const { state, proactive } = get();
+    return proactive.filter((item) => {
+      // Per-pattern snooze/dismissal is respected when the card is backed by a
+      // tracked pattern; a pure calendar card has no entry to consult.
+      const entry = item.signature ? state.entries[item.signature] : undefined;
+      if (entry && (entry.status === "dismissed" || entry.status === "accepted")) return false;
+      const gate = gateProactiveCard(
+        item.card,
+        surfacingContext(state, entry?.snoozed_until ?? null),
+      );
+      // `queued_until` (a pack quiet period) is a hold, not a drop — the card
+      // simply does not render until the release date.
+      return gate.surface;
+    });
   },
 }));

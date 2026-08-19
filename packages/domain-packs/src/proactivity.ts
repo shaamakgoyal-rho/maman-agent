@@ -361,6 +361,8 @@ export type SkipReason =
   | "calendar_not_fiscal"
   | "no_watched_date"
   | "wrong_weekday"
+  /** A continuous workflow whose pattern has no verified evidence yet. */
+  | "unverified"
   | "suppressed_never_family"
   | "suppressed_never_pattern"
   | "suppressed_backoff";
@@ -585,10 +587,26 @@ function timingFor(
       };
     }
 
-    case "continuous":
-      // Nothing calendar-driven: these surface after verification, which the
-      // existing detection path already owns.
-      return { due: false, reason: "not_due" };
+    case "continuous": {
+      // AFTER-VERIFICATION semantics, exactly what the packs declare
+      // (`continuous_workflows: { surface: after_verification }`). A
+      // continuous workflow has no calendar to be due on; it is due when the
+      // user's own pattern for it carries verified replay evidence — the
+      // moment Maman can honestly offer to take it over. Unconditionally
+      // returning not_due here made every continuous workflow unreachable.
+      // The dismissal ladder still applies downstream, so this cannot nag.
+      if (!timing) return { due: false, reason: "not_due" };
+      if (signal.runs_matched === undefined || signal.runs_tested === undefined) {
+        return { due: false, reason: "unverified" };
+      }
+      return {
+        due: true,
+        surface: "after_verification",
+        copy: timing.copy,
+        reference_date: undefined,
+        days_out: undefined,
+      };
+    }
   }
 }
 
